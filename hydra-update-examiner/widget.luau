@@ -9,6 +9,7 @@ local commandSequence = 0
 local status = nil
 local serviceReady = false
 local pendingAction = nil
+local hovered = false
 
 local function widgetCfg(key)
     return noctalia.getConfig(key)
@@ -40,14 +41,34 @@ local function acceptsStatus(nextStatus)
 end
 
 local function presentationFor(state)
+    local shared = widgetCfg("use_shared_presentation") ~= false
     if state == "launched" then
+        if shared then
+            return widgetCfg("shared_launched_glyph"), widgetCfg("shared_launched_color")
+        end
         return widgetCfg("launched_glyph"), widgetCfg("launched_color")
     elseif state == "close" then
+        if shared then
+            return widgetCfg("shared_close_glyph"), widgetCfg("shared_close_color")
+        end
         return widgetCfg("close_glyph"), widgetCfg("close_color")
     elseif state == "stalled" or state == "stale" or state == "error" then
+        if shared then
+            return widgetCfg("shared_stalled_glyph"), widgetCfg("shared_stalled_color")
+        end
         return widgetCfg("stalled_glyph"), widgetCfg("stalled_color")
     end
+    if shared then
+        return widgetCfg("shared_running_glyph"), widgetCfg("shared_running_color")
+    end
     return widgetCfg("running_glyph"), widgetCfg("running_color")
+end
+
+local function displayMode()
+    if widgetCfg("use_shared_presentation") ~= false then
+        return tostring(widgetCfg("shared_display_mode") or "always")
+    end
+    return tostring(widgetCfg("display_mode") or "always")
 end
 
 local function render(nextStatus, force)
@@ -73,7 +94,8 @@ local function render(nextStatus, force)
     end
 
     local text = tostring(current.text or "HYD")
-    if widgetCfg("display_mode") == "icon_only" then
+    local mode = displayMode()
+    if mode == "icon_only" or (mode == "on_hover" and not hovered) then
         text = ""
     end
 
@@ -92,9 +114,12 @@ local function render(nextStatus, force)
 end
 
 local function sendNow(action)
-    commandSequence = commandSequence + 1
+    local previous = noctalia.state.get(COMMAND_KEY)
+    local previousSequence = if type(previous) == "table" then tonumber(previous.sequence) or 0 else 0
+    commandSequence = math.max(commandSequence, previousSequence) + 1
     noctalia.state.set(COMMAND_KEY, {
         action = action,
+        producer = "widget",
         sequence = commandSequence,
     })
 end
@@ -130,7 +155,12 @@ function onClick()
 end
 
 function onRightClick()
-    send("open")
+    noctalia.togglePanel("goober/hydra-update-examiner:actions")
+end
+
+function onHover(entered)
+    hovered = entered == true
+    render(noctalia.state.get(STATUS_KEY), true)
 end
 
 function onIpc(event, _payload)

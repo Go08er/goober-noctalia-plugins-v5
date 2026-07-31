@@ -34,22 +34,32 @@ checks:
 - source addition through IPC and lazy Git cloning on enable;
 - root `catalog.toml` discovery from a no-checkout Git cache;
 - export into Noctalia's managed materialized-plugin directory;
-- layer-shell, plugin discovery, service startup, and widget construction;
+- layer-shell, plugin discovery, service startup, and construction of two
+  widgets plus the attached panel;
+- shared presentation defaults and per-placement appearance overrides;
 - service and widget IPC dispatch;
 - the widget-to-service open action;
-- guest-only service and widget hot reload;
+- `on_hover` hidden and visible rendering through the production callback;
+- panel rendering plus its documentation and API 15 scoped-settings actions;
+- guest-only service, widget, and panel hot reload;
 - the real shell helper against fixed Hydra responses; and
-- a `grim` capture of the headless output.
+- `grim` captures of the bar, hover states, action panel, and settings surface.
 
 The fixture is an integration boundary, not a replacement for parser tests.
 Recorded response fixtures for every Hydra state remain a separate milestone.
 
 ## Last result
 
-The automated run passed on 2026-07-31 against the pinned beta.7 host while the
-plugin retained API 3. It passed native lint/config validation and exercised
-Git-source cloning, catalog discovery, plugin materialization, the rendered
-`Launched` state, service/widget IPC, the open action, both hot-reload paths,
-screenshot capture, and clean shutdown. Pointer clicks, settings-panel
-interaction, manifest reload, a live GitHub network clone, and the remaining
-Hydra states still require exploratory VM coverage.
+The automated run passed on 2026-07-31 against the pinned beta.7 host with
+plugin API 15. It passed native lint/config validation and exercised Git-source
+cloning, catalog discovery, plugin materialization, two presentation scopes,
+the rendered `Launched` state, service/widget IPC, hover state rendering, the
+attached panel, documentation and scoped-settings actions, all three hot-reload
+paths, screenshot capture, and clean shutdown.
+
+The headless compositor exposes no physical pointer, so the automated hover
+probe calls the production `onHover(true)` callback through a temporary guest
+hot reload and confirms that the rendered crop changes. Physical pointer
+dispatch, actual button presses and settings edits, manifest reload, a live
+GitHub network clone, and the remaining Hydra states still require exploratory
+VM coverage.

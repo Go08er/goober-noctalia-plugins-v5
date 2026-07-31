@@ -15,7 +15,7 @@ source using one of the methods below.
 
 | Plugin | Version | Status |
 | --- | --- | --- |
-| `goober/hydra-update-examiner` | `0.1.0` | Beta.7/API 3 VM-tested; retained shell backend |
+| `goober/hydra-update-examiner` | `0.2.0` | Beta.7/API 15, VM-validated |
 
 ## Repository layout
 
@@ -25,6 +25,7 @@ hydra-update-examiner/
   plugin.toml
   README.md
   thumbnail.webp
+  panel.luau
   service.luau
   widget.luau
   translations/en.json
@@ -37,11 +38,10 @@ tests/vm/
 
 Noctalia v5 discovers Git sources through `catalog.toml`. Each plugin lives in
 a root directory matching the plugin part of its `author/plugin` id. The source
-and manifest both declare `plugin_api = 3`, intentionally retaining the oldest
-compatibility level that provides every capability used by this port. The
-v5.0.0-beta.7 host accepts cumulative plugin API levels through 20, so adopting
-a newer level without using one of its capabilities would only narrow host
-compatibility.
+and manifest both declare `plugin_api = 15`. The port now uses API 14 widget
+gesture defaults for its attached right-click action panel and API 15's scoped
+plugin-settings opener. The v5.0.0-beta.7 host accepts cumulative plugin API
+levels through 20.
 
 ## Install from GitHub
 
@@ -97,6 +97,9 @@ enabled = true
 
 [widget.hydra-readiness]
 type = "goober/hydra-update-examiner:hydra"
+
+[plugin_settings."goober/hydra-update-examiner"]
+shared_display_mode = "on_hover"
 ```
 
 Add `hydra-readiness` to the desired bar section using the rest of your normal
@@ -141,6 +144,11 @@ configuration reload. If the Git and path sources are both present, source
 ordering determines which copy supplies a duplicate plugin ID; remove or
 disable the Git source while developing if you want to avoid that ambiguity.
 
+The plugin gear exposes the channel, polling, threshold, text mode, four state
+colors, and four glyphs as shared defaults. Middle-click a placed widget to use
+shared appearance or reveal per-placement overrides. Right-click opens the
+native action panel.
+
 Run the repository checks with:
 
 ```bash
@@ -155,9 +163,10 @@ nix build -L .#vm-test
 
 The VM harness is pinned to the exact beta.7 host revision. It uses an in-guest
 Git source, headless Sway, software rendering, and fixed Hydra responses to
-check catalog discovery, clone and materialization, real plugin/service/widget
-startup, IPC, the open action, hot reload, and a guest screenshot without
-touching the host Noctalia session or configuration. The complete beta.7/API 3
+check catalog discovery, clone and materialization, shared and overridden
+widget presentation, hover rendering, the attached action panel, documentation
+and scoped-settings actions, IPC, hot reload, and guest screenshots without
+touching the host Noctalia session or configuration. The complete beta.7/API 15
 run passed on 2026-07-31. See `tests/vm/README.md` for details.
 
 ## Editor setup

@@ -2,6 +2,24 @@
 
 All notable staging changes will be recorded here.
 
+## 0.2.0 - Customization parity
+
+- Restore all 13 v4-style controls to the plugin settings page as shared data
+  and appearance defaults.
+- Preserve v5 per-placement appearance controls behind an explicit **Use shared
+  appearance** toggle, without hiding core color or glyph choices as Advanced.
+- Restore hover-only readiness text through the native `onHover` callback.
+- Add a native attached action panel with Refresh, Open Hydra, Plugin settings,
+  and Documentation commands.
+- Declare an overridable right-click action and target plugin API 15 for native
+  gesture defaults and scoped settings opening.
+- Add v4-to-v5 settings mapping and clearer plugin-versus-widget settings
+  documentation.
+- Pass the complete beta.7/API 15 VM integration gate with shared and override
+  placements, hover rendering, the attached panel, documentation and scoped
+  settings actions, all three hot-reload paths, screenshots, and clean
+  shutdown.
+
 ## 0.1.0 - Public test candidate
 
 - Start a native Noctalia v5 source repository layout.
