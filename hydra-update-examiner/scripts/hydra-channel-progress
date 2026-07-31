@@ -1,0 +1,610 @@
+#!/usr/bin/env bash
+set -u
+
+base_url="https://hydra.nixos.org"
+channel="nixos-unstable"
+running_color="secondary"
+stalled_color="error"
+close_color="tertiary"
+launched_color="primary"
+running_icon="server-bolt"
+stalled_icon="server-off"
+close_icon="server-spark"
+launched_icon="rocket"
+close_threshold="90"
+project="nixos"
+jobset="unstable"
+gate_job="tested"
+gate_label="tested"
+channel_rev_url=""
+channel_rev=""
+channel_short_rev=""
+channel_revision_status="unknown"
+evals_url=""
+eval_id=""
+eval_url=""
+eval_short_rev=""
+eval_html=""
+eval_json=""
+transport_error=""
+
+usage() {
+  cat <<'EOF'
+Usage: hydra-channel-progress [options]
+
+Options:
+  --channel CHANNEL          Channel to inspect. Default: nixos-unstable.
+  --running-color KEY        Noctalia color key for normal progress.
+  --stalled-color KEY        Noctalia color key for blocked/error states.
+  --close-color KEY          Noctalia color key for close-to-ready states.
+  --launched-color KEY       Noctalia color key for published/latest state.
+  --running-icon NAME        Icon name for normal progress.
+  --stalled-icon NAME        Icon name for blocked/error states.
+  --close-icon NAME          Icon name for close-to-ready states.
+  --launched-icon NAME       Icon name for published/latest state.
+  --close-threshold 1..100   Percent where the close state begins.
+  -h, --help                 Show this help.
+
+Supported channels:
+  nixos-unstable, nixos-unstable-small, nixos-stable, nixos-stable-small,
+  nixos-YY.MM, nixos-YY.MM-small, nixpkgs-unstable.
+EOF
+}
+
+emit_without_jq() {
+  printf '{"state":"error","text":"ERR","icon":"server-off","tooltip":"Missing required command: jq","iconColor":"error","textColor":"error","url":"","channel":"%s"}\n' "${channel//\"/}"
+  exit 0
+}
+
+fail_json() {
+  local tooltip
+  printf -v tooltip '%b' "$1"
+  emit "ERR" "$stalled_icon" "$tooltip" "$stalled_color" "$stalled_color"
+  exit 0
+}
+
+require_arg() {
+  if [[ -z "${2:-}" || "$2" == --* ]]; then
+    fail_json "Missing value for $1"
+  fi
+}
+
+safe_color() {
+  case "$1" in
+    primary|secondary|tertiary|error|none) printf '%s' "$1" ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+
+safe_icon() {
+  if [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
+emit() {
+  local text="$1"
+  local icon="$2"
+  local tooltip="$3"
+  local icon_color="${4:-none}"
+  local text_color="${5:-none}"
+  local url="${6:-$evals_url}"
+  local emitted_channel="${7:-$channel}"
+  local state="running"
+
+  if [[ "$text" == "ERR" || "$text" == "HYD" ]]; then
+    state="error"
+  elif [[ "$text" == "Launched" ]]; then
+    state="launched"
+  elif [[ "$icon_color" == "$stalled_color" ]]; then
+    state="stalled"
+  elif [[ "$icon_color" == "$close_color" ]]; then
+    state="close"
+  fi
+
+  jq -cn \
+    --arg state "$state" \
+    --arg text "$text" \
+    --arg icon "$icon" \
+    --arg tooltip "$tooltip" \
+    --arg iconColor "$icon_color" \
+    --arg textColor "$text_color" \
+    --arg url "$url" \
+    --arg channel "$emitted_channel" \
+    '{state: $state, text: $text, icon: $icon, tooltip: $tooltip, iconColor: $iconColor, textColor: $textColor, url: $url, channel: $channel}'
+}
+
+get_count() {
+  local label="$1"
+  local source="$2"
+  printf '%s\n' "$source" |
+    grep -Eo "$label \\([0-9]+\\)" |
+    head -n1 |
+    tr -cd '0-9'
+}
+
+build_status_label() {
+  local finished="$1"
+  local status="$2"
+  local starttime="${3:-0}"
+
+  if [[ "$finished" != "1" ]]; then
+    if [[ "$starttime" =~ ^[0-9]+$ && "$starttime" -gt 0 ]]; then
+      printf 'Running'
+    else
+      printf 'Queued'
+    fi
+    return
+  fi
+
+  case "$status" in
+    0) printf 'Succeeded' ;;
+    1) printf 'Failed' ;;
+    2) printf 'Dependency failed' ;;
+    3) printf 'Aborted' ;;
+    4) printf 'Cancelled' ;;
+    6) printf 'Failed with output' ;;
+    7) printf 'Timed out' ;;
+    9) printf 'Aborted' ;;
+    10) printf 'Log size limit exceeded' ;;
+    11) printf 'Output size limit exceeded' ;;
+    *) printf 'Failed' ;;
+  esac
+}
+
+status_is_blocked() {
+  case "$1" in
+    Failed|Dependency\ failed|Aborted|Cancelled|Failed\ with\ output|Timed\ out|Log\ size\ limit\ exceeded|Output\ size\ limit\ exceeded)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+channel_exists() {
+  local candidate="$1"
+  local fetched_rev
+  transport_error=""
+  fetched_rev="$(timeout 8s curl -fsSL "https://channels.nixos.org/$candidate/git-revision" 2>/dev/null || true)"
+  if [[ "$fetched_rev" =~ ^[0-9a-f]{40}$ ]]; then
+    channel_rev="$fetched_rev"
+    channel_short_rev="${channel_rev:0:12}"
+    channel_revision_status="known"
+    return 0
+  fi
+  transport_error="Could not fetch a valid git revision from channels.nixos.org for $candidate."
+  return 1
+}
+
+fetch_channel_listing() {
+  timeout 8s curl -fsSL "https://nix-channels.s3.amazonaws.com/?delimiter=/" 2>/dev/null || true
+}
+
+channel_in_listing() {
+  local candidate="$1"
+  local listing="$2"
+  [[ -n "$listing" ]] || return 1
+  printf '%s\n' "$listing" |
+    perl -ne 'while (m{<Prefix>([^<]+?)/</Prefix>}g) { print "$1\n" }' |
+    grep -Fxq "$candidate"
+}
+
+stable_alias_candidates() {
+  local small_suffix="$1"
+  local year yy month prev_year prev_yy
+  year="$(date +%Y)"
+  yy=$((year % 100))
+  month="$(date +%m)"
+  prev_year=$((year - 1))
+  prev_yy=$((prev_year % 100))
+
+  if (( 10#$month >= 11 )); then
+    printf 'nixos-%02d.11%s\n' "$yy" "$small_suffix"
+    printf 'nixos-%02d.05%s\n' "$yy" "$small_suffix"
+    printf 'nixos-%02d.11%s\n' "$prev_yy" "$small_suffix"
+  elif (( 10#$month >= 5 )); then
+    printf 'nixos-%02d.05%s\n' "$yy" "$small_suffix"
+    printf 'nixos-%02d.11%s\n' "$prev_yy" "$small_suffix"
+    printf 'nixos-%02d.05%s\n' "$prev_yy" "$small_suffix"
+  else
+    printf 'nixos-%02d.11%s\n' "$prev_yy" "$small_suffix"
+    printf 'nixos-%02d.05%s\n' "$prev_yy" "$small_suffix"
+  fi
+}
+
+resolve_stable_alias_from_listing() {
+  local small_suffix="$1"
+  local listing candidate
+  listing="$(fetch_channel_listing)"
+  [[ -n "$listing" ]] || return 1
+
+  while IFS= read -r candidate; do
+    if channel_in_listing "$candidate" "$listing"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done < <(stable_alias_candidates "$small_suffix")
+
+  return 1
+}
+
+resolve_stable_alias_by_date() {
+  local small_suffix="$1"
+  local candidate
+  while IFS= read -r candidate; do
+    if channel_exists "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done < <(stable_alias_candidates "$small_suffix")
+
+  return 1
+}
+
+resolve_channel() {
+  case "$channel" in
+    nixos-stable)
+      channel="$(resolve_stable_alias_from_listing "" || resolve_stable_alias_by_date "" || true)"
+      ;;
+    nixos-stable-small)
+      channel="$(resolve_stable_alias_from_listing "-small" || resolve_stable_alias_by_date "-small" || true)"
+      ;;
+  esac
+
+  if [[ -z "$channel" ]]; then
+    emit "ERR" "$stalled_icon" "Could not resolve the current stable NixOS channel from channels.nixos.org." "$stalled_color" "$stalled_color"
+    exit 0
+  fi
+
+  channel_rev_url="https://channels.nixos.org/$channel/git-revision"
+
+  case "$channel" in
+    nixos-unstable)
+      project="nixos"
+      jobset="unstable"
+      gate_job="tested"
+      gate_label="tested"
+      ;;
+    nixos-unstable-small)
+      project="nixos"
+      jobset="unstable-small"
+      gate_job="tested"
+      gate_label="tested"
+      ;;
+    nixos-[0-9][0-9].[0-9][0-9]|nixos-[0-9][0-9].[0-9][0-9]-small)
+      project="nixos"
+      jobset="release-${channel#nixos-}"
+      gate_job="tested"
+      gate_label="tested"
+      ;;
+    nixpkgs-unstable)
+      project="nixpkgs"
+      jobset="unstable"
+      gate_job="unstable"
+      gate_label="unstable"
+      ;;
+    *)
+      fail_json "Unsupported channel: $channel\nUse nixos-unstable, nixos-unstable-small, nixos-stable, nixos-stable-small, nixos-YY.MM, nixos-YY.MM-small, or nixpkgs-unstable."
+      ;;
+  esac
+
+  if ! channel_exists "$channel"; then
+    if [[ -n "$transport_error" ]]; then
+      fail_json "$transport_error\nValidation URL: $channel_rev_url"
+    fi
+    fail_json "Invalid or unsupported channel: $channel\nValidation URL returned 404: $channel_rev_url"
+  fi
+
+  evals_url="$base_url/jobset/$project/$jobset/evals"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --channel)
+      require_arg "$1" "${2:-}"
+      channel="${2:-}"
+      shift 2
+      ;;
+    --running-color)
+      require_arg "$1" "${2:-}"
+      running_color="${2:-$running_color}"
+      shift 2
+      ;;
+    --stalled-color)
+      require_arg "$1" "${2:-}"
+      stalled_color="${2:-$stalled_color}"
+      shift 2
+      ;;
+    --close-color)
+      require_arg "$1" "${2:-}"
+      close_color="${2:-$close_color}"
+      shift 2
+      ;;
+    --launched-color)
+      require_arg "$1" "${2:-}"
+      launched_color="${2:-$launched_color}"
+      shift 2
+      ;;
+    --running-icon)
+      require_arg "$1" "${2:-}"
+      running_icon="${2:-$running_icon}"
+      shift 2
+      ;;
+    --stalled-icon)
+      require_arg "$1" "${2:-}"
+      stalled_icon="${2:-$stalled_icon}"
+      shift 2
+      ;;
+    --close-icon)
+      require_arg "$1" "${2:-}"
+      close_icon="${2:-$close_icon}"
+      shift 2
+      ;;
+    --launched-icon)
+      require_arg "$1" "${2:-}"
+      launched_icon="${2:-$launched_icon}"
+      shift 2
+      ;;
+    --close-threshold)
+      require_arg "$1" "${2:-}"
+      close_threshold="${2:-$close_threshold}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail_json "Unsupported option: $1"
+      ;;
+  esac
+done
+
+running_color="$(safe_color "$running_color" "secondary")"
+stalled_color="$(safe_color "$stalled_color" "error")"
+close_color="$(safe_color "$close_color" "tertiary")"
+launched_color="$(safe_color "$launched_color" "primary")"
+running_icon="$(safe_icon "$running_icon" "server-bolt")"
+stalled_icon="$(safe_icon "$stalled_icon" "server-off")"
+close_icon="$(safe_icon "$close_icon" "server-spark")"
+launched_icon="$(safe_icon "$launched_icon" "rocket")"
+if ! command -v jq >/dev/null 2>&1; then
+  emit_without_jq
+fi
+for cmd in curl timeout perl grep awk sed head tr cut date cat; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    fail_json "Missing required command: $cmd"
+  fi
+done
+if ! [[ "$close_threshold" =~ ^[0-9]+$ ]] || (( close_threshold < 1 || close_threshold > 100 )); then
+  close_threshold="90"
+fi
+
+resolve_channel
+
+evals_html="$(timeout 20s curl -fsSL "$evals_url" 2>/dev/null || true)"
+eval_id="$(printf '%s\n' "$evals_html" | grep -Eo '/eval/[0-9]+' | head -n1 | cut -d/ -f3)"
+
+if [[ -z "$eval_id" ]]; then
+  emit "HYD" "$stalled_icon" "Hydra status unavailable\nCould not find the latest $project:$jobset evaluation." "$stalled_color" "$stalled_color"
+  exit 0
+fi
+
+eval_url="$base_url/eval/$eval_id"
+
+eval_json="$(timeout 20s curl -fsSL -H 'Accept: application/json' "$eval_url" 2>/dev/null || true)"
+eval_full_rev="$(printf '%s\n' "$eval_json" | jq -r '.jobsetevalinputs.nixpkgs.revision // empty' 2>/dev/null || true)"
+if [[ -n "$eval_full_rev" && "$eval_full_rev" != "null" ]]; then
+  eval_short_rev="${eval_full_rev:0:12}"
+fi
+
+eval_html="$(timeout 20s curl -fsSL "$eval_url" 2>/dev/null || true)"
+if [[ -z "$eval_short_rev" ]]; then
+  eval_short_rev="$(
+    printf '%s\n' "$eval_html" |
+      perl -0777 -ne 'if (m{(?:nixos|nixpkgs)-[^<\s]*?\.([0-9a-f]{12})}s) { print $1 }'
+  )"
+fi
+
+summary="$(
+  printf '%s\n' "$eval_html" |
+    sed -n '/<ul class="nav nav-tabs"/,/<div class="tab-content">/p; /<div class="tab-content">/q' ||
+    true
+)"
+
+queued="$(get_count "Queued Jobs" "$summary")"
+still_succeed="$(get_count "Still Succeeding Jobs" "$summary")"
+still_fail="$(get_count "Still Failing Jobs" "$summary")"
+now_succeed="$(get_count "Newly Succeeding Jobs" "$summary")"
+now_fail="$(get_count "Newly Failing Jobs" "$summary")"
+aborted="$(get_count "Aborted / Timed out Jobs" "$summary")"
+new_jobs="$(get_count "New Jobs" "$summary")"
+
+queued="${queued:-0}"
+still_succeed="${still_succeed:-0}"
+still_fail="${still_fail:-0}"
+now_succeed="${now_succeed:-0}"
+now_fail="${now_fail:-0}"
+aborted="${aborted:-0}"
+new_jobs="${new_jobs:-0}"
+
+total=$((queued + still_succeed + still_fail + now_succeed + now_fail + aborted + new_jobs))
+succeeded=$((still_succeed + now_succeed))
+failed=$((still_fail + now_fail + aborted))
+pending=$((queued + new_jobs))
+finished=$((succeeded + failed))
+
+if (( total <= 0 )); then
+  emit "HYD" "$stalled_icon" "Hydra status unavailable\nFound eval $eval_id, but could not parse job counts." "$stalled_color" "$stalled_color"
+  exit 0
+fi
+
+percent_precise="$(awk -v f="$finished" -v t="$total" 'BEGIN { printf "%.1f%%", (f / t) * 100 }')"
+eval_progress_score="$(awk -v f="$finished" -v t="$total" 'BEGIN { printf "%.0f", (f / t) * 100 }')"
+health_score="$(
+  awk -v f="$finished" -v t="$total" -v bad="$failed" '
+    BEGIN {
+      raw = (f / t) * 100;
+      drag = (bad / t) * 400;
+      if (drag > 30) drag = 30;
+      score = raw - drag;
+      if (score < 0) score = 0;
+      printf "%.0f", score;
+    }'
+)"
+
+tested_status="not used"
+tested_build_id=""
+gate_total=""
+gate_failed=""
+gate_pending=""
+gate_score=""
+
+if [[ -n "$gate_job" ]]; then
+  tested_build_json="$(timeout 20s curl -fsSL -H 'Accept: application/json' "$eval_url/job/$gate_job" 2>/dev/null || true)"
+  tested_build_id="$(printf '%s\n' "$tested_build_json" | jq -r '.id // empty' 2>/dev/null || true)"
+  tested_finished="$(printf '%s\n' "$tested_build_json" | jq -r '.finished // 0' 2>/dev/null || true)"
+  tested_buildstatus="$(printf '%s\n' "$tested_build_json" | jq -r '.buildstatus // empty' 2>/dev/null || true)"
+  tested_starttime="$(printf '%s\n' "$tested_build_json" | jq -r '.starttime // 0' 2>/dev/null || true)"
+  tested_status="$(build_status_label "$tested_finished" "$tested_buildstatus" "$tested_starttime")"
+  gate_nixname="$(printf '%s\n' "$tested_build_json" | jq -r '.nixname // empty' 2>/dev/null || true)"
+  gate_rev=""
+  if [[ "$gate_nixname" =~ \.([0-9a-f]{12}) ]]; then
+    gate_rev="${BASH_REMATCH[1]}"
+  fi
+  if [[ -n "$gate_rev" ]]; then
+    eval_short_rev="$gate_rev"
+  fi
+  tested_status="${tested_status:-unknown}"
+  tested_build_id="${tested_build_id:-}"
+fi
+
+if [[ -n "$tested_build_id" ]]; then
+  gate_counts="$(
+    timeout 20s curl -fsSL -H 'Accept: application/json' "$base_url/build/$tested_build_id/constituents" 2>/dev/null |
+      jq -r '
+        [
+          (map(select((.finished // 0) == 1 and (.buildstatus // 0) != 0)) | length),
+          length,
+          (map(select((.finished // 0) != 1)) | length)
+        ] | @tsv
+      ' 2>/dev/null || true
+  )"
+  IFS=$'\t' read -r gate_failed gate_total gate_pending <<< "$gate_counts"
+  gate_failed="${gate_failed:-0}"
+  gate_pending="${gate_pending:-0}"
+  if [[ -n "$gate_total" && "$gate_total" =~ ^[0-9]+$ && "$gate_total" -gt 0 ]]; then
+    gate_score="$(
+      awk -v total="$gate_total" -v failed="$gate_failed" -v pending="$gate_pending" '
+        BEGIN {
+          done = total - pending;
+          if (done < 0) done = 0;
+          progress = (done / total) * 100;
+          drag = (failed / total) * 800;
+          if (drag > 45) drag = 45;
+          score = progress - drag;
+          if (score < 0) score = 0;
+          printf "%.0f", score;
+        }'
+    )"
+  fi
+fi
+
+if [[ -z "$channel_rev" ]]; then
+  channel_revision_status="unavailable"
+  channel_short_rev="unknown"
+fi
+
+readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 98) s = 98; printf "%.0f%%", s }')"
+readiness_detail="waiting for eval completion"
+launched=0
+
+if [[ "${gate_failed:-0}" =~ ^[0-9]+$ && "${gate_failed:-0}" -gt 0 ]]; then
+  if [[ -n "$gate_score" ]]; then
+    readiness="$(awk -v s="$gate_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+  else
+    readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+  fi
+  readiness_detail="blocked: $gate_label gate has $gate_failed failed blocker constituents"
+elif status_is_blocked "$tested_status"; then
+  if [[ -n "$gate_score" ]]; then
+    readiness="$(awk -v s="$gate_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+    readiness_detail="blocked: $gate_label gate is $tested_status; blocker failures present"
+  else
+    readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+    readiness_detail="blocked: $gate_label gate is $tested_status"
+  fi
+elif [[ -n "$eval_short_rev" && -n "$channel_rev" && "$channel_rev" == "$eval_short_rev"* ]]; then
+  readiness="Launched"
+  readiness_detail="launched: latest visible eval is published; update now"
+  launched=1
+elif [[ "$tested_status" == "Succeeded" ]]; then
+  if (( pending == 0 )); then
+    if [[ "$channel_revision_status" == "known" ]]; then
+      readiness="100%"
+    else
+      readiness="99%"
+    fi
+    readiness_detail="imminent: channel gate passed; waiting for channel publication"
+  else
+    readiness="$(
+      awk -v s="$eval_progress_score" '
+        BEGIN {
+          if (s > 99) s = 99;
+          printf "%.0f%%", s;
+        }'
+    )"
+    readiness_detail="close: channel gate passed; candidate eval queue still draining"
+  fi
+elif [[ -n "$gate_score" ]]; then
+  readiness="$(awk -v g="$gate_score" -v e="$eval_progress_score" 'BEGIN { s = (g * 0.70) + (e * 0.30); if (s > 98) s = 98; printf "%.0f%%", s }')"
+  readiness_detail="waiting for $gate_label gate: $tested_status"
+elif [[ -n "$gate_job" ]]; then
+  readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 70) s = 70; printf "%.0f%%", s }')"
+  readiness_detail="$gate_label gate unresolved: $tested_status"
+fi
+
+if [[ "$channel_revision_status" != "known" && "$readiness" == "100%" ]]; then
+  readiness="99%"
+  readiness_detail="$readiness_detail; published revision unknown"
+fi
+
+if [[ "$readiness" =~ ^[0-9]+%$ ]]; then
+  readiness_number="${readiness%%%}"
+else
+  readiness_number=100
+fi
+color="$running_color"
+icon="$running_icon"
+if (( launched == 1 )); then
+  color="$launched_color"
+  icon="$launched_icon"
+elif [[ "$readiness_detail" == blocked:* ]]; then
+  color="$stalled_color"
+  icon="$stalled_icon"
+elif (( readiness_number >= close_threshold )); then
+  color="$close_color"
+  icon="$close_icon"
+fi
+
+tooltip="$channel: $readiness
+$readiness_detail
+
+Hydra eval: $project:$jobset #$eval_id
+Gate ($gate_label): $tested_status, build ${tested_build_id:-unknown}
+Gate blockers: ${gate_failed:-unknown} failed, ${gate_pending:-unknown} pending / ${gate_total:-unknown}
+
+Candidate progress: $percent_precise
+Pending jobs: $pending / $total
+Failed/aborted: $failed
+
+Eval revision: ${eval_short_rev:-unknown}
+Channel revision: $channel_short_rev ($channel_revision_status)
+
+Left click refreshes. Right click opens Hydra."
+
+emit "$readiness" "$icon" "$tooltip" "$color" "$color" "$evals_url" "$channel"

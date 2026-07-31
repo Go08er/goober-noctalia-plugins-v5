@@ -1,0 +1,136 @@
+id = "goober/hydra-update-examiner"
+name = "Hydra Update Examiner"
+version = "0.1.0"
+plugin_api = 3
+author = "goober"
+license = "MIT"
+icon = "server-bolt"
+description = "Shows NixOS and Nixpkgs channel readiness from Hydra gate status."
+deprecated = false
+tags = ["bar", "indicator", "nixos", "system"]
+dependencies = ["bash", "curl", "jq", "perl", "grep", "awk", "sed", "head", "tr", "cut", "date", "cat", "timeout", "xdg-open"]
+
+# Data-source settings are plugin-wide because the singleton service owns one
+# poll stream shared by every bar placement.
+[[setting]]
+key = "channel_preset"
+type = "select"
+label_key = "settings.channel.label"
+description_key = "settings.channel.description"
+default = "nixos-unstable"
+options = [
+  { value = "nixos-unstable", label_key = "channels.nixos_unstable" },
+  { value = "nixos-unstable-small", label_key = "channels.nixos_unstable_small" },
+  { value = "nixos-stable", label_key = "channels.nixos_stable" },
+  { value = "nixos-stable-small", label_key = "channels.nixos_stable_small" },
+  { value = "nixpkgs-unstable", label_key = "channels.nixpkgs_unstable" },
+  { value = "custom", label_key = "channels.custom" },
+]
+
+[[setting]]
+key = "custom_channel"
+type = "string"
+label_key = "settings.custom_channel.label"
+description_key = "settings.custom_channel.description"
+default = ""
+visible_when = { key = "channel_preset", values = ["custom"] }
+
+[[setting]]
+key = "refresh_interval_minutes"
+type = "int"
+label_key = "settings.refresh.label"
+description_key = "settings.refresh.description"
+default = 60
+min = 1
+max = 1440
+step = 1
+
+[[setting]]
+key = "close_threshold"
+type = "int"
+label_key = "settings.close_threshold.label"
+description_key = "settings.close_threshold.description"
+default = 90
+min = 1
+max = 100
+step = 1
+
+[[service]]
+id = "status"
+entry = "service.luau"
+
+[[widget]]
+id = "hydra"
+entry = "widget.luau"
+
+  # Presentation settings are per placement in v5. Multiple Hydra widgets can
+  # share one poll stream while choosing different colors or text visibility.
+  [[widget.setting]]
+  key = "display_mode"
+  type = "select"
+  label_key = "settings.display_mode.label"
+  description_key = "settings.display_mode.description"
+  default = "always"
+  options = [
+    { value = "always", label_key = "display_mode.always" },
+    { value = "icon_only", label_key = "display_mode.icon_only" },
+  ]
+
+  [[widget.setting]]
+  key = "running_color"
+  type = "color"
+  label_key = "settings.colors.running"
+  default = "secondary"
+  advanced = true
+
+  [[widget.setting]]
+  key = "stalled_color"
+  type = "color"
+  label_key = "settings.colors.stalled"
+  description_key = "settings.colors.stalled_description"
+  default = "error"
+  advanced = true
+
+  [[widget.setting]]
+  key = "close_color"
+  type = "color"
+  label_key = "settings.colors.close"
+  description_key = "settings.colors.close_description"
+  default = "tertiary"
+  advanced = true
+
+  [[widget.setting]]
+  key = "launched_color"
+  type = "color"
+  label_key = "settings.colors.launched"
+  description_key = "settings.colors.launched_description"
+  default = "primary"
+  advanced = true
+
+  [[widget.setting]]
+  key = "running_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.running"
+  default = "server-bolt"
+  advanced = true
+
+  [[widget.setting]]
+  key = "stalled_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.stalled"
+  default = "server-off"
+  advanced = true
+
+  [[widget.setting]]
+  key = "close_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.close"
+  default = "server-spark"
+  advanced = true
+
+  [[widget.setting]]
+  key = "launched_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.launched"
+  default = "rocket"
+  advanced = true

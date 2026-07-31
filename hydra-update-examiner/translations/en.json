@@ -1,0 +1,67 @@
+{
+  "channels": {
+    "custom": "Exact channel",
+    "nixpkgs_unstable": "Nixpkgs unstable",
+    "nixos_stable": "NixOS stable",
+    "nixos_stable_small": "NixOS stable small",
+    "nixos_unstable": "NixOS unstable",
+    "nixos_unstable_small": "NixOS unstable small"
+  },
+  "display_mode": {
+    "always": "Always show readiness text",
+    "icon_only": "Icon only"
+  },
+  "settings": {
+    "channel": {
+      "description": "Stable aliases resolve to the current supported release.",
+      "label": "Channel"
+    },
+    "close_threshold": {
+      "description": "Readiness percent where the widget switches to its close state.",
+      "label": "Close threshold"
+    },
+    "colors": {
+      "close": "Close color",
+      "close_description": "Used at or above the close threshold.",
+      "launched": "Launched color",
+      "launched_description": "Used when the latest visible evaluation is published.",
+      "running": "Running color",
+      "stalled": "Stalled color",
+      "stalled_description": "Used for blocked, stale, and error states."
+    },
+    "custom_channel": {
+      "description": "An exact supported name such as nixos-26.05.",
+      "label": "Exact channel"
+    },
+    "display_mode": {
+      "description": "The documented v5 plugin API does not yet guarantee the old hover-only behavior.",
+      "label": "Readiness text"
+    },
+    "glyphs": {
+      "close": "Close glyph",
+      "launched": "Launched glyph",
+      "running": "Running glyph",
+      "stalled": "Stalled glyph"
+    },
+    "refresh": {
+      "description": "How often the shared service polls Hydra.",
+      "label": "Refresh minutes"
+    }
+  },
+  "widget": {
+    "command_failed": "Hydra status command failed.",
+    "command_timed_out": "Hydra status command timed out.",
+    "empty_custom_channel": "Choose an exact channel or select a channel preset.",
+    "invalid_json": "Hydra status command returned invalid JSON.",
+    "loading": "Refreshing Hydra channel status...",
+    "missing_backend": "The Hydra helper is missing from this plugin.",
+    "missing_dependency": "Missing required command: {command}",
+    "not_fetched": "Hydra status has not been fetched yet.",
+    "open_failed": "Could not open the Hydra page.",
+    "output_truncated": "Hydra status output exceeded the Noctalia capture limit.",
+    "refresh_failed": "Refresh failed; showing the last successful result.",
+    "title": "Hydra Update Examiner",
+    "unavailable": "Hydra status unavailable.",
+    "updated": "Updated: {time}"
+  }
+}
