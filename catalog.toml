@@ -12,3 +12,29 @@ deprecated = false
 plugin_api = 15
 tags = ["bar", "indicator", "nixos", "system"]
 dependencies = ["bash", "curl", "jq", "perl", "grep", "awk", "sed", "head", "tr", "cut", "date", "cat", "timeout", "xdg-open"]
+
+[[plugin]]
+id = "goober/voxtype-suite"
+name = "VoxType Suite"
+version = "0.1.0"
+author = "goober"
+license = "MIT"
+icon = "microphone"
+description = "A live status and recording-control companion for an existing VoxType daemon."
+deprecated = false
+plugin_api = 17
+tags = ["audio", "bar", "indicator", "privacy", "productivity", "recording", "service", "utility"]
+dependencies = ["voxtype"]
+
+[[plugin]]
+id = "goober/wallpaper-director"
+name = "Wallpaper Director"
+version = "0.1.0"
+author = "goober"
+license = "MIT"
+icon = "library-photo"
+description = "Routes Noctalia, Wallhaven, and W Engine wallpaper controls through one configurable hub."
+deprecated = false
+plugin_api = 17
+tags = ["wallpaper", "bar", "panel", "shortcut", "theming", "utility"]
+dependencies = []

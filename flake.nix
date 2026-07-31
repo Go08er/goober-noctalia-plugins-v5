@@ -1,5 +1,5 @@
 {
-  description = "Noctalia v5 Hydra Update Examiner staging and VM tests";
+  description = "Noctalia v5 plugin source and isolated VM tests";
 
   inputs = {
     # Match the Nixpkgs snapshot used by the tagged beta.7 host.
@@ -21,18 +21,36 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      vmTest = import ./tests/vm {
+      hydraVmTest = import ./tests/vm {
+        inherit pkgs;
+        pluginRoot = ./.;
+        noctaliaPackage = noctalia.packages.${system}.default;
+      };
+      voxtypeVmTest = import ./tests/vm/voxtype.nix {
+        inherit pkgs;
+        pluginRoot = ./.;
+        noctaliaPackage = noctalia.packages.${system}.default;
+      };
+      wallpaperVmTest = import ./tests/vm/wallpaper.nix {
         inherit pkgs;
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
       };
     in
     {
-      checks.${system}.noctalia-vm = vmTest;
+      checks.${system} = {
+        noctalia-vm = hydraVmTest;
+        voxtype-vm = voxtypeVmTest;
+        wallpaper-vm = wallpaperVmTest;
+      };
 
       packages.${system} = {
-        vm-test = vmTest;
-        vm-test-driver = vmTest.driverInteractive;
+        vm-test = hydraVmTest;
+        vm-test-driver = hydraVmTest.driverInteractive;
+        vm-test-voxtype = voxtypeVmTest;
+        vm-test-voxtype-driver = voxtypeVmTest.driverInteractive;
+        vm-test-wallpaper = wallpaperVmTest;
+        vm-test-wallpaper-driver = wallpaperVmTest.driverInteractive;
       };
     };
 }

@@ -2,7 +2,33 @@
 
 All notable staging changes will be recorded here.
 
-## 0.3.0 - Native glyph selection
+## Wallpaper Director 0.1.0 - Hub MVP
+
+- Add an API 17 singleton routing service, three-button bar widget, attached
+  configuration/diagnostics panel, and left/right Control Center shortcut.
+- Detect enabled Wallhaven and W Engine providers asynchronously while keeping
+  native wallpaper selection and fixed next/previous/random IPC available.
+- Persist schema-versioned gesture mappings atomically, retain saved unavailable
+  actions, and fail disabled instead of replacing corrupt user data.
+- Preserve ownership boundaries: this phase never launches
+  `linux-wallpaperengine`, reads W Engine private state, suppresses Noctalia's
+  wallpaper surface, or starts a competing scheduler.
+- Stage pairing, generated stills, curated reels, and mixed live/static policy
+  behind future Noctalia lifecycle and W Engine adapter work.
+
+## VoxType Suite 0.1.0 - Companion MVP
+
+- Add an API 17 singleton listener for the extended VoxType status stream with
+  live idle, recording, streaming, transcribing, stopped, and unknown states.
+- Add a configurable bar widget with native glyph selectors, default
+  toggle/cancel/cancel gestures, an attached control/diagnostics panel, and
+  state-aware action gating.
+- Add disabled-by-default, validated one-shot output/model/profile/text-action
+  overrides without editing or supervising the existing VoxType installation.
+- Keep speech private: no transcript, audio, log, or clipboard content is read
+  or persisted; clipboard/paste/file remain explicit VoxType output modes.
+
+## Hydra Update Examiner 0.3.0 - Native glyph selection
 
 - Make Noctalia's native searchable per-widget glyph picker the default through
   `use_shared_glyphs = false`.
@@ -18,7 +44,7 @@ All notable staging changes will be recorded here.
 - Normalize empty glyph values to valid state-specific defaults and pin both
   shared/local glyph-and-color inheritance combinations with VM render crops.
 
-## 0.2.0 - Customization parity
+## Hydra Update Examiner 0.2.0 - Customization parity
 
 - Restore all 13 v4-style controls to the plugin settings page as shared data
   and appearance defaults.
@@ -36,7 +62,7 @@ All notable staging changes will be recorded here.
   settings actions, all three hot-reload paths, screenshots, and clean
   shutdown.
 
-## 0.1.0 - Public test candidate
+## Hydra Update Examiner 0.1.0 - Public test candidate
 
 - Start a native Noctalia v5 source repository layout.
 - Publish the repository as a directly importable custom Git source and
