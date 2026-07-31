@@ -3,12 +3,12 @@
 [[plugin]]
 id = "goober/hydra-update-examiner"
 name = "Hydra Update Examiner"
-version = "0.1.0"
+version = "0.2.0"
 author = "goober"
 license = "MIT"
 icon = "server-bolt"
 description = "Shows NixOS and Nixpkgs channel readiness from Hydra gate status."
 deprecated = false
-plugin_api = 3
+plugin_api = 15
 tags = ["bar", "indicator", "nixos", "system"]
 dependencies = ["bash", "curl", "jq", "perl", "grep", "awk", "sed", "head", "tr", "cut", "date", "cat", "timeout", "xdg-open"]

@@ -27,6 +27,7 @@ first milestone while replacing every Quickshell-facing layer:
 | `manifest.json` | `plugin.toml` and root `catalog.toml` |
 | `Main.qml` | `service.luau` |
 | `BarWidget.qml` | `widget.luau` |
+| `NPopupContextMenu` | attached `panel.luau` entry |
 | `Settings.qml` and JSON defaults | typed manifest settings |
 | `i18n/en.json` | `translations/en.json` |
 | `pluginApi.mainInstance` | `noctalia.state` |
@@ -36,10 +37,12 @@ first milestone while replacing every Quickshell-facing layer:
 
 The v5 manifest compatibility gate changed after the first staging pass.
 `min_noctalia` is no longer the manifest/catalog gate; both now require a
-positive integer `plugin_api`. This port intentionally declares API level 3,
-the oldest level containing every capability it uses. Noctalia v5.0.0-beta.7
-supports cumulative plugin API levels through 20, but selecting a newer level
-without using its additions would only exclude compatible older hosts.
+positive integer `plugin_api`. The first public-test port intentionally declared
+API level 3. Customization parity now targets API level 15 because the
+right-click surface declares an overridable widget action (API 14) and opens
+the plugin's own settings page through `noctalia.openSettings()` (API 15).
+Noctalia v5.0.0-beta.7 supports cumulative plugin API levels through 20. Hover
+events themselves are available at API 3 and did not require this bump.
 
 Beta.3 also rejected literal setting labels in favor of translated `label_key`
 and option `label_key` fields. Current community validation additionally
@@ -69,20 +72,28 @@ exact beta.7 host under headless Sway with software rendering, a private session
 bus, guest-only state, and deterministic Hydra fixtures. Host Noctalia
 configuration and processes are outside the test boundary.
 
-The complete beta.7/API 3 automated VM run passed on 2026-07-31. In addition to
-the native linter and config validator, it verified layer-shell support, plugin
-discovery, bar and service startup, service/widget IPC, the `Launched` Hydra
-fixture, the open action, widget and service hot reload, a rendered screenshot,
-and clean shutdown. No plugin/Luau error marker appeared in the guest log. The
-earlier beta.3/API 3 baseline passed on 2026-07-18.
+The earlier beta.3/API 3 baseline passed on 2026-07-18, and the initial
+beta.7/API 3 automated run passed on 2026-07-31. The current beta.7/API 15 run
+also passed on 2026-07-31. In addition to the native linter and config
+validator, it verified layer-shell support, Git-source discovery and
+materialization, two widget placements using shared and overridden
+presentation, service/widget IPC, the `Launched` Hydra fixture, hover rendering
+through the production callback, the attached action panel, documentation and
+scoped-settings actions, service/widget/panel hot reload, guest screenshots,
+and clean shutdown. No plugin/Luau error marker appeared in the guest log.
 
 ## Refinements already included
 
 - One headless service owns polling, so multiple bar placements do not start
   duplicate Hydra requests.
 - Refreshes are single-flight and manual requests have a short cooldown.
-- Data settings are plugin-wide; colors, glyphs, and text visibility are
-  per-widget settings.
+- All v4-style data and appearance controls are available as plugin-wide shared
+  defaults, while each placement can opt into its own colors, glyphs, and text
+  visibility.
+- Hover-only readiness text uses the native bar-widget pointer callback.
+- Right click opens an attached native action panel with refresh, Hydra,
+  settings, and documentation actions; middle click retains the normal widget
+  editor binding.
 - The service and widget exchange a small presentation-neutral status object.
 - Failed refreshes retain the last good result and mark it stale.
 - Process-lifetime status is protocol- and config-keyed, and a service-ready
@@ -94,8 +105,9 @@ earlier beta.3/API 3 baseline passed on 2026-07-18.
 - The source can be installed directly from GitHub through Noctalia's Settings
   interface, plugin-source IPC, or declarative v5 configuration.
 - A reproducible VM harness exercises Git-source cloning and materialization,
-  the native host, IPC, open action, hot reload, and a headless-output capture
-  without sharing the host desktop.
+  the native host, both presentation scopes, hover rendering, the attached
+  panel, actions, IPC, hot reload, and headless-output captures without sharing
+  the host desktop.
 
 ## Known gaps
 
@@ -103,23 +115,22 @@ earlier beta.3/API 3 baseline passed on 2026-07-18.
 - The helper still scrapes Hydra HTML for grouped evaluation counts.
 - There is no persistent cache or cross-process file lock yet.
 - Backend tooltip text is English-only.
-- Noctalia v5 still has no documented plugin context-menu API. Programmatic
-  settings opening became available at plugin API 15, but this widget does not
-  need it: the host's built-in middle-click binding opens widget settings while
-  the port remains compatible with API 3.
-- The documented v5 plugin API does not yet guarantee the v4 hover-only
-  percentage mode. Staging supports always-visible text or icon-only display.
+- There is no generic plugin context-menu primitive, so the v4 menu is expressed
+  as a native attached panel rather than a compositor popup menu.
+- V4 settings are not imported automatically because the plugin ID, key names,
+  and settings store changed; the README provides a direct mapping.
 - The inherited thumbnail is a v4 screenshot and should be replaced after an
   interactive native v5 capture with the intended production theme/layout.
 - Noctalia v5 is beta; beta.7 supports plugin API levels through 20 while this
-  port intentionally targets API 3, so each beta still needs a compatibility
-  check.
+  port targets API 15, so each beta still needs a compatibility check.
 
 ## Next milestones
 
-1. Use the interactive VM driver to cover pointer clicks, settings UI, manifest
-   reload, and stale/error presentation, then capture a native replacement
-   screenshot. Automated guest IPC and Luau hot reload are already covered.
+1. Use the interactive VM driver to cover physical pointer dispatch, actual
+   action-panel button activation, settings edits, manifest reload, and
+   stale/error presentation, then capture a native replacement screenshot.
+   Automated entry dispatch, rendering, actions, and Luau hot reload are
+   already covered.
 2. Add recorded Hydra response fixtures for running, blocked, launched, paused,
    malformed, and transport-failure cases.
 3. Move request orchestration to `noctalia.http` or a small compiled helper,

@@ -112,6 +112,7 @@ let
     telemetry_enabled = false
     setup_wizard_enabled = false
     clipboard_enabled = false
+    settings_show_advanced = false
 
     [plugins]
     enabled = []
@@ -122,16 +123,39 @@ let
     channel_preset = "nixos-unstable"
     refresh_interval_minutes = 60
     close_threshold = 90
+    shared_display_mode = "on_hover"
+    shared_running_color = "tertiary"
+    shared_stalled_color = "error"
+    shared_close_color = "primary"
+    shared_launched_color = "primary"
+    shared_running_glyph = "server"
+    shared_stalled_glyph = "circle-alert"
+    shared_close_glyph = "rocket"
+    shared_launched_glyph = "rocket"
 
     [widget.hydra-readiness]
     type = "${widgetId}"
-    display_mode = "always"
+    use_shared_presentation = true
+
+    [widget.hydra-override]
+    type = "${widgetId}"
+    use_shared_presentation = false
+    display_mode = "icon_only"
+    running_color = "secondary"
+    stalled_color = "error"
+    close_color = "tertiary"
+    launched_color = "primary"
+    running_glyph = "server-bolt"
+    stalled_glyph = "server-off"
+    close_glyph = "server-spark"
+    launched_glyph = "rocket"
 
     [bar.hydra-test]
-    start = []
+    start = ["hydra-override"]
     center = ["hydra-readiness"]
     end = []
     reserve_space = false
+    hover_highlight = false
   '';
 
   runner = pkgs.writeShellApplication {
@@ -331,7 +355,7 @@ pkgs.testers.runNixOSTest (
           "${clonedRepoRoot}"
       )
       wait_log("enabling plugin '${pluginId}' (resolved + exported")
-      wait_log("loaded plugin '${pluginId}' (2 entries)")
+      wait_log("loaded plugin '${pluginId}' (3 entries)")
       wait_log('creating #0 "hydra-test"')
       wait_log("started service '${serviceId}'")
       wait_log("service.luau")
@@ -353,11 +377,12 @@ pkgs.testers.runNixOSTest (
       machine.succeed(
           "test ! -e ${materializedPluginRoot}/catalog.toml && "
           "test -f ${materializedPluginRoot}/widget.luau && "
+          "test -f ${materializedPluginRoot}/panel.luau && "
           "test -f ${materializedPluginRoot}/service.luau"
       )
 
       plugin_list = noctalia_msg("plugins list")
-      assert "${pluginId} [${sourceName}] 0.1.0 enabled" in plugin_list
+      assert "${pluginId} [${sourceName}] 0.2.0 enabled" in plugin_list
       assert "incompatible" not in plugin_list
 
       assert noctalia_msg(
@@ -365,7 +390,7 @@ pkgs.testers.runNixOSTest (
       ).strip() == "ok: dispatched 1"
       assert noctalia_msg(
           "plugin ${widgetId} all force-refresh"
-      ).strip() == "ok: dispatched 1"
+      ).strip() == "ok: dispatched 2"
 
       machine.wait_until_succeeds(
           "grep -Fx 'https://hydra.nixos.org/build/9001/constituents' "
@@ -373,7 +398,7 @@ pkgs.testers.runNixOSTest (
       )
       machine.wait_until_succeeds(
           noctalia_command("plugin ${widgetId} all open")
-          + " | grep -Fx 'ok: dispatched 1' && "
+          + " | grep -Fx 'ok: dispatched 2' && "
           "grep -Fx 'https://hydra.nixos.org/jobset/nixos/unstable/evals' "
           "/tmp/noctalia-vm-xdg-open.log"
       )
@@ -386,20 +411,70 @@ pkgs.testers.runNixOSTest (
           "'.state == \"launched\" and .text == \"Launched\"'"
       )
 
+      # The headless Sway backend has no physical pointer. Exercise the exact
+      # production callback by hot-reloading the guest copy with a direct
+      # onHover(true) invocation and require its top-center render to change.
+      machine.sleep(1)
+      hover_hidden = "/tmp/noctalia-hydra-hover-hidden.png"
       machine.succeed(
-          "printf '\\n-- VM widget hot-reload probe\\n' >> "
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -g '540,0 200x40' "
+          f"{hover_hidden}"
+      )
+      machine.succeed(
+          "printf '\\nonHover(true)\\n' >> "
           "${materializedPluginRoot}/widget.luau"
       )
       wait_log("hot reload: reloaded 'widget.luau'")
+      machine.sleep(1)
+      hover_visible = "/tmp/noctalia-hydra-hover-visible.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -g '540,0 200x40' "
+          f"{hover_visible}"
+      )
+      machine.fail(f"cmp -s {hover_hidden} {hover_visible}")
+
+      # Open the attached action panel through the same command declared as the
+      # widget's right-click default. This instantiates and renders panel.luau.
+      panel_result = noctalia_msg("panel-toggle ${pluginId}:actions").strip()
+      assert panel_result.startswith("ok"), panel_result
+      wait_log("panel.luau")
+      machine.sleep(1)
+      panel_screenshot = "/tmp/noctalia-hydra-actions-vm.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -o HEADLESS-1 "
+          f"{panel_screenshot}"
+      )
+      machine.succeed(f"test $(stat -c %s {panel_screenshot}) -gt 1000")
+
+      assert noctalia_msg(
+          "plugin ${pluginId}:actions all documentation"
+      ).strip() == "ok: dispatched 1"
+      machine.wait_until_succeeds(
+          "grep -Fx "
+          "'https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/"
+          "hydra-update-examiner#readme' /tmp/noctalia-vm-xdg-open.log"
+      )
+
       machine.succeed(
           "printf '\\n-- VM service hot-reload probe\\n' >> "
           "${materializedPluginRoot}/service.luau"
       )
       wait_log("hot reload: reloaded service '${serviceId}'")
+      machine.succeed(
+          "printf '\\n-- VM panel hot-reload probe\\n' >> "
+          "${materializedPluginRoot}/panel.luau"
+      )
+      wait_log("hot reload: reloaded 'panel.luau'")
 
       assert noctalia_msg(
           "plugin ${widgetId} all force-refresh"
-      ).strip() == "ok: dispatched 1"
+      ).strip() == "ok: dispatched 2"
       machine.wait_until_succeeds(
           "test $(grep -Fc "
           "'https://hydra.nixos.org/build/9001/constituents' "
@@ -415,6 +490,24 @@ pkgs.testers.runNixOSTest (
       )
       machine.succeed(f"test $(stat -c %s {screenshot}) -gt 1000")
       machine.copy_from_machine(screenshot)
+      machine.copy_from_machine(hover_hidden)
+      machine.copy_from_machine(hover_visible)
+      machine.copy_from_machine(panel_screenshot)
+
+      # Exercise API 15's scoped settings opener after the rendering captures.
+      assert noctalia_msg(
+          "plugin ${pluginId}:actions all settings"
+      ).strip() == "ok: dispatched 1"
+      machine.sleep(1)
+      settings_screenshot = "/tmp/noctalia-hydra-settings-vm.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -o HEADLESS-1 "
+          f"{settings_screenshot}"
+      )
+      machine.succeed(f"test $(stat -c %s {settings_screenshot}) -gt 1000")
+      machine.copy_from_machine(settings_screenshot)
 
       logs = machine.succeed(journal)
       for forbidden in (

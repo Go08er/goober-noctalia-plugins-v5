@@ -21,6 +21,8 @@ PLUGIN_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*$")
 TRANSLATION_KEY_SEGMENT = re.compile(r"^[a-z0-9-][a-z0-9_-]*$")
 OLDEST_SUPPORTED_PLUGIN_API = 3
 CURRENT_RELEASED_PLUGIN_API = 20
+WIDGET_ACTIONS_PLUGIN_API = 14
+OPEN_SETTINGS_PLUGIN_API = 15
 DESCRIPTION_MAX_CHARS = 120
 THUMBNAIL_MAX_BYTES = 512 * 1024
 THUMBNAIL_SIZE = (960, 540)
@@ -111,6 +113,18 @@ CONFIG_CALL = re.compile(
     r'(?:noctalia\.getConfig|\bcfg|\bwidgetCfg)\(\s*["\']([^"\']+)["\']'
 )
 OBSOLETE_CONFIG_ACCESSOR = re.compile(r"\b(?:barWidget|desktopWidget|panel|launcher)\s*\.\s*getConfig\b")
+OPEN_SETTINGS_CALL = re.compile(r"\bnoctalia\s*\.\s*openSettings\s*\(")
+WIDGET_GESTURES = {
+    "left",
+    "right",
+    "middle",
+    "back",
+    "forward",
+    "scroll_up",
+    "scroll_down",
+    "scroll_left",
+    "scroll_right",
+}
 V4_NAMES = {"manifest.json", "registry.json", "qmldir"}
 V4_TOKENS = ("Quickshell", "QtQuick", "QtQml", "noctalia-qs")
 
@@ -474,6 +488,7 @@ class Validator:
         entry_path: Path,
         translations: dict[str, str],
         allowed_settings: set[str],
+        plugin_api: Any,
     ) -> None:
         source = entry_path.read_text(errors="replace")
         for accessor in OBSOLETE_CONFIG_ACCESSOR.findall(source):
@@ -484,6 +499,13 @@ class Validator:
         for key in CONFIG_CALL.findall(source):
             if key not in allowed_settings:
                 self.error(entry_path, f"runtime reads undeclared setting '{key}'")
+        if OPEN_SETTINGS_CALL.search(source) and (
+            type(plugin_api) is not int or plugin_api < OPEN_SETTINGS_PLUGIN_API
+        ):
+            self.error(
+                entry_path,
+                f"noctalia.openSettings requires plugin_api >= {OPEN_SETTINGS_PLUGIN_API}",
+            )
 
     def validate_plugin(self, plugin_dir: Path) -> tuple[dict[str, Any], Path]:
         manifest_path = plugin_dir / "plugin.toml"
@@ -602,6 +624,24 @@ class Validator:
                 else:
                     seen_entry_ids.add(entry_id)
                 entry_file = self.validate_entry_path(manifest_path, plugin_dir, entry.get("entry"), context)
+                if entry_type == "widget" and "actions" in entry:
+                    actions = entry["actions"]
+                    if type(plugin_api) is not int or plugin_api < WIDGET_ACTIONS_PLUGIN_API:
+                        self.error(
+                            manifest_path,
+                            f"{context}.actions requires plugin_api >= {WIDGET_ACTIONS_PLUGIN_API}",
+                        )
+                    if not isinstance(actions, dict):
+                        self.error(manifest_path, f"{context}.actions must be a table")
+                    else:
+                        for gesture, action in actions.items():
+                            if gesture not in WIDGET_GESTURES:
+                                self.error(manifest_path, f"{context}.actions has unknown gesture '{gesture}'")
+                            if not isinstance(action, str) or not action.strip():
+                                self.error(
+                                    manifest_path,
+                                    f"{context}.actions.{gesture} must be a non-empty action string",
+                                )
                 entry_settings = set()
                 if "setting" in entry:
                     if entry_type not in SETTING_OWNER_TYPES:
@@ -618,7 +658,7 @@ class Validator:
         self.require(entry_count > 0, manifest_path, "manifest must declare at least one entry")
 
         for entry_path, allowed_settings in runtime_entries:
-            self.validate_runtime_references(entry_path, translations, allowed_settings)
+            self.validate_runtime_references(entry_path, translations, allowed_settings, plugin_api)
         return manifest, manifest_path
 
     def validate_shell_helpers(self) -> None:
