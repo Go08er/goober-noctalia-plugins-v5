@@ -1,6 +1,6 @@
 id = "goober/hydra-update-examiner"
 name = "Hydra Update Examiner"
-version = "0.2.0"
+version = "0.3.0"
 plugin_api = 15
 author = "goober"
 license = "MIT"
@@ -55,8 +55,9 @@ min = 1
 max = 100
 step = 1
 
-# V4 exposed appearance as plugin-wide settings. Keep that one-page workflow as
-# the v5 default while still allowing an individual bar placement to opt out.
+# V4 exposed appearance as plugin-wide settings. Retain shared text/color
+# defaults and an optional shared glyph set while making the native per-widget
+# glyph picker the normal v5 workflow.
 [[setting]]
 key = "shared_display_mode"
 type = "select"
@@ -100,24 +101,28 @@ default = "primary"
 key = "shared_running_glyph"
 type = "glyph"
 label_key = "settings.shared_glyphs.running"
+description_key = "settings.shared_glyphs.description"
 default = "server-bolt"
 
 [[setting]]
 key = "shared_stalled_glyph"
 type = "glyph"
 label_key = "settings.shared_glyphs.stalled"
+description_key = "settings.shared_glyphs.description"
 default = "server-off"
 
 [[setting]]
 key = "shared_close_glyph"
 type = "glyph"
 label_key = "settings.shared_glyphs.close"
+description_key = "settings.shared_glyphs.description"
 default = "server-spark"
 
 [[setting]]
 key = "shared_launched_glyph"
 type = "glyph"
 label_key = "settings.shared_glyphs.launched"
+description_key = "settings.shared_glyphs.description"
 default = "rocket"
 
 [[service]]
@@ -140,8 +145,9 @@ entry = "widget.luau"
   description_key = "settings.use_shared_presentation.description"
   default = true
 
-  # These non-advanced controls preserve v5's per-placement customization when
-  # the shared-presentation toggle is disabled.
+  # Text visibility and colors can inherit plugin-wide values independently of
+  # glyphs. Glyph selection defaults to the widget scope because that is where
+  # Noctalia beta.7/current v5 exposes its native searchable glyph picker.
   [[widget.setting]]
   key = "display_mode"
   type = "select"
@@ -154,6 +160,13 @@ entry = "widget.luau"
     { value = "always", label_key = "display_mode.always" },
     { value = "icon_only", label_key = "display_mode.icon_only" },
   ]
+
+  [[widget.setting]]
+  key = "use_shared_glyphs"
+  type = "bool"
+  label_key = "settings.use_shared_glyphs.label"
+  description_key = "settings.use_shared_glyphs.description"
+  default = false
 
   [[widget.setting]]
   key = "running_color"
@@ -190,29 +203,33 @@ entry = "widget.luau"
   key = "running_glyph"
   type = "glyph"
   label_key = "settings.overrides.glyphs.running"
+  description_key = "settings.overrides.glyphs.description"
   default = "server-bolt"
-  visible_when = { key = "use_shared_presentation", values = ["false"] }
+  visible_when = { key = "use_shared_glyphs", values = ["false"] }
 
   [[widget.setting]]
   key = "stalled_glyph"
   type = "glyph"
   label_key = "settings.overrides.glyphs.stalled"
+  description_key = "settings.overrides.glyphs.description"
   default = "server-off"
-  visible_when = { key = "use_shared_presentation", values = ["false"] }
+  visible_when = { key = "use_shared_glyphs", values = ["false"] }
 
   [[widget.setting]]
   key = "close_glyph"
   type = "glyph"
   label_key = "settings.overrides.glyphs.close"
+  description_key = "settings.overrides.glyphs.description"
   default = "server-spark"
-  visible_when = { key = "use_shared_presentation", values = ["false"] }
+  visible_when = { key = "use_shared_glyphs", values = ["false"] }
 
   [[widget.setting]]
   key = "launched_glyph"
   type = "glyph"
   label_key = "settings.overrides.glyphs.launched"
+  description_key = "settings.overrides.glyphs.description"
   default = "rocket"
-  visible_when = { key = "use_shared_presentation", values = ["false"] }
+  visible_when = { key = "use_shared_glyphs", values = ["false"] }
 
 [[panel]]
 id = "actions"

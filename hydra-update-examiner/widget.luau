@@ -15,6 +15,14 @@ local function widgetCfg(key)
     return noctalia.getConfig(key)
 end
 
+local function glyphCfg(key, fallback)
+    local value = widgetCfg(key)
+    if type(value) == "string" and string.find(value, "%S") ~= nil then
+        return value
+    end
+    return fallback
+end
+
 local function acceptsStatus(nextStatus)
     if type(nextStatus) ~= "table" or type(status) ~= "table" then
         return true
@@ -41,27 +49,28 @@ local function acceptsStatus(nextStatus)
 end
 
 local function presentationFor(state)
-    local shared = widgetCfg("use_shared_presentation") ~= false
+    local sharedPresentation = widgetCfg("use_shared_presentation") ~= false
+    local sharedGlyphs = widgetCfg("use_shared_glyphs") == true
     if state == "launched" then
-        if shared then
-            return widgetCfg("shared_launched_glyph"), widgetCfg("shared_launched_color")
-        end
-        return widgetCfg("launched_glyph"), widgetCfg("launched_color")
+        local glyphKey = if sharedGlyphs then "shared_launched_glyph" else "launched_glyph"
+        local glyph = glyphCfg(glyphKey, "rocket")
+        local color = if sharedPresentation then widgetCfg("shared_launched_color") else widgetCfg("launched_color")
+        return glyph, color
     elseif state == "close" then
-        if shared then
-            return widgetCfg("shared_close_glyph"), widgetCfg("shared_close_color")
-        end
-        return widgetCfg("close_glyph"), widgetCfg("close_color")
+        local glyphKey = if sharedGlyphs then "shared_close_glyph" else "close_glyph"
+        local glyph = glyphCfg(glyphKey, "server-spark")
+        local color = if sharedPresentation then widgetCfg("shared_close_color") else widgetCfg("close_color")
+        return glyph, color
     elseif state == "stalled" or state == "stale" or state == "error" then
-        if shared then
-            return widgetCfg("shared_stalled_glyph"), widgetCfg("shared_stalled_color")
-        end
-        return widgetCfg("stalled_glyph"), widgetCfg("stalled_color")
+        local glyphKey = if sharedGlyphs then "shared_stalled_glyph" else "stalled_glyph"
+        local glyph = glyphCfg(glyphKey, "server-off")
+        local color = if sharedPresentation then widgetCfg("shared_stalled_color") else widgetCfg("stalled_color")
+        return glyph, color
     end
-    if shared then
-        return widgetCfg("shared_running_glyph"), widgetCfg("shared_running_color")
-    end
-    return widgetCfg("running_glyph"), widgetCfg("running_color")
+    local glyphKey = if sharedGlyphs then "shared_running_glyph" else "running_glyph"
+    local glyph = glyphCfg(glyphKey, "server-bolt")
+    local color = if sharedPresentation then widgetCfg("shared_running_color") else widgetCfg("running_color")
+    return glyph, color
 end
 
 local function displayMode()
