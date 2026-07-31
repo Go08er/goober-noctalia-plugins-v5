@@ -1,0 +1,219 @@
+id = "goober/voxtype-suite"
+name = "VoxType Suite"
+version = "0.1.0"
+plugin_api = 17
+author = "goober"
+license = "MIT"
+icon = "microphone"
+description = "A live status and recording-control companion for an existing VoxType daemon."
+deprecated = false
+tags = ["audio", "bar", "indicator", "privacy", "productivity", "recording", "service", "utility"]
+dependencies = ["voxtype"]
+
+# These settings are shared because the singleton service and every presentation
+# entry need the same notification/privacy policy and palette roles.
+[[setting]]
+key = "notify_transitions"
+type = "bool"
+label_key = "settings.notify_transitions.label"
+description_key = "settings.notify_transitions.description"
+default = false
+
+[[setting]]
+key = "notify_failures"
+type = "bool"
+label_key = "settings.notify_failures.label"
+description_key = "settings.notify_failures.description"
+default = true
+
+[[setting]]
+key = "tooltip_show_model"
+type = "bool"
+label_key = "settings.tooltip_show_model.label"
+default = true
+
+[[setting]]
+key = "tooltip_show_device"
+type = "bool"
+label_key = "settings.tooltip_show_device.label"
+default = true
+
+[[setting]]
+key = "tooltip_show_backend"
+type = "bool"
+label_key = "settings.tooltip_show_backend.label"
+default = true
+
+[[setting]]
+key = "idle_color"
+type = "color"
+label_key = "settings.colors.idle"
+default = "on_surface"
+
+[[setting]]
+key = "recording_color"
+type = "color"
+label_key = "settings.colors.recording"
+default = "error"
+
+[[setting]]
+key = "transcribing_color"
+type = "color"
+label_key = "settings.colors.transcribing"
+default = "tertiary"
+
+[[setting]]
+key = "stopped_color"
+type = "color"
+label_key = "settings.colors.stopped"
+default = "on_surface_variant"
+
+[[setting]]
+key = "unknown_color"
+type = "color"
+label_key = "settings.colors.unknown"
+default = "tertiary"
+
+[[setting]]
+key = "enable_one_shot_overrides"
+type = "bool"
+label_key = "settings.enable_overrides.label"
+description_key = "settings.enable_overrides.description"
+default = false
+advanced = true
+
+# The service is the only owner of the long-lived VoxType status follower and
+# the only entry allowed to launch VoxType recording-control commands.
+[[service]]
+id = "listener"
+entry = "service.luau"
+
+[[widget]]
+id = "voxtype"
+entry = "widget.luau"
+
+  # Noctalia normally reserves middle click for widget settings. Explicitly
+  # freeing it preserves the historical middle-click cancel behavior.
+  [widget.actions]
+  middle = "none"
+
+  [[widget.setting]]
+  key = "left_action"
+  type = "select"
+  label_key = "settings.gestures.left"
+  description_key = "settings.gestures.description"
+  default = "toggle"
+  options = [
+    { value = "toggle", label_key = "actions.toggle" },
+    { value = "start", label_key = "actions.start" },
+    { value = "stop", label_key = "actions.stop" },
+    { value = "cancel", label_key = "actions.cancel" },
+    { value = "panel", label_key = "actions.panel" },
+    { value = "none", label_key = "actions.none" },
+  ]
+
+  [[widget.setting]]
+  key = "middle_action"
+  type = "select"
+  label_key = "settings.gestures.middle"
+  description_key = "settings.gestures.description"
+  default = "cancel"
+  options = [
+    { value = "toggle", label_key = "actions.toggle" },
+    { value = "start", label_key = "actions.start" },
+    { value = "stop", label_key = "actions.stop" },
+    { value = "cancel", label_key = "actions.cancel" },
+    { value = "panel", label_key = "actions.panel" },
+    { value = "none", label_key = "actions.none" },
+  ]
+
+  [[widget.setting]]
+  key = "right_action"
+  type = "select"
+  label_key = "settings.gestures.right"
+  description_key = "settings.gestures.description"
+  default = "cancel"
+  options = [
+    { value = "toggle", label_key = "actions.toggle" },
+    { value = "start", label_key = "actions.start" },
+    { value = "stop", label_key = "actions.stop" },
+    { value = "cancel", label_key = "actions.cancel" },
+    { value = "panel", label_key = "actions.panel" },
+    { value = "none", label_key = "actions.none" },
+  ]
+
+  [[widget.setting]]
+  key = "idle_display"
+  type = "select"
+  label_key = "settings.idle_display.label"
+  default = "glyph_only"
+  options = [
+    { value = "glyph_only", label_key = "settings.idle_display.glyph_only" },
+    { value = "glyph_text", label_key = "settings.idle_display.glyph_text" },
+    { value = "hidden", label_key = "settings.idle_display.hidden" },
+  ]
+
+  [[widget.setting]]
+  key = "active_label"
+  type = "select"
+  label_key = "settings.active_label.label"
+  description_key = "settings.active_label.description"
+  default = "rec"
+  options = [
+    { value = "rec", label_key = "settings.active_label.rec" },
+    { value = "elapsed", label_key = "settings.active_label.elapsed" },
+    { value = "glyph_only", label_key = "settings.active_label.glyph_only" },
+  ]
+
+  [[widget.setting]]
+  key = "width_mode"
+  type = "select"
+  label_key = "settings.width_mode.label"
+  default = "compact"
+  options = [
+    { value = "compact", label_key = "settings.width_mode.compact" },
+    { value = "expanded", label_key = "settings.width_mode.expanded" },
+  ]
+
+  [[widget.setting]]
+  key = "show_override_name"
+  type = "bool"
+  label_key = "settings.show_override_name.label"
+  description_key = "settings.show_override_name.description"
+  default = false
+
+  # Glyph settings intentionally live at widget scope, where Noctalia v5 shows
+  # its native searchable glyph picker.
+  [[widget.setting]]
+  key = "idle_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.idle"
+  default = "microphone"
+
+  [[widget.setting]]
+  key = "active_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.active"
+  default = "microphone"
+
+  [[widget.setting]]
+  key = "stopped_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.stopped"
+  default = "microphone-off"
+
+  [[widget.setting]]
+  key = "unknown_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.unknown"
+  default = "microphone"
+
+[[panel]]
+id = "details"
+entry = "panel.luau"
+width = 480
+height = 620
+placement = "attached"
+position = "auto"
+open_near_click = true
+dismiss_on_outside_click = true
