@@ -12,6 +12,13 @@ be upgraded in place because v5 plugins use a TOML manifest and isolated Luau
 entry scripts. The v4.7 source remains unchanged in `../noctalia_4.7` as the
 behavioral reference.
 
+The v5 repository is also a directly importable custom Git source. Its root
+`catalog.toml` replaces v4's `registry.json`, and Noctalia materializes the
+plugin from the `hydra-update-examiner/` directory after users add
+<https://github.com/Go08er/goober-noctalia-plugins-v5> as a Git source. This is
+independent of upstream catalog inclusion: the repository has not been
+submitted to or accepted into Noctalia's official or community catalogs.
+
 This public-test port deliberately keeps the proven Bash/Hydra backend for its
 first milestone while replacing every Quickshell-facing layer:
 
@@ -84,8 +91,11 @@ earlier beta.3/API 3 baseline passed on 2026-07-18.
 - The helper now emits an explicit state alongside its backward-compatible
   text, tooltip, color, and URL fields.
 - The source has local validation and a repository validation workflow.
-- A reproducible VM harness exercises the native host, IPC, open action, hot
-  reload, and a headless-output capture without sharing the host desktop.
+- The source can be installed directly from GitHub through Noctalia's Settings
+  interface, plugin-source IPC, or declarative v5 configuration.
+- A reproducible VM harness exercises Git-source cloning and materialization,
+  the native host, IPC, open action, hot reload, and a headless-output capture
+  without sharing the host desktop.
 
 ## Known gaps
 
@@ -119,8 +129,8 @@ earlier beta.3/API 3 baseline passed on 2026-07-18.
 5. Reduce the active-candidate request budget and measure response sizes before
    relying on large evaluation build lists.
 6. Re-check the community plugin review requirements before any future
-   submission. A standalone public test repository is not an upstream catalog
-   submission or acceptance.
+   submission. Direct installation as a custom Git source is not an upstream
+   catalog submission or acceptance.
 
 ## Specification references
 

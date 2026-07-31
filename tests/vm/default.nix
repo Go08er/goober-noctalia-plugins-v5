@@ -12,6 +12,10 @@ let
   stateRoot = "/var/lib/noctalia-vm";
   cacheRoot = "/var/cache/noctalia-vm";
   guestPluginRoot = "${stateRoot}/plugin-source";
+  sourceName = "vm-git";
+  sourceUrl = "file://${guestPluginRoot}";
+  clonedRepoRoot = "${stateRoot}/state/noctalia/plugins/sources/${sourceName}/repo";
+  materializedPluginRoot = "${stateRoot}/state/noctalia/plugins/materialized/${sourceName}/hydra-update-examiner";
   pluginId = "goober/hydra-update-examiner";
   serviceId = "${pluginId}:status";
   widgetId = "${pluginId}:hydra";
@@ -99,6 +103,7 @@ let
     pkgs.gnused
     pkgs.coreutils
   ];
+  noctaliaRuntimePackages = pluginRuntimePackages ++ [ pkgs.git ];
   pluginRuntimePath = lib.makeBinPath pluginRuntimePackages;
 
   vmConfig = pkgs.writeText "noctalia-vm-config.toml" ''
@@ -109,13 +114,9 @@ let
     clipboard_enabled = false
 
     [plugins]
-    enabled = ["${pluginId}"]
+    enabled = []
     auto_update = false
-
-    [[plugins.source]]
-    name = "vm-staging"
-    kind = "path"
-    location = "${guestPluginRoot}"
+    source = []
 
     [plugin_settings."${pluginId}"]
     channel_preset = "nixos-unstable"
@@ -135,7 +136,7 @@ let
 
   runner = pkgs.writeShellApplication {
     name = "noctalia-vm-run";
-    runtimeInputs = pluginRuntimePackages;
+    runtimeInputs = noctaliaRuntimePackages;
     text = ''
       install -d -m 0755 \
         "${guestPluginRoot}" \
@@ -144,6 +145,11 @@ let
         "${cacheRoot}/noctalia"
       cp -R --no-preserve=ownership "${pluginSource}/." "${guestPluginRoot}/"
       chmod -R u+w "${guestPluginRoot}"
+      git -C "${guestPluginRoot}" init --initial-branch=main
+      git -C "${guestPluginRoot}" config user.name "Noctalia VM Test"
+      git -C "${guestPluginRoot}" config user.email "noctalia-vm@example.invalid"
+      git -C "${guestPluginRoot}" add .
+      git -C "${guestPluginRoot}" commit -m "VM plugin source fixture"
       touch "${stateRoot}/state/noctalia/.setup-complete"
 
       export NOCTALIA_CONFIG_HOME=/etc/noctalia-vm
@@ -284,11 +290,6 @@ pkgs.testers.runNixOSTest (
           return machine.succeed(noctalia_command(arguments))
 
       wait_log("layer-shell=yes")
-      wait_log("loaded plugin '${pluginId}' (2 entries)")
-      wait_log('creating #0 "hydra-test"')
-      wait_log("started service '${serviceId}'")
-      wait_log("service.luau")
-      wait_log("widget.luau")
 
       machine.succeed(
           "runuser -u ${testUser} -- env -i "
@@ -303,8 +304,60 @@ pkgs.testers.runNixOSTest (
           "/etc/noctalia-vm/noctalia/config.toml"
       )
 
+      # Exercise the same source-add and enable path used for a GitHub source,
+      # but clone a deterministic in-guest file:// repository instead.
+      assert "${sourceName}" not in noctalia_msg("plugins source list")
+      machine.fail("test -e ${clonedRepoRoot}/.git")
+      assert "${pluginId}" not in noctalia_msg("plugins list")
+
+      assert noctalia_msg(
+          "plugins source add ${sourceName} git ${sourceUrl}"
+      ).strip() == "ok"
+      assert (
+          "${sourceName} git ${sourceUrl}"
+          in noctalia_msg("plugins source list")
+      )
+      # `plugins list` is intentionally local-only and must not clone on the
+      # main loop. Enabling performs the network-capable catalog resolution.
+      assert "${pluginId}" not in noctalia_msg("plugins list")
+      machine.fail("test -e ${clonedRepoRoot}/.git")
+
+      enable_result = noctalia_msg("plugins enable ${pluginId}").strip()
+      assert enable_result.startswith("ok"), enable_result
+
+      wait_log("adding plugin source '${sourceName}' (${sourceUrl})")
+      wait_log(
+          "git clone --filter=blob:none --no-checkout ${sourceUrl} "
+          "${clonedRepoRoot}"
+      )
+      wait_log("enabling plugin '${pluginId}' (resolved + exported")
+      wait_log("loaded plugin '${pluginId}' (2 entries)")
+      wait_log('creating #0 "hydra-test"')
+      wait_log("started service '${serviceId}'")
+      wait_log("service.luau")
+      wait_log("widget.luau")
+
+      machine.wait_until_succeeds(
+          "test -d ${clonedRepoRoot}/.git && "
+          "test -f ${materializedPluginRoot}/plugin.toml"
+      )
+      # A git source is catalog-driven: the cache has no checkout, so discovery
+      # must read catalog.toml from the repository root via git-show before the
+      # plugin subdirectory can be exported to the materialized runtime tree.
+      machine.succeed(
+          "runuser -u ${testUser} -- ${lib.getExe pkgs.git} "
+          "-C ${clonedRepoRoot} "
+          "cat-file -e HEAD:catalog.toml"
+      )
+      machine.fail("test -e ${clonedRepoRoot}/catalog.toml")
+      machine.succeed(
+          "test ! -e ${materializedPluginRoot}/catalog.toml && "
+          "test -f ${materializedPluginRoot}/widget.luau && "
+          "test -f ${materializedPluginRoot}/service.luau"
+      )
+
       plugin_list = noctalia_msg("plugins list")
-      assert "${pluginId} [vm-staging] 0.1.0 enabled" in plugin_list
+      assert "${pluginId} [${sourceName}] 0.1.0 enabled" in plugin_list
       assert "incompatible" not in plugin_list
 
       assert noctalia_msg(
@@ -327,7 +380,7 @@ pkgs.testers.runNixOSTest (
 
       machine.succeed(
           "runuser -u ${testUser} -- env PATH=${pluginRuntimePath} "
-          "bash ${guestPluginRoot}/hydra-update-examiner/scripts/hydra-channel-progress "
+          "bash ${materializedPluginRoot}/scripts/hydra-channel-progress "
           "--channel nixos-unstable | "
           "${lib.getExe pkgs.jq} -e "
           "'.state == \"launched\" and .text == \"Launched\"'"
@@ -335,12 +388,12 @@ pkgs.testers.runNixOSTest (
 
       machine.succeed(
           "printf '\\n-- VM widget hot-reload probe\\n' >> "
-          "${guestPluginRoot}/hydra-update-examiner/widget.luau"
+          "${materializedPluginRoot}/widget.luau"
       )
       wait_log("hot reload: reloaded 'widget.luau'")
       machine.succeed(
           "printf '\\n-- VM service hot-reload probe\\n' >> "
-          "${guestPluginRoot}/hydra-update-examiner/service.luau"
+          "${materializedPluginRoot}/service.luau"
       )
       wait_log("hot reload: reloaded service '${serviceId}'")
 
