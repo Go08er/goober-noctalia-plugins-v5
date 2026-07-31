@@ -1,4 +1,4 @@
-# Unpublished custom plugin source for Noctalia v5.
+# Standalone Noctalia v5 Git source; not part of the built-in catalogs.
 
 [[plugin]]
 id = "goober/hydra-update-examiner"

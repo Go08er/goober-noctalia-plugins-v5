@@ -5,6 +5,11 @@ All notable staging changes will be recorded here.
 ## 0.1.0 - Public test candidate
 
 - Start a native Noctalia v5 source repository layout.
+- Publish the repository as a directly importable custom Git source and
+  document Settings, CLI, declarative configuration, update, removal, and local
+  path-development workflows.
+- Exercise Git-source cloning, root-catalog discovery, and managed plugin
+  materialization in the disposable beta.7 VM test.
 - Port the QML host layer to a Luau service and bar widget.
 - Convert v4 settings to typed TOML settings.
 - Preserve the existing Hydra helper as the initial backend.
