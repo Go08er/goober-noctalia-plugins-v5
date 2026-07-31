@@ -16,9 +16,10 @@ how close a NixOS or Nixpkgs channel is to publishing its next update.
 | ID | `goober/hydra-update-examiner` |
 | Entries | Bar widget: `hydra`; actions panel: `actions`; service: `status` |
 
-The singleton service polls Hydra once for all widget placements; each widget
-renders that shared result with plugin-wide appearance defaults or its own
-per-placement overrides.
+The singleton service polls Hydra once for all widget placements. Text and color
+inheritance is independent of glyph inheritance, so each placement can use the
+shared result with plugin-wide colors while selecting glyphs through Noctalia's
+native per-widget picker.
 
 ## What it does
 
@@ -81,6 +82,7 @@ enabled = true
 
 [widget.hydra-readiness]
 type = "goober/hydra-update-examiner:hydra"
+use_shared_glyphs = false
 
 [plugin_settings."goober/hydra-update-examiner"]
 shared_display_mode = "on_hover"
@@ -142,8 +144,7 @@ noctalia msg plugin goober/hydra-update-examiner:actions all documentation
 ## Settings
 
 Open the plugin's gear under **Settings** → **Plugins** to edit all 13 v4-style
-shared controls in one place. The first four configure the shared polling
-service:
+values in one place. The first four configure the shared polling service:
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -152,7 +153,7 @@ service:
 | `refresh_interval_minutes` | `int` | `60` | Poll interval in minutes, from 1 through 1440. |
 | `close_threshold` | `int` | `90` | Readiness percentage, from 1 through 100, at which the close state begins. |
 
-The remaining nine are shared appearance defaults:
+The next five are shared readiness-text and color defaults:
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -161,28 +162,49 @@ The remaining nine are shared appearance defaults:
 | `shared_stalled_color` | `color` | `error` | Color used for blocked, stale, or error states. |
 | `shared_close_color` | `color` | `tertiary` | Color used at or above `close_threshold`. |
 | `shared_launched_color` | `color` | `primary` | Color used when the candidate revision is published. |
-| `shared_running_glyph` | `glyph` | `server-bolt` | Glyph used during normal progress. |
-| `shared_stalled_glyph` | `glyph` | `server-off` | Glyph used for blocked, stale, or error states. |
-| `shared_close_glyph` | `glyph` | `server-spark` | Glyph used near readiness. |
-| `shared_launched_glyph` | `glyph` | `rocket` | Glyph used after publication. |
 
-Every placement uses those values by default. Middle-click the bar widget, or
-open its gear under **Settings** → **Bar**, to opt a placement out and reveal
-its override controls. None of these core appearance settings require the
-global **Show Advanced** toggle:
+The final four plugin-wide values are an optional shared glyph set:
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `use_shared_presentation` | `bool` | `true` | Uses the plugin-wide appearance defaults; turn off to reveal this placement's overrides. |
-| `display_mode` | `select` | `always` | Override with `on_hover`, `always`, or `icon_only`. |
-| `running_color` | `color` | `secondary` | Normal-progress color override. |
-| `stalled_color` | `color` | `error` | Blocked, stale, or error color override. |
-| `close_color` | `color` | `tertiary` | Color used at or above `close_threshold`. |
-| `launched_color` | `color` | `primary` | Color used when the candidate revision is published. |
-| `running_glyph` | `glyph` | `server-bolt` | Normal-progress glyph override. |
-| `stalled_glyph` | `glyph` | `server-off` | Blocked, stale, or error glyph override. |
-| `close_glyph` | `glyph` | `server-spark` | Near-readiness glyph override. |
-| `launched_glyph` | `glyph` | `rocket` | Publication glyph override. |
+| `shared_running_glyph` | `glyph` | `server-bolt` | Shared glyph name for normal progress. |
+| `shared_stalled_glyph` | `glyph` | `server-off` | Shared glyph name for blocked, stale, or error states. |
+| `shared_close_glyph` | `glyph` | `server-spark` | Shared glyph name used near readiness. |
+| `shared_launched_glyph` | `glyph` | `rocket` | Shared glyph name used after publication. |
+
+Current Noctalia v5 renders root plugin `glyph` settings as text fields rather
+than attaching its searchable selector. These names remain available for users
+who want one manually entered glyph set across every placement, but they are not
+the default glyph workflow in v0.3.0.
+
+### Native glyph picker and per-widget controls
+
+Middle-click the Hydra widget to open that placement's settings. If the normal
+middle-click binding was changed, open its gear under **Settings** → **Bar**.
+Leave **Use shared glyphs** off, which is the v0.3.0 default, then press the
+button adjacent to a glyph field. Noctalia opens its native searchable picker;
+choose a glyph and apply it. Repeat for the running, stalled, close, and launched
+states as needed.
+
+The two inheritance switches are independent. **Use shared text and colors**
+controls `display_mode` plus the four colors. **Use shared glyphs** controls only
+the four glyphs. A placement can therefore inherit plugin-wide text and colors
+while using native-picker glyphs. None of these controls require the global
+**Show Advanced** toggle:
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `use_shared_presentation` | `bool` | `true` | Uses plugin-wide readiness text and colors; turn off to reveal local text/color controls. |
+| `display_mode` | `select` | `always` | Local `on_hover`, `always`, or `icon_only` mode; shown when shared text/colors are off. |
+| `running_color` | `color` | `secondary` | Local normal-progress color; shown when shared text/colors are off. |
+| `stalled_color` | `color` | `error` | Local blocked, stale, or error color; shown when shared text/colors are off. |
+| `close_color` | `color` | `tertiary` | Local close-state color; shown when shared text/colors are off. |
+| `launched_color` | `color` | `primary` | Local publication color; shown when shared text/colors are off. |
+| `use_shared_glyphs` | `bool` | `false` | Uses the plugin-wide shared glyph set when enabled; local native-picker glyphs are the default. |
+| `running_glyph` | `glyph` | `server-bolt` | Normal-progress glyph selected with the adjacent picker button. |
+| `stalled_glyph` | `glyph` | `server-off` | Blocked, stale, or error glyph selected with the adjacent picker button. |
+| `close_glyph` | `glyph` | `server-spark` | Near-readiness glyph selected with the adjacent picker button. |
+| `launched_glyph` | `glyph` | `rocket` | Publication glyph selected with the adjacent picker button. |
 
 Noctalia sends pointer enter/leave events to the widget, so `on_hover` behaves
 like v4: the glyph remains visible and the readiness text expands only while
@@ -191,20 +213,33 @@ the pointer is over the widget.
 ### Migrating v4 appearance
 
 Noctalia cannot import the old values automatically because v4 used a different
-plugin ID, settings store, and camelCase key names. Re-enter them in the plugin
-gear using this mapping:
+plugin ID, settings store, and camelCase key names. Re-enter text and colors in
+the plugin gear; choose glyphs in each widget's settings using this mapping:
 
-| v4 key | v5 shared key |
+| v4 key | v5 target |
 | --- | --- |
 | `percentDisplayMode` | `shared_display_mode` (`onhover` → `on_hover`, `alwaysShow` → `always`, `alwaysHide` → `icon_only`) |
 | `runningColor` | `shared_running_color` |
 | `stalledColor` | `shared_stalled_color` |
 | `closeColor` | `shared_close_color` |
 | `launchedColor` | `shared_launched_color` |
-| `runningIcon` | `shared_running_glyph` |
-| `stalledIcon` | `shared_stalled_glyph` |
-| `closeIcon` | `shared_close_glyph` |
-| `launchedIcon` | `shared_launched_glyph` |
+| `runningIcon` | Widget `running_glyph`, selected with the native picker |
+| `stalledIcon` | Widget `stalled_glyph`, selected with the native picker |
+| `closeIcon` | Widget `close_glyph`, selected with the native picker |
+| `launchedIcon` | Widget `launched_glyph`, selected with the native picker |
+
+To reproduce one global v4 icon set instead, enter those names in the four
+`shared_*_glyph` plugin fields and enable **Use shared glyphs** on each
+placement.
+
+### Migrating from v0.2.0
+
+V0.2.0 tied glyph inheritance to `use_shared_presentation`. V0.3.0 separates
+that behavior: `use_shared_presentation` now controls only readiness text and
+colors, while the new `use_shared_glyphs` setting controls glyph inheritance.
+Its default is `false`, so existing placements begin using their widget glyph
+values and gain the adjacent native picker buttons. Set **Use shared glyphs** to
+on for any placement that should retain v0.2.0's plugin-wide glyph behavior.
 
 ## Supported channels
 
@@ -280,9 +315,10 @@ deadline. Temporary Hydra outages can therefore produce a stale or error state.
 The v5 port was prepared with OpenAI Codex assistance. It is available as a
 standalone custom Git source and has not been submitted to an upstream
 Noctalia catalog. The native beta.7/API 15 integration gate passed on
-2026-07-31, including both presentation scopes, hover rendering, the attached
-panel, its documentation and scoped-settings actions, hot reload, and clean
-shutdown.
+2026-07-31, including shared and local presentation, hover rendering, the
+attached panel, its documentation and scoped-settings actions, hot reload, and
+clean shutdown. The v0.3.0 harness additionally captures the widget settings
+surface and opens Noctalia's native searchable **Pick a Glyph** menu.
 
 ## License
 

@@ -15,7 +15,7 @@ source using one of the methods below.
 
 | Plugin | Version | Status |
 | --- | --- | --- |
-| `goober/hydra-update-examiner` | `0.2.0` | Beta.7/API 15, VM-validated |
+| `goober/hydra-update-examiner` | `0.3.0` | Beta.7/API 15, VM-validated |
 
 ## Repository layout
 
@@ -97,6 +97,7 @@ enabled = true
 
 [widget.hydra-readiness]
 type = "goober/hydra-update-examiner:hydra"
+use_shared_glyphs = false
 
 [plugin_settings."goober/hydra-update-examiner"]
 shared_display_mode = "on_hover"
@@ -144,10 +145,18 @@ configuration reload. If the Git and path sources are both present, source
 ordering determines which copy supplies a duplicate plugin ID; remove or
 disable the Git source while developing if you want to avoid that ambiguity.
 
-The plugin gear exposes the channel, polling, threshold, text mode, four state
-colors, and four glyphs as shared defaults. Middle-click a placed widget to use
-shared appearance or reveal per-placement overrides. Right-click opens the
-native action panel.
+The plugin gear exposes channel, polling, threshold, shared text mode and
+colors, plus optional plugin-wide shared glyph names. Current Noctalia renders
+root plugin glyph settings as text fields. For its native searchable glyph
+picker, middle-click a placed widget, leave **Use shared glyphs** off, and use
+the button adjacent to each glyph field. **Use shared text and colors** is an
+independent toggle, so placements can inherit those values while selecting
+their own glyphs. Right-click opens the native action panel.
+
+When updating from v0.2.0, `use_shared_presentation` continues to control text
+and colors but no longer controls glyphs. V0.3.0 defaults the new
+`use_shared_glyphs` widget setting to `false`; enable it on a placement only if
+that placement should retain v0.2.0's plugin-wide glyph behavior.
 
 Run the repository checks with:
 
@@ -163,11 +172,12 @@ nix build -L .#vm-test
 
 The VM harness is pinned to the exact beta.7 host revision. It uses an in-guest
 Git source, headless Sway, software rendering, and fixed Hydra responses to
-check catalog discovery, clone and materialization, shared and overridden
-widget presentation, hover rendering, the attached action panel, documentation
-and scoped-settings actions, IPC, hot reload, and guest screenshots without
-touching the host Noctalia session or configuration. The complete beta.7/API 15
-run passed on 2026-07-31. See `tests/vm/README.md` for details.
+check catalog discovery, clone and materialization, independently shared text,
+colors and glyphs (including exact cross-scope render crops), hover rendering,
+the attached action panel, documentation and scoped-settings actions, the
+widget settings surface and native searchable glyph menu, IPC, hot reload, and
+guest screenshots without touching the host Noctalia session or configuration.
+See `tests/vm/README.md` for details.
 
 ## Editor setup
 

@@ -54,6 +54,7 @@
       },
       "glyphs": {
         "close": "Close glyph override",
+        "description": "Use the adjacent Noctalia glyph-picker button to browse and select an icon.",
         "launched": "Launched glyph override",
         "running": "Running glyph override",
         "stalled": "Stalled glyph override"
@@ -70,18 +71,23 @@
       "stalled": "Shared stalled color"
     },
     "shared_display_mode": {
-      "description": "Default readiness-text behavior for every placement using shared appearance.",
+      "description": "Default readiness-text behavior for every placement using shared text and colors.",
       "label": "Shared readiness text"
     },
     "shared_glyphs": {
       "close": "Shared close glyph",
+      "description": "Optional shared glyph name. For Noctalia's searchable icon selector, use the widget settings.",
       "launched": "Shared launched glyph",
       "running": "Shared running glyph",
       "stalled": "Shared stalled glyph"
     },
     "use_shared_presentation": {
-      "description": "Use the plugin-wide readiness text, colors, and glyphs. Turn this off to customize only this placement.",
-      "label": "Use shared appearance"
+      "description": "Use plugin-wide readiness text and colors. Turn this off to customize them for this placement.",
+      "label": "Use shared text and colors"
+    },
+    "use_shared_glyphs": {
+      "description": "Use plugin-wide glyph names instead of this placement's native icon selectors.",
+      "label": "Use shared glyphs"
     }
   },
   "widget": {
