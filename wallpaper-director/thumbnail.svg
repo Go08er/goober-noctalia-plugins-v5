@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101a24"/>
+      <stop offset="1" stop-color="#17202b"/>
+    </linearGradient>
+    <linearGradient id="hub" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#56d6e7"/>
+      <stop offset="1" stop-color="#7b72ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#03070c" flood-opacity=".55"/>
+    </filter>
+  </defs>
+
+  <rect width="960" height="540" rx="32" fill="url(#bg)"/>
+  <circle cx="480" cy="258" r="184" fill="none" stroke="#88a1b8" stroke-opacity=".08" stroke-width="42"/>
+  <circle cx="480" cy="258" r="244" fill="none" stroke="#88a1b8" stroke-opacity=".05" stroke-width="1"/>
+
+  <path d="M371 258H270M589 258h101M426 344l-46 72M534 344l46 72" fill="none" stroke="#91a9bd" stroke-opacity=".5" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="320" cy="258" r="5" fill="#56d6e7"/>
+  <circle cx="640" cy="258" r="5" fill="#f3b55b"/>
+
+  <g filter="url(#shadow)">
+    <rect x="355" y="133" width="250" height="250" rx="72" fill="#111b25" stroke="url(#hub)" stroke-width="4"/>
+    <rect x="414" y="190" width="132" height="104" rx="18" fill="none" stroke="url(#hub)" stroke-width="12"/>
+    <path d="M425 278l31-33 22 21 17-19 40 31" fill="none" stroke="#d9f7fa" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="511" cy="222" r="11" fill="#d9f7fa"/>
+    <path d="M447 314h66" stroke="#7b72ff" stroke-width="9" stroke-linecap="round"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="88" y="193" width="186" height="130" rx="30" fill="#142735" stroke="#56d6e7" stroke-opacity=".8" stroke-width="2"/>
+    <path d="M122 276l29-35 23 24 18-20 44 45H122z" fill="#56d6e7" fill-opacity=".85"/>
+    <circle cx="214" cy="230" r="10" fill="#d9f7fa"/>
+    <text x="181" y="306" fill="#d9f7fa" font-family="sans-serif" font-size="17" text-anchor="middle">NOCTALIA</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="686" y="193" width="186" height="130" rx="30" fill="#2a2219" stroke="#f3b55b" stroke-opacity=".85" stroke-width="2"/>
+    <circle cx="779" cy="244" r="34" fill="none" stroke="#f3b55b" stroke-width="5"/>
+    <path d="M770 225l27 19-27 19z" fill="#ffe0a8"/>
+    <text x="779" y="306" fill="#ffe0a8" font-family="sans-serif" font-size="17" text-anchor="middle">W ENGINE</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="287" y="405" width="186" height="96" rx="28" fill="#211d37" stroke="#9c8cff" stroke-opacity=".85" stroke-width="2"/>
+    <circle cx="331" cy="453" r="23" fill="none" stroke="#b7adff" stroke-width="4"/>
+    <path d="M309 453h44M331 430c9 11 9 35 0 46M331 430c-9 11-9 35 0 46" fill="none" stroke="#b7adff" stroke-width="3"/>
+    <text x="403" y="460" fill="#ded9ff" font-family="sans-serif" font-size="17" text-anchor="middle">WALLHAVEN</text>
+  </g>
+
+  <text x="480" y="64" fill="#f1f6fa" font-family="sans-serif" font-size="33" font-weight="700" text-anchor="middle">Wallpaper Director</text>
+  <text x="480" y="96" fill="#9fb1c1" font-family="sans-serif" font-size="16" text-anchor="middle" letter-spacing="3">ONE HUB · CLEAR OWNERSHIP</text>
+</svg>

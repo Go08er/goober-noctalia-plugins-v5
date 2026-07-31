@@ -1,0 +1,140 @@
+{
+  "actions": {
+    "configured_unavailable": "{action} — configured but unavailable",
+    "director_open": "Open Wallpaper Director",
+    "native_next": "Next static",
+    "native_open": "Open Noctalia wallpapers",
+    "native_previous": "Previous static",
+    "native_random": "Random static",
+    "no_action": "No action",
+    "w_engine_open": "Open Wallpaper Engine",
+    "wallhaven_open": "Open Wallhaven"
+  },
+  "availability": {
+    "native_cli": "Noctalia's command client is unavailable.",
+    "probe_failed": "Provider availability could not be confirmed.",
+    "unknown": "The configured action is unknown.",
+    "w_engine_command": "linux-wallpaperengine is not available.",
+    "w_engine_plugin": "The W Engine plugin is not enabled.",
+    "wallhaven": "The Wallhaven plugin is not enabled."
+  },
+  "diagnostics": {
+    "ownership": "Ownership: Noctalia renders static wallpapers; W Engine alone owns linux-wallpaperengine. Director only routes actions in this release.",
+    "probe_error": "Provider probe failed: {error}",
+    "probe_ok": "Provider probe succeeded at {time}.",
+    "probing": "Checking enabled plugins...",
+    "storage_error": "Director storage is disabled. Config: {config} Runtime: {runtime}",
+    "storage_ok": "Schema-v1 config.json and runtime.json are healthy."
+  },
+  "errors": {
+    "action_unavailable": "Configured action '{action}' is unavailable: {reason}",
+    "backup": "Could not create the last-known-good backup.",
+    "config_action": "Invalid {button} gesture action: {action}",
+    "config_gestures": "config.json has no gestures object.",
+    "config_invalid": "config.json is invalid.",
+    "config_not_object": "config.json must contain an object.",
+    "config_save": "Could not save the Director configuration.",
+    "config_schema": "Unsupported config.json schema version: {version}",
+    "data_directory": "The plugin data directory is unavailable.",
+    "decode": "Invalid JSON: {detail}",
+    "encode": "Could not encode plugin data.",
+    "install": "Could not install the atomic data update.",
+    "native_switch": "Static wallpaper switch failed: {detail}",
+    "native_switch_start": "Could not start the Noctalia wallpaper command.",
+    "noctalia_cli": "The noctalia command client is unavailable.",
+    "provider_probe": "The provider probe returned no result.",
+    "provider_probe_detail": "Provider probe failed: {detail}",
+    "provider_probe_start": "Could not start the provider probe.",
+    "provider_probe_timeout": "The provider probe timed out.",
+    "read": "Could not read plugin data.",
+    "runtime_invalid": "runtime.json is invalid.",
+    "runtime_not_object": "runtime.json must contain an object.",
+    "runtime_providers": "runtime.json has no providers object.",
+    "runtime_save": "Could not save Director runtime state.",
+    "runtime_schema": "Unsupported runtime.json schema version: {version}",
+    "storage_disabled": "Wallpaper Director is disabled because its stored state is invalid. See Diagnostics.",
+    "write": "Could not write the temporary data file."
+  },
+  "panel": {
+    "close": "Close",
+    "diagnostics": {
+      "description": "Storage health, public capability checks, and process-ownership boundaries.",
+      "title": "Diagnostics"
+    },
+    "open": "Open",
+    "pairing": {
+      "deferred": "Requires a public W Engine capture/pair adapter and reliable native-surface cleanup on every lifecycle path.",
+      "description": "Pair live Workshop scenes with known-good static backings for colors, lock screen, and overview.",
+      "title": "Pairing"
+    },
+    "providers": {
+      "description": "Optional providers appear as fresh choices only when their public prerequisites are available.",
+      "title": "Providers"
+    },
+    "reels": {
+      "deferred": "Static scheduling and mixed static/live reels are staged for later releases; no competing timer runs today.",
+      "description": "Curated static and live rotations with history, pause, and conflict-free scheduling.",
+      "title": "Reels"
+    },
+    "reprobe": "Check providers again",
+    "shortcuts": {
+      "description": "Each bar button has an independent action. Saved provider actions remain visible if the provider disappears.",
+      "left": "Left click",
+      "middle": "Middle click",
+      "right": "Right click",
+      "shortcut_limit": "The Control Center tile currently supports the left and right mappings only; Noctalia beta.7 has no plugin-shortcut middle-click callback.",
+      "title": "Shortcuts"
+    },
+    "subtitle": "One entry point; providers keep ownership"
+  },
+  "plugin": {
+    "title": "Wallpaper Director"
+  },
+  "providers": {
+    "native": {
+      "available": "Always available through Noctalia's native wallpaper surface.",
+      "name": "Noctalia static wallpapers"
+    },
+    "probe_failed": "Availability is unknown because the provider probe failed.",
+    "w_engine": {
+      "available": "W Engine is enabled and linux-wallpaperengine is available.",
+      "disabled": "W Engine is not enabled.",
+      "missing_command": "W Engine is enabled, but linux-wallpaperengine is missing.",
+      "name": "W Engine"
+    },
+    "wallhaven": {
+      "available": "Wallhaven is enabled.",
+      "disabled": "Wallhaven is not enabled.",
+      "name": "Wallhaven"
+    }
+  },
+  "settings": {
+    "color": {
+      "description": "Theme-token color for this bar placement.",
+      "label": "Color"
+    },
+    "glyph": {
+      "description": "Use Noctalia's adjacent searchable glyph-picker button.",
+      "label": "Glyph"
+    },
+    "label": {
+      "description": "Text displayed beside the glyph for this placement.",
+      "label": "Label"
+    },
+    "show_label": {
+      "description": "Show the configured text beside the glyph.",
+      "label": "Show label"
+    }
+  },
+  "shortcut": {
+    "config_error": "Wallpaper config error",
+    "label": "Wallpapers"
+  },
+  "widget": {
+    "starting": "Wallpaper Director is starting...",
+    "storage_error": "Wallpaper Director storage is invalid. Open its panel through Noctalia IPC to view Diagnostics.",
+    "tooltip_left": "Left: {action}",
+    "tooltip_middle": "Middle: {action}",
+    "tooltip_right": "Right: {action}"
+  }
+}
