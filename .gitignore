@@ -1,0 +1,11 @@
+.DS_Store
+*.bak
+*.swp
+*.tmp
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.luau-lsp/
+noctalia.d.luau
+/result
+/result-*
