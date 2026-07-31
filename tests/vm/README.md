@@ -36,14 +36,18 @@ checks:
 - export into Noctalia's managed materialized-plugin directory;
 - layer-shell, plugin discovery, service startup, and construction of two
   widgets plus the attached panel;
-- shared presentation defaults and per-placement appearance overrides;
+- independent shared/local text-color and glyph inheritance across two
+  placements, including golden render crops for local `circle-check` + shared
+  `primary` and shared `rocket` + local `secondary`;
 - service and widget IPC dispatch;
 - the widget-to-service open action;
 - `on_hover` hidden and visible rendering through the production callback;
 - panel rendering plus its documentation and API 15 scoped-settings actions;
 - guest-only service, widget, and panel hot reload;
-- the real shell helper against fixed Hydra responses; and
-- `grim` captures of the bar, hover states, action panel, and settings surface.
+- the real shell helper against fixed Hydra responses;
+- keyboard activation of a widget-scoped glyph control; and
+- `grim` captures of the bar, hover states, action panel, plugin settings,
+  per-widget settings, and Noctalia's native searchable glyph menu.
 
 The fixture is an integration boundary, not a replacement for parser tests.
 Recorded response fixtures for every Hydra state remain a separate milestone.
@@ -52,14 +56,22 @@ Recorded response fixtures for every Hydra state remain a separate milestone.
 
 The automated run passed on 2026-07-31 against the pinned beta.7 host with
 plugin API 15. It passed native lint/config validation and exercised Git-source
-cloning, catalog discovery, plugin materialization, two presentation scopes,
-the rendered `Launched` state, service/widget IPC, hover state rendering, the
-attached panel, documentation and scoped-settings actions, all three hot-reload
-paths, screenshot capture, and clean shutdown.
+cloning, catalog discovery, plugin materialization, inherited and local
+presentation, the rendered `Launched` state, service/widget IPC, hover state
+rendering, the attached panel, documentation and scoped-settings actions, all
+three hot-reload paths, screenshot capture, and clean shutdown. The v0.3.0 test
+definition also opens a placement with `use_shared_glyphs = false`, follows the
+sheet's keyboard focus order to activate its first picker button, and captures
+the resulting searchable **Pick a Glyph** menu. Exact bar crops also verify
+that shared/local glyph and color inheritance remain independent.
+
+Current Noctalia renders root/plugin-wide glyph settings as text fields, so the
+VM distinguishes that optional shared-glyph surface from the per-widget
+native picker workflow.
 
 The headless compositor exposes no physical pointer, so the automated hover
 probe calls the production `onHover(true)` callback through a temporary guest
 hot reload and confirms that the rendered crop changes. Physical pointer
-dispatch, actual button presses and settings edits, manifest reload, a live
-GitHub network clone, and the remaining Hydra states still require exploratory
-VM coverage.
+dispatch, action-panel button presses, selecting and applying a different glyph,
+settings edits, manifest reload, a live GitHub network clone, and the remaining
+Hydra states still require exploratory VM coverage.

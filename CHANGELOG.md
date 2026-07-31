@@ -2,6 +2,22 @@
 
 All notable staging changes will be recorded here.
 
+## 0.3.0 - Native glyph selection
+
+- Make Noctalia's native searchable per-widget glyph picker the default through
+  `use_shared_glyphs = false`.
+- Decouple glyph inheritance from `use_shared_presentation`; shared readiness
+  text and colors can now remain enabled while each placement chooses its own
+  glyphs.
+- Retain the four plugin-wide shared glyph names as an optional shared set for
+  placements that explicitly enable **Use shared glyphs**. Current Noctalia v5
+  renders root plugin glyph settings as text fields, so the native picker lives
+  in the widget settings surface.
+- Add adjacent-picker instructions, v0.2.0 migration guidance, and VM coverage
+  that opens and captures the native **Pick a Glyph** menu.
+- Normalize empty glyph values to valid state-specific defaults and pin both
+  shared/local glyph-and-color inheritance combinations with VM render crops.
+
 ## 0.2.0 - Customization parity
 
 - Restore all 13 v4-style controls to the plugin settings page as shared data

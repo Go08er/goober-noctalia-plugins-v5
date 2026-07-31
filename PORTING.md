@@ -80,16 +80,22 @@ materialization, two widget placements using shared and overridden
 presentation, service/widget IPC, the `Launched` Hydra fixture, hover rendering
 through the production callback, the attached action panel, documentation and
 scoped-settings actions, service/widget/panel hot reload, guest screenshots,
-and clean shutdown. No plugin/Luau error marker appeared in the guest log.
+and clean shutdown. The v0.3.0 harness also opens the widget editor with local
+glyphs enabled, keyboard-activates the first selector, and captures Noctalia's
+native searchable **Pick a Glyph** menu. No plugin/Luau error marker appeared
+in the recorded run.
 
 ## Refinements already included
 
 - One headless service owns polling, so multiple bar placements do not start
   duplicate Hydra requests.
 - Refreshes are single-flight and manual requests have a short cooldown.
-- All v4-style data and appearance controls are available as plugin-wide shared
-  defaults, while each placement can opt into its own colors, glyphs, and text
-  visibility.
+- All v4-style data and appearance values remain available as plugin-wide
+  defaults. Each placement independently chooses whether to inherit shared text
+  and colors or shared glyph names.
+- Per-widget glyphs are the v0.3.0 default because widget-scoped `glyph` settings
+  receive Noctalia's native searchable picker. Middle-click opens the placement
+  settings, where the selector button sits beside each glyph field.
 - Hover-only readiness text uses the native bar-widget pointer callback.
 - Right click opens an attached native action panel with refresh, Hydra,
   settings, and documentation actions; middle click retains the normal widget
@@ -105,9 +111,19 @@ and clean shutdown. No plugin/Luau error marker appeared in the guest log.
 - The source can be installed directly from GitHub through Noctalia's Settings
   interface, plugin-source IPC, or declarative v5 configuration.
 - A reproducible VM harness exercises Git-source cloning and materialization,
-  the native host, both presentation scopes, hover rendering, the attached
-  panel, actions, IPC, hot reload, and headless-output captures without sharing
+  the native host, independent text/color and glyph scopes, hover rendering,
+  the attached panel, actions, IPC, hot reload, the widget settings surface,
+  the opened native glyph menu, and headless-output captures without sharing
   the host desktop.
+
+### V0.2.0 to v0.3.0 settings change
+
+V0.2.0 used `use_shared_presentation` for readiness text, colors, and glyphs as
+one unit. V0.3.0 leaves that setting responsible for text and colors only and
+adds `use_shared_glyphs`, defaulting to `false`. Existing placements therefore
+use their widget glyph values and expose Noctalia's adjacent native picker by
+default. Set `use_shared_glyphs = true` on a placement to retain v0.2.0's shared
+glyph behavior.
 
 ## Known gaps
 
@@ -117,6 +133,9 @@ and clean shutdown. No plugin/Luau error marker appeared in the guest log.
 - Backend tooltip text is English-only.
 - There is no generic plugin context-menu primitive, so the v4 menu is expressed
   as a native attached panel rather than a compositor popup menu.
+- Current Noctalia v5 renders root/plugin-wide `glyph` settings as text inputs,
+  not its searchable picker. The shared names remain an optional shared set;
+  widget glyphs default to local scope so users get the native selector.
 - V4 settings are not imported automatically because the plugin ID, key names,
   and settings store changed; the README provides a direct mapping.
 - The inherited thumbnail is a v4 screenshot and should be replaced after an
@@ -126,11 +145,11 @@ and clean shutdown. No plugin/Luau error marker appeared in the guest log.
 
 ## Next milestones
 
-1. Use the interactive VM driver to cover physical pointer dispatch, actual
-   action-panel button activation, settings edits, manifest reload, and
-   stale/error presentation, then capture a native replacement screenshot.
-   Automated entry dispatch, rendering, actions, and Luau hot reload are
-   already covered.
+1. Use the interactive VM driver to cover physical pointer dispatch,
+   action-panel button activation, selecting and applying a different glyph,
+   settings edits, manifest reload, and stale/error presentation, then capture
+   a native replacement screenshot. Automated keyboard activation of the glyph
+   menu, entry dispatch, rendering, actions, and Luau hot reload are covered.
 2. Add recorded Hydra response fixtures for running, blocked, launched, paused,
    malformed, and transport-failure cases.
 3. Move request orchestration to `noctalia.http` or a small compiled helper,

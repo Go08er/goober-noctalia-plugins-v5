@@ -129,26 +129,33 @@ let
     shared_close_color = "primary"
     shared_launched_color = "primary"
     shared_running_glyph = "server"
-    shared_stalled_glyph = "circle-alert"
+    shared_stalled_glyph = "alert-circle"
     shared_close_glyph = "rocket"
     shared_launched_glyph = "rocket"
 
     [widget.hydra-readiness]
     type = "${widgetId}"
     use_shared_presentation = true
+    use_shared_glyphs = false
+    running_glyph = "server"
+    stalled_glyph = "alert-circle"
+    close_glyph = "rocket"
+    launched_glyph = "circle-check"
+    launched_color = "secondary"
 
     [widget.hydra-override]
     type = "${widgetId}"
     use_shared_presentation = false
+    use_shared_glyphs = true
     display_mode = "icon_only"
     running_color = "secondary"
     stalled_color = "error"
     close_color = "tertiary"
-    launched_color = "primary"
+    launched_color = "secondary"
     running_glyph = "server-bolt"
     stalled_glyph = "server-off"
     close_glyph = "server-spark"
-    launched_glyph = "rocket"
+    launched_glyph = "circle-check"
 
     [bar.hydra-test]
     start = ["hydra-override"]
@@ -313,6 +320,14 @@ pkgs.testers.runNixOSTest (
       def noctalia_msg(arguments: str) -> str:
           return machine.succeed(noctalia_command(arguments))
 
+      def wtype(arguments: str) -> str:
+          return machine.succeed(
+              "runuser -u ${testUser} -- env -i "
+              f"{ipc_environment} "
+              "${lib.getExe pkgs.wtype} "
+              f"{arguments}"
+          )
+
       wait_log("layer-shell=yes")
 
       machine.succeed(
@@ -382,7 +397,7 @@ pkgs.testers.runNixOSTest (
       )
 
       plugin_list = noctalia_msg("plugins list")
-      assert "${pluginId} [${sourceName}] 0.2.0 enabled" in plugin_list
+      assert "${pluginId} [${sourceName}] 0.3.0 enabled" in plugin_list
       assert "incompatible" not in plugin_list
 
       assert noctalia_msg(
@@ -421,6 +436,22 @@ pkgs.testers.runNixOSTest (
           f"{ipc_environment} "
           "${lib.getExe pkgs.grim} -g '540,0 200x40' "
           f"{hover_hidden}"
+      )
+      # Golden crops pin both inheritance cross-products in the launched state:
+      # local circle-check + shared primary, and shared rocket + local secondary.
+      assert machine.succeed(f"sha256sum {hover_hidden}").split()[0] == (
+          "fc2a34b67fb9fd4183dfb2ef0d9559d8d7be9d9d106ba975407342dfff065bf1"
+      )
+      shared_glyph_local_color = "/tmp/noctalia-hydra-shared-glyph-local-color.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -g '80,0 160x40' "
+          f"{shared_glyph_local_color}"
+      )
+      machine.succeed(f"test $(stat -c %s {shared_glyph_local_color}) -gt 500")
+      assert machine.succeed(f"sha256sum {shared_glyph_local_color}").split()[0] == (
+          "5265010082eb59d96c46a39f7791beb0766a84a49e52fffe2392a3060e590c03"
       )
       machine.succeed(
           "printf '\\nonHover(true)\\n' >> "
@@ -492,6 +523,7 @@ pkgs.testers.runNixOSTest (
       machine.copy_from_machine(screenshot)
       machine.copy_from_machine(hover_hidden)
       machine.copy_from_machine(hover_visible)
+      machine.copy_from_machine(shared_glyph_local_color)
       machine.copy_from_machine(panel_screenshot)
 
       # Exercise API 15's scoped settings opener after the rendering captures.
@@ -508,6 +540,42 @@ pkgs.testers.runNixOSTest (
       )
       machine.succeed(f"test $(stat -c %s {settings_screenshot}) -gt 1000")
       machine.copy_from_machine(settings_screenshot)
+
+      # The native searchable glyph selector is attached by Noctalia to
+      # widget-scoped `type = "glyph"` controls. Open the center placement's
+      # editor with local glyphs enabled and capture its glyph controls.
+      assert noctalia_msg(
+          "settings-open-widget hydra-test hydra-readiness"
+      ).strip() == "ok"
+      machine.sleep(1)
+      widget_settings_screenshot = "/tmp/noctalia-hydra-widget-settings-vm.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -o HEADLESS-1 "
+          f"{widget_settings_screenshot}"
+      )
+      machine.succeed(f"test $(stat -c %s {widget_settings_screenshot}) -gt 1000")
+      machine.copy_from_machine(widget_settings_screenshot)
+
+      # Open the first glyph control's native searchable selector. The sheet
+      # starts without keyboard focus; seven Tab presses reach the running-
+      # glyph picker after Close, lane actions, toggles, and its text input.
+      for _ in range(7):
+          wtype("-k Tab")
+      wtype("-k Return")
+      wait_log("logical=568x570")
+      machine.sleep(1)
+      glyph_picker_screenshot = "/tmp/noctalia-hydra-glyph-picker-vm.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -o HEADLESS-1 "
+          f"{glyph_picker_screenshot}"
+      )
+      machine.succeed(f"test $(stat -c %s {glyph_picker_screenshot}) -gt 1000")
+      machine.fail(f"cmp -s {widget_settings_screenshot} {glyph_picker_screenshot}")
+      machine.copy_from_machine(glyph_picker_screenshot)
 
       logs = machine.succeed(journal)
       for forbidden in (
