@@ -1,7 +1,7 @@
 id = "goober/hydra-update-examiner"
 name = "Hydra Update Examiner"
-version = "0.1.0"
-plugin_api = 3
+version = "0.2.0"
+plugin_api = 15
 author = "goober"
 license = "MIT"
 icon = "server-bolt"
@@ -55,6 +55,71 @@ min = 1
 max = 100
 step = 1
 
+# V4 exposed appearance as plugin-wide settings. Keep that one-page workflow as
+# the v5 default while still allowing an individual bar placement to opt out.
+[[setting]]
+key = "shared_display_mode"
+type = "select"
+label_key = "settings.shared_display_mode.label"
+description_key = "settings.shared_display_mode.description"
+default = "always"
+options = [
+  { value = "on_hover", label_key = "display_mode.on_hover" },
+  { value = "always", label_key = "display_mode.always" },
+  { value = "icon_only", label_key = "display_mode.icon_only" },
+]
+
+[[setting]]
+key = "shared_running_color"
+type = "color"
+label_key = "settings.shared_colors.running"
+default = "secondary"
+
+[[setting]]
+key = "shared_stalled_color"
+type = "color"
+label_key = "settings.shared_colors.stalled"
+description_key = "settings.colors.stalled_description"
+default = "error"
+
+[[setting]]
+key = "shared_close_color"
+type = "color"
+label_key = "settings.shared_colors.close"
+description_key = "settings.colors.close_description"
+default = "tertiary"
+
+[[setting]]
+key = "shared_launched_color"
+type = "color"
+label_key = "settings.shared_colors.launched"
+description_key = "settings.colors.launched_description"
+default = "primary"
+
+[[setting]]
+key = "shared_running_glyph"
+type = "glyph"
+label_key = "settings.shared_glyphs.running"
+default = "server-bolt"
+
+[[setting]]
+key = "shared_stalled_glyph"
+type = "glyph"
+label_key = "settings.shared_glyphs.stalled"
+default = "server-off"
+
+[[setting]]
+key = "shared_close_glyph"
+type = "glyph"
+label_key = "settings.shared_glyphs.close"
+default = "server-spark"
+
+[[setting]]
+key = "shared_launched_glyph"
+type = "glyph"
+label_key = "settings.shared_glyphs.launched"
+default = "rocket"
+
 [[service]]
 id = "status"
 entry = "service.luau"
@@ -63,15 +128,29 @@ entry = "service.luau"
 id = "hydra"
 entry = "widget.luau"
 
-  # Presentation settings are per placement in v5. Multiple Hydra widgets can
-  # share one poll stream while choosing different colors or text visibility.
+  # API 14+ action defaults are visible and overridable in the widget editor.
+  # Middle click keeps Noctalia's built-in settings-open-widget default.
+  [widget.actions]
+  right = "panel-toggle goober/hydra-update-examiner:actions"
+
+  [[widget.setting]]
+  key = "use_shared_presentation"
+  type = "bool"
+  label_key = "settings.use_shared_presentation.label"
+  description_key = "settings.use_shared_presentation.description"
+  default = true
+
+  # These non-advanced controls preserve v5's per-placement customization when
+  # the shared-presentation toggle is disabled.
   [[widget.setting]]
   key = "display_mode"
   type = "select"
-  label_key = "settings.display_mode.label"
-  description_key = "settings.display_mode.description"
+  label_key = "settings.overrides.display_mode.label"
+  description_key = "settings.overrides.display_mode.description"
   default = "always"
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
   options = [
+    { value = "on_hover", label_key = "display_mode.on_hover" },
     { value = "always", label_key = "display_mode.always" },
     { value = "icon_only", label_key = "display_mode.icon_only" },
   ]
@@ -79,58 +158,68 @@ entry = "widget.luau"
   [[widget.setting]]
   key = "running_color"
   type = "color"
-  label_key = "settings.colors.running"
+  label_key = "settings.overrides.colors.running"
   default = "secondary"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
 
   [[widget.setting]]
   key = "stalled_color"
   type = "color"
-  label_key = "settings.colors.stalled"
+  label_key = "settings.overrides.colors.stalled"
   description_key = "settings.colors.stalled_description"
   default = "error"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
 
   [[widget.setting]]
   key = "close_color"
   type = "color"
-  label_key = "settings.colors.close"
+  label_key = "settings.overrides.colors.close"
   description_key = "settings.colors.close_description"
   default = "tertiary"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
 
   [[widget.setting]]
   key = "launched_color"
   type = "color"
-  label_key = "settings.colors.launched"
+  label_key = "settings.overrides.colors.launched"
   description_key = "settings.colors.launched_description"
   default = "primary"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
 
   [[widget.setting]]
   key = "running_glyph"
   type = "glyph"
-  label_key = "settings.glyphs.running"
+  label_key = "settings.overrides.glyphs.running"
   default = "server-bolt"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
 
   [[widget.setting]]
   key = "stalled_glyph"
   type = "glyph"
-  label_key = "settings.glyphs.stalled"
+  label_key = "settings.overrides.glyphs.stalled"
   default = "server-off"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
 
   [[widget.setting]]
   key = "close_glyph"
   type = "glyph"
-  label_key = "settings.glyphs.close"
+  label_key = "settings.overrides.glyphs.close"
   default = "server-spark"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
 
   [[widget.setting]]
   key = "launched_glyph"
   type = "glyph"
-  label_key = "settings.glyphs.launched"
+  label_key = "settings.overrides.glyphs.launched"
   default = "rocket"
-  advanced = true
+  visible_when = { key = "use_shared_presentation", values = ["false"] }
+
+[[panel]]
+id = "actions"
+entry = "panel.luau"
+width = 300
+height = 300
+placement = "attached"
+position = "auto"
+open_near_click = true
+dismiss_on_outside_click = true

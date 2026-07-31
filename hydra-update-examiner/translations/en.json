@@ -1,4 +1,11 @@
 {
+  "actions": {
+    "documentation": "Documentation",
+    "open_hydra": "Open Hydra",
+    "refresh": "Refresh",
+    "settings": "Plugin settings",
+    "title": "Hydra Update Examiner"
+  },
   "channels": {
     "custom": "Exact channel",
     "nixpkgs_unstable": "Nixpkgs unstable",
@@ -9,7 +16,8 @@
   },
   "display_mode": {
     "always": "Always show readiness text",
-    "icon_only": "Icon only"
+    "icon_only": "Icon only",
+    "on_hover": "Show readiness text on hover"
   },
   "settings": {
     "channel": {
@@ -33,24 +41,53 @@
       "description": "An exact supported name such as nixos-26.05.",
       "label": "Exact channel"
     },
-    "display_mode": {
-      "description": "The documented v5 plugin API does not yet guarantee the old hover-only behavior.",
-      "label": "Readiness text"
-    },
-    "glyphs": {
-      "close": "Close glyph",
-      "launched": "Launched glyph",
-      "running": "Running glyph",
-      "stalled": "Stalled glyph"
+    "overrides": {
+      "colors": {
+        "close": "Close color override",
+        "launched": "Launched color override",
+        "running": "Running color override",
+        "stalled": "Stalled color override"
+      },
+      "display_mode": {
+        "description": "Readiness-text behavior for this bar placement.",
+        "label": "Readiness text override"
+      },
+      "glyphs": {
+        "close": "Close glyph override",
+        "launched": "Launched glyph override",
+        "running": "Running glyph override",
+        "stalled": "Stalled glyph override"
+      }
     },
     "refresh": {
       "description": "How often the shared service polls Hydra.",
       "label": "Refresh minutes"
+    },
+    "shared_colors": {
+      "close": "Shared close color",
+      "launched": "Shared launched color",
+      "running": "Shared running color",
+      "stalled": "Shared stalled color"
+    },
+    "shared_display_mode": {
+      "description": "Default readiness-text behavior for every placement using shared appearance.",
+      "label": "Shared readiness text"
+    },
+    "shared_glyphs": {
+      "close": "Shared close glyph",
+      "launched": "Shared launched glyph",
+      "running": "Shared running glyph",
+      "stalled": "Shared stalled glyph"
+    },
+    "use_shared_presentation": {
+      "description": "Use the plugin-wide readiness text, colors, and glyphs. Turn this off to customize only this placement.",
+      "label": "Use shared appearance"
     }
   },
   "widget": {
     "command_failed": "Hydra status command failed.",
     "command_timed_out": "Hydra status command timed out.",
+    "documentation_failed": "Could not open the plugin documentation.",
     "empty_custom_channel": "Choose an exact channel or select a channel preset.",
     "invalid_json": "Hydra status command returned invalid JSON.",
     "loading": "Refreshing Hydra channel status...",
