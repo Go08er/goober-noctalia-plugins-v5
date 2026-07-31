@@ -50,33 +50,64 @@ successful result visible and mark it stale.
 
 ## Usage
 
-Add the `noctalia_5` parent directory as a path source, replacing the example
-path with the checkout's absolute path:
+Add the published repository as a custom Noctalia v5 Git source, then enable
+the plugin:
 
 ```bash
-noctalia msg plugins source add goober-hue-dev path /absolute/path/to/noctalia_5
+noctalia msg plugins source add goober-v5 git https://github.com/Go08er/goober-noctalia-plugins-v5
 noctalia msg plugins enable goober/hydra-update-examiner
+noctalia msg plugins list
 ```
 
 Then add `goober/hydra-update-examiner:hydra` through the bar widget picker.
+The equivalent graphical flow is **Settings** → **Plugins** → add source:
+choose **Git**, name it `goober-v5`, enter
+<https://github.com/Go08er/goober-noctalia-plugins-v5>, and enable
+`goober/hydra-update-examiner` after the source loads.
 
 For a declarative configuration, the relevant shape is:
 
 ```toml
 [plugins]
 enabled = ["goober/hydra-update-examiner"]
+auto_update = true
 
 [[plugins.source]]
-name = "goober-hue-dev"
-kind = "path"
-location = "/absolute/path/to/noctalia_5"
+name = "goober-v5"
+kind = "git"
+location = "https://github.com/Go08er/goober-noctalia-plugins-v5"
+enabled = true
 
 [widget.hydra-readiness]
 type = "goober/hydra-update-examiner:hydra"
 ```
 
 Add `hydra-readiness` to the desired bar section using your existing bar
-configuration.
+configuration. Retain any other `[[plugins.source]]` entries you use when
+managing the configuration declaratively.
+
+Refresh the Git source with the Settings source refresh control or:
+
+```bash
+noctalia msg plugins update goober-v5
+```
+
+To remove it:
+
+```bash
+noctalia msg plugins disable goober/hydra-update-examiner
+noctalia msg plugins source remove goober-v5
+```
+
+For development, clone the repository and use its root as a path source instead:
+
+```bash
+noctalia msg plugins source add goober-v5-dev path /absolute/path/to/goober-noctalia-plugins-v5
+noctalia msg plugins enable goober/hydra-update-examiner
+```
+
+Do not use `hydra-update-examiner/` itself as the path source: Noctalia expects
+the source root containing `catalog.toml`.
 
 ## Controls and IPC
 
@@ -97,17 +128,28 @@ noctalia msg plugin goober/hydra-update-examiner:status all open
 
 ## Settings
 
-Plugin-wide data settings:
+Plugin-wide data settings are shared by the service and every widget placement:
 
-- Channel preset or exact supported channel.
-- Shared refresh interval, from 1 to 1440 minutes.
-- Close-state threshold, from 1 to 100 percent.
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `channel_preset` | `select` | `nixos-unstable` | Selects a supported NixOS or Nixpkgs channel, or exposes `custom_channel`. |
+| `custom_channel` | `string` | empty | Exact supported channel name used only when `channel_preset` is `custom`; this is not an arbitrary Hydra URL. |
+| `refresh_interval_minutes` | `int` | `60` | Poll interval in minutes, from 1 through 1440. |
+| `close_threshold` | `int` | `90` | Readiness percentage, from 1 through 100, at which the close state begins. |
 
-Per-widget presentation settings:
+Per-widget presentation settings apply independently to each bar placement:
 
-- Always show readiness text or use an icon-only display.
-- Running, stalled/error, close, and launched colors.
-- Running, stalled/error, close, and launched glyphs.
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `display_mode` | `select` | `always` | Shows readiness text continuously; `icon_only` hides it. |
+| `running_color` | `color` | `secondary` | Color used during normal progress. |
+| `stalled_color` | `color` | `error` | Color used for blocked or error states. |
+| `close_color` | `color` | `tertiary` | Color used at or above `close_threshold`. |
+| `launched_color` | `color` | `primary` | Color used when the candidate revision is published. |
+| `running_glyph` | `glyph` | `server-bolt` | Glyph used during normal progress. |
+| `stalled_glyph` | `glyph` | `server-off` | Glyph used for blocked or error states. |
+| `close_glyph` | `glyph` | `server-spark` | Glyph used near readiness. |
+| `launched_glyph` | `glyph` | `rocket` | Glyph used after publication. |
 
 The v4 hover-only percentage mode is not included because v5 has no documented
 equivalent yet.
@@ -182,10 +224,10 @@ deadline. Temporary Hydra outages can therefore produce a stale or error state.
 
 ## Development note
 
-The initial v5 port was prepared with OpenAI Codex assistance. It is being
-prepared for standalone public testing and has not been submitted to an
-upstream Noctalia catalog. The native beta.7/API 3 VM integration test passed
-on 2026-07-31; interactive UI coverage remains before a stable release.
+The initial v5 port was prepared with OpenAI Codex assistance. It is available
+as a standalone custom Git source and has not been submitted to an upstream
+Noctalia catalog. The native beta.7/API 3 VM integration test passed on
+2026-07-31; interactive UI coverage remains before a stable release.
 
 ## License
 
