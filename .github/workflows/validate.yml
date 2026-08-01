@@ -31,4 +31,7 @@ jobs:
           sudo apt-get install --yes shellcheck
 
       - name: Validate source
-        run: python3 tools/validate.py --require-shellcheck
+        run: |
+          python3 tools/validate.py --require-shellcheck
+          python3 nocvox/tests/check.py
+          python3 wall-in-one/tests/test_contract.py

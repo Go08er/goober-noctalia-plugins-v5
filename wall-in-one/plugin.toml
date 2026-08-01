@@ -1,0 +1,181 @@
+id = "goober/wall-in-one"
+name = "Wall-in-One"
+version = "0.2.0"
+plugin_api = 17
+author = "goober"
+license = "MIT"
+icon = "library-photo"
+description = "Coordinate static and live wallpaper providers, export stills, pair backgrounds, and synchronize Noctalia colors."
+deprecated = false
+tags = ["wallpaper", "bar", "panel", "shortcut", "theming", "video", "service", "utility"]
+dependencies = ["bash"]
+
+[[setting]]
+key = "capture_directory"
+type = "folder"
+label_key = "settings.capture_directory.label"
+description_key = "settings.capture_directory.description"
+default = ""
+
+[[setting]]
+key = "auto_capture"
+type = "bool"
+label_key = "settings.auto_capture.label"
+description_key = "settings.auto_capture.description"
+default = false
+
+[[setting]]
+key = "pair_static"
+type = "bool"
+label_key = "settings.pair_static.label"
+description_key = "settings.pair_static.description"
+default = true
+
+[[setting]]
+key = "sync_colors"
+type = "bool"
+label_key = "settings.sync_colors.label"
+description_key = "settings.sync_colors.description"
+default = false
+
+[[setting]]
+key = "color_scheme"
+type = "select"
+label_key = "settings.color_scheme.label"
+description_key = "settings.color_scheme.description"
+default = "m3-content"
+visible_when = { key = "sync_colors", values = ["true"] }
+options = [
+  { value = "m3-content", label_key = "settings.color_scheme.options.m3_content" },
+  { value = "m3-tonal-spot", label_key = "settings.color_scheme.options.m3_tonal_spot" },
+  { value = "m3-fruit-salad", label_key = "settings.color_scheme.options.m3_fruit_salad" },
+  { value = "m3-rainbow", label_key = "settings.color_scheme.options.m3_rainbow" },
+  { value = "m3-monochrome", label_key = "settings.color_scheme.options.m3_monochrome" },
+  { value = "vibrant", label_key = "settings.color_scheme.options.vibrant" },
+  { value = "faithful", label_key = "settings.color_scheme.options.faithful" },
+  { value = "soft", label_key = "settings.color_scheme.options.soft" },
+  { value = "dysfunctional", label_key = "settings.color_scheme.options.dysfunctional" },
+  { value = "muted", label_key = "settings.color_scheme.options.muted" },
+]
+
+[[setting]]
+key = "palette_output"
+type = "string"
+label_key = "settings.palette_output.label"
+description_key = "settings.palette_output.description"
+default = ""
+visible_when = { key = "sync_colors", values = ["true"] }
+advanced = true
+
+[[setting]]
+key = "video_source"
+type = "file"
+label_key = "settings.video_source.label"
+description_key = "settings.video_source.description"
+default = ""
+extensions = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".gif"]
+
+[[setting]]
+key = "manual_pair_file"
+type = "file"
+label_key = "settings.manual_pair_file.label"
+description_key = "settings.manual_pair_file.description"
+default = ""
+extensions = [".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif"]
+
+[[setting]]
+key = "video_frame_second"
+type = "int"
+label_key = "settings.video_frame_second.label"
+description_key = "settings.video_frame_second.description"
+default = 1
+min = 0
+max = 3600
+advanced = true
+
+[[setting]]
+key = "workshop_id"
+type = "string"
+label_key = "settings.workshop_id.label"
+description_key = "settings.workshop_id.description"
+default = ""
+
+[[setting]]
+key = "workshop_directory"
+type = "folder"
+label_key = "settings.workshop_directory.label"
+description_key = "settings.workshop_directory.description"
+default = ""
+advanced = true
+
+[[setting]]
+key = "scene_screenshot_delay"
+type = "int"
+label_key = "settings.scene_screenshot_delay.label"
+description_key = "settings.scene_screenshot_delay.description"
+default = 15
+min = 1
+max = 120
+advanced = true
+
+[[setting]]
+key = "extra_provider_panel"
+type = "string"
+label_key = "settings.extra_provider_panel.label"
+description_key = "settings.extra_provider_panel.description"
+default = ""
+advanced = true
+
+[[service]]
+id = "coordinator"
+entry = "service.luau"
+
+[[widget]]
+id = "wall-in-one"
+entry = "widget.luau"
+
+  # Wall-in-One owns all three buttons through its persisted gesture map.
+  [widget.actions]
+  middle = "none"
+
+  [[widget.setting]]
+  key = "glyph"
+  type = "glyph"
+  label_key = "settings.glyph.label"
+  description_key = "settings.glyph.description"
+  default = "library-photo"
+
+  [[widget.setting]]
+  key = "label"
+  type = "string"
+  label_key = "settings.label.label"
+  description_key = "settings.label.description"
+  default = "Wall-in-One"
+
+  [[widget.setting]]
+  key = "show_label"
+  type = "bool"
+  label_key = "settings.show_label.label"
+  description_key = "settings.show_label.description"
+  default = true
+
+  [[widget.setting]]
+  key = "color"
+  type = "color"
+  label_key = "settings.color.label"
+  description_key = "settings.color.description"
+  default = "on_surface"
+
+[[panel]]
+id = "hub"
+entry = "panel.luau"
+width = 600
+height = 760
+placement = "attached"
+position = "auto"
+open_near_click = true
+dismiss_on_outside_click = true
+
+[[shortcut]]
+id = "wall-in-one-shortcut"
+entry = "shortcut.luau"

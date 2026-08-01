@@ -1,77 +1,88 @@
-# Noctalia v5 VM test
+# Noctalia v5 VM tests
 
-This test boots a disposable NixOS QEMU guest and runs the public-test plugin
-against the exact Noctalia v5.0.0-beta.7 source revision. It does not launch
-Noctalia v5 in the host Wayland session or read/write the host Noctalia
-configuration.
+These tests boot disposable NixOS QEMU guests against the exact pinned
+Noctalia `v5.0.0-beta.7` revision. They never launch Noctalia in the host
+Wayland session or read or write the host Noctalia configuration.
 
-Run the automated test from the repository root:
+Run one automated suite from the repository root:
 
 ```bash
 nix build -L .#vm-test
+nix build -L .#vm-test-nocvox
+nix build -L .#vm-test-wall-in-one
 ```
 
-For exploratory testing, build the interactive test driver:
+| Package | Coverage |
+| --- | --- |
+| `vm-test` | Hydra rendering, actions, hot reload, settings, and native searchable glyph picker |
+| `vm-test-nocvox` | NocVox singleton listener, state/control matrix, diagnostics, validation, privacy, and teardown |
+| `vm-test-wall-in-one` | Provider discovery/control, still capture and pairing, color policy, persistence, panel rendering, and renderer ownership boundaries |
+
+Each suite also exposes an interactive driver by adding `-driver` to its
+package name. For example:
 
 ```bash
-nix build .#vm-test-driver
+nix build .#vm-test-wall-in-one-driver
 ./result/bin/nixos-test-driver
 ```
 
-The guest uses headless Sway because Noctalia's bar needs a real Wayland
+The guests use headless Sway because Noctalia's bar needs a real Wayland
 compositor with `zwlr_layer_shell_v1`, an output, and EGL/GLES2. Rendering uses
 Mesa software paths; no host desktop or GPU session is shared.
 
-The automated path is intentionally offline and deterministic. The guest first
-commits the staged source into a local Git repository, then adds its `file://`
-URL through the same `plugins source add ... git ...` IPC used for GitHub. This
-tests the Git-source implementation without relying on GitHub or exposing the
-host session. Fixture versions of `curl` and `xdg-open` return a successful
-Hydra `launched` result and record requests inside the guest. The test then
-checks:
+The automated path is offline and deterministic. Each guest commits its staged
+catalog source into a local Git repository and adds that `file://` source using
+the same `plugins source add ... git ...` IPC used for GitHub. This exercises
+catalog discovery, lazy clone, and managed plugin materialization without
+network access. Provider and external-command behavior comes from bounded guest
+fixtures.
 
-- beta.7 native plugin lint and config validation;
-- source addition through IPC and lazy Git cloning on enable;
-- root `catalog.toml` discovery from a no-checkout Git cache;
-- export into Noctalia's managed materialized-plugin directory;
-- layer-shell, plugin discovery, service startup, and construction of two
-  widgets plus the attached panel;
-- independent shared/local text-color and glyph inheritance across two
-  placements, including golden render crops for local `circle-check` + shared
-  `primary` and shared `rocket` + local `secondary`;
-- service and widget IPC dispatch;
-- the widget-to-service open action;
-- `on_hover` hidden and visible rendering through the production callback;
-- panel rendering plus its documentation and API 15 scoped-settings actions;
-- guest-only service, widget, and panel hot reload;
-- the real shell helper against fixed Hydra responses;
-- keyboard activation of a widget-scoped glyph control; and
-- `grim` captures of the bar, hover states, action panel, plugin settings,
-  per-widget settings, and Noctalia's native searchable glyph menu.
+## Hydra Update Examiner
 
-The fixture is an integration boundary, not a replacement for parser tests.
-Recorded response fixtures for every Hydra state remain a separate milestone.
+The Hydra suite covers beta.7 native lint and config validation; two independent
+widget placements; shared/local text, color, and glyph inheritance; service,
+widget, and panel IPC; hover rendering; all three hot-reload paths; scoped
+settings; the response helper; screenshots; and keyboard opening of Noctalia's
+native searchable glyph menu.
 
-## Last result
+The headless compositor has no physical pointer, so the hover probe calls the
+production `onHover(true)` callback through a temporary guest-only hot reload.
+Physical pointer dispatch, choosing and applying a different glyph, live GitHub
+network cloning, and the remaining Hydra response states remain exploratory
+coverage.
 
-The automated run passed on 2026-07-31 against the pinned beta.7 host with
-plugin API 15. It passed native lint/config validation and exercised Git-source
-cloning, catalog discovery, plugin materialization, inherited and local
-presentation, the rendered `Launched` state, service/widget IPC, hover state
-rendering, the attached panel, documentation and scoped-settings actions, all
-three hot-reload paths, screenshot capture, and clean shutdown. The v0.3.0 test
-definition also opens a placement with `use_shared_glyphs = false`, follows the
-sheet's keyboard focus order to activate its first picker button, and captures
-the resulting searchable **Pick a Glyph** menu. Exact bar crops also verify
-that shared/local glyph and color inheritance remain independent.
+## NocVox
 
-Current Noctalia renders root/plugin-wide glyph settings as text fields, so the
-VM distinguishes that optional shared-glyph surface from the per-widget
-native picker workflow.
+The NocVox suite imports and enables the real plugin, creates two placements,
+and verifies there is exactly one long-lived status follower. It covers normal,
+malformed, and future status values; state-aware toggle/stop/cancel; command
+failure recovery; diagnostics and a reload while diagnostics are pending; safe
+shell quoting; invalid override rejection; attached-panel rendering; missing
+glyph detection; and disable cleanup without stopping the externally owned
+daemon sentinel.
 
-The headless compositor exposes no physical pointer, so the automated hover
-probe calls the production `onHover(true)` callback through a temporary guest
-hot reload and confirms that the rendered crop changes. Physical pointer
-dispatch, action-panel button presses, selecting and applying a different glyph,
-settings edits, manifest reload, a live GitHub network clone, and the remaining
-Hydra states still require exploratory VM coverage.
+## Wall-in-One
+
+The Wall-in-One suite imports the coordinator beside controlled Wallhaven,
+W Engine, and mpvpaper fixtures. It pins the beta.7 `plugins list` grammar;
+rejects incompatible or look-alike status tokens; exercises the documented
+provider panels and service commands; checks atomic configuration and runtime
+state across reload; and renders the attached hub.
+
+Capture fixtures cover a configured video and a configured W Engine project,
+verify output in the selected directory, and record the resulting
+`setWallpaper` and color-scheme requests. Multi-output assertions keep
+Noctalia's global-palette rule explicit: the configured palette output is the
+leader, while the last paired output wins when no leader is selected. An
+explicit lock-screen image remains an external override; the plugin only
+persists the paired wallpaper and never rewrites lock-screen configuration.
+
+W Engine discovery remains a cooperative, versioned adapter because v5 has no
+public cross-plugin status API. The guest verifies the handshake boundary and
+safe video/preview fallback; no process arguments or provider-private state are
+inspected, no second renderer is started, and the live renderer sentinel and
+provider-owned schedules remain untouched.
+
+All suites treat Luau runtime errors, undeclared settings, failed hot reloads,
+and missing glyph warnings as failures. Run the relevant target after any
+plugin or harness change; a prior result does not certify the current tree.
