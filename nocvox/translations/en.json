@@ -3,14 +3,6 @@
     "name": "NocVox"
   },
   "settings": {
-    "notify_transitions": {
-      "label": "Notify on state transitions",
-      "description": "Show bounded notifications when VoxType starts recording, transcribes, returns idle, or stops."
-    },
-    "notify_failures": {
-      "label": "Notify on failures",
-      "description": "Show an error notification when a requested action or the status listener fails."
-    },
     "tooltip_show_model": {
       "label": "Show configured model in tooltip"
     },
@@ -26,16 +18,6 @@
       "transcribing": "Transcribing color",
       "stopped": "Stopped color",
       "unknown": "Unknown-state color"
-    },
-    "enable_overrides": {
-      "label": "Enable advanced one-shot overrides",
-      "description": "Allow the detail panel to pass validated options to one recording without changing VoxType configuration."
-    },
-    "gestures": {
-      "left": "Left-click action",
-      "middle": "Middle-click action",
-      "right": "Right-click action",
-      "description": "The saved action is retained even when it is unavailable in the current VoxType state."
     },
     "idle_display": {
       "label": "Idle presentation",
@@ -54,10 +36,6 @@
       "label": "Widget width",
       "compact": "Compact",
       "expanded": "Expanded state label"
-    },
-    "show_override_name": {
-      "label": "Show active override in widget",
-      "description": "Append the selected one-shot output, model, or profile while it is active."
     },
     "glyphs": {
       "idle": "Idle glyph",
@@ -85,16 +63,6 @@
     "error": "Error",
     "unknown": "Unknown"
   },
-  "notifications": {
-    "state": {
-      "stopped": "VoxType daemon stopped. Manage it outside this plugin.",
-      "idle": "VoxType is idle.",
-      "recording": "VoxType is recording.",
-      "streaming": "VoxType is streaming.",
-      "transcribing": "VoxType is transcribing.",
-      "error": "VoxType reported an error state without additional details."
-    }
-  },
   "errors": {
     "action_failed": "The VoxType action failed.",
     "malformed_status": "VoxType returned malformed status JSON: {error}",
@@ -105,13 +73,6 @@
     "cancel_unavailable": "Cancel is available only during recording, streaming, or transcription.",
     "toggle_unavailable": "Toggle is unavailable in the current VoxType state.",
     "unknown_action": "Unknown VoxType action: {action}",
-    "overrides_disabled": "One-shot overrides are disabled in plugin settings.",
-    "invalid_output": "The requested one-shot output mode is invalid.",
-    "invalid_file": "File output requires a non-empty path without control characters.",
-    "absolute_file": "File output requires an absolute path or a path beginning with ~/.",
-    "invalid_model": "The model override contains unsupported characters or is too long.",
-    "invalid_profile": "The profile override must be the name of an existing VoxType profile and contain only letters, numbers, dot, underscore, or hyphen.",
-    "invalid_tristate": "A one-shot on/off/inherit value is invalid.",
     "action_timeout": "The VoxType recording action timed out.",
     "action_exit": "The VoxType recording action exited with code {code}.",
     "action_not_launched": "Noctalia could not launch the VoxType recording action.",
@@ -121,17 +82,6 @@
     "variant_diagnostics": "Could not read VoxType variant diagnostics.",
     "diagnostics_interrupted": "Diagnostics were interrupted by a plugin reload; run them again."
   },
-  "overrides": {
-    "output": {
-      "type": "Keyboard type",
-      "clipboard": "Clipboard",
-      "paste": "Paste",
-      "file": "File"
-    },
-    "model": "Model {value}",
-    "profile": "Profile {value}",
-    "text_actions": "Text-action options"
-  },
   "widget": {
     "waiting": "Waiting for the VoxType listener.",
     "state": "State: {state}",
@@ -139,21 +89,15 @@
     "elapsed_unknown": "~0s",
     "keybind_hint": "Existing keybind: Ctrl+Control_R",
     "daemon_external": "Daemon lifecycle is managed outside this plugin.",
-    "active_override": "One-shot override: {value}",
     "model": "Configured model: {value}",
     "device": "Configured device: {value}",
     "backend": "Reported backend: {value}",
-    "gesture": {
-      "left": "Left: {action}",
-      "middle": "Middle: {action}",
-      "right": "Right: {action}"
-    },
-    "unavailable_suffix": "(unavailable: {reason})",
+    "actions_hint": "Button bindings are configured per placement in this widget's Actions section.",
     "last_error": "Last error: {error}"
   },
   "panel": {
     "close": "Close",
-    "settings": "Plugin settings",
+    "widget_settings_hint": "Recording controls live here. Appearance, tooltip fields, glyphs, labels, and button bindings belong to each bar placement; by default, middle-click the widget to edit them.",
     "controls": "Recording controls",
     "status": "Status",
     "action_pending": "Action pending",
@@ -162,36 +106,6 @@
     "listener_unavailable": "The VoxType status listener is unavailable. Reload the plugin after checking the executable; the companion will not start or supervise the daemon.",
     "daemon_stopped": "The VoxType daemon is not running. Check its existing user service outside this plugin; no lifecycle command will be run here.",
     "last_status": "Last status: {value}",
-    "active_override": "Active one-shot override: {value}",
-    "overrides": {
-      "title": "Optional one-shot recording",
-      "none_active": "Daemon defaults",
-      "disabled": "Disabled by default. Enable advanced one-shot overrides in plugin settings to use supported per-recording options.",
-      "explanation": "These selections apply only when Start is pressed here. They reference existing VoxType models/profiles and never edit config.toml.",
-      "output_label": "Exclusive output destination",
-      "output": {
-        "inherit": "Configured daemon default",
-        "type": "Keyboard type only",
-        "clipboard": "Clipboard only",
-        "paste": "Paste only",
-        "file": "File only (explicit path)"
-      },
-      "file_exclusive": "File is the exclusive output for this recording. The absolute path is validated and shell-quoted; no other output is backed up.",
-      "file_placeholder": "/absolute/path/transcript.txt or ~/path/transcript.txt",
-      "model_label": "Existing model name (optional)",
-      "model_placeholder": "Example: parakeet-tdt-0.6b-v3-int8",
-      "profile_label": "Existing profile name (optional)",
-      "profile_placeholder": "Reference only; profiles are never created or edited",
-      "auto_submit": "Auto-submit",
-      "shift_enter": "Shift+Enter newlines",
-      "smart_submit": "Smart auto-submit",
-      "tristate": {
-        "inherit": "Inherit daemon setting",
-        "on": "On for this recording",
-        "off": "Off for this recording"
-      },
-      "clipboard_privacy": "Clipboard and paste are one-shot VoxType output destinations only. NocVox never reads, scrapes, archives, restores, or backs up clipboard or transcript content."
-    },
     "diagnostics": {
       "title": "Diagnostics",
       "not_collected": "Variant diagnostics have not been collected.",

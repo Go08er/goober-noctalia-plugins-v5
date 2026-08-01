@@ -31,8 +31,6 @@ local lastCommandSequence = 0
 local actionPending = false
 local diagnosticsPending = false
 local hasGoodStatus = false
-local activeStopFlag = ""
-local lastNotifiedError = ""
 
 local current = {
     protocol = STATUS_PROTOCOL,
@@ -52,23 +50,10 @@ local current = {
     last_action = "",
     last_error = "",
     malformed_count = 0,
-    override_active = false,
-    override_output = "inherit",
-    override_file = "",
-    override_model = "",
-    override_profile = "",
 }
-
-local function cfg(key)
-    return noctalia.getConfig(key)
-end
 
 local function nowSeconds()
     return tonumber(noctalia.formatTime("%s")) or 0
-end
-
-local function shellQuote(value)
-    return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
 end
 
 local function cleanText(value, maximum)
@@ -88,20 +73,7 @@ local function publish()
     noctalia.state.set(STATUS_KEY, current)
 end
 
-local function notifyFailure(message)
-    if cfg("notify_failures") ~= true then
-        return
-    end
-
-    if message == lastNotifiedError then
-        return
-    end
-
-    lastNotifiedError = message
-    noctalia.notifyError(noctalia.tr("plugin.name"), message)
-end
-
-local function setFailure(message, shouldNotify)
+local function setFailure(message)
     local detail = cleanText(message, 320)
     if detail == "" then
         detail = noctalia.tr("errors.action_failed")
@@ -109,46 +81,6 @@ local function setFailure(message, shouldNotify)
     current.last_error = detail
     noctalia.log("nocvox: " .. detail)
     publish()
-    if shouldNotify then
-        notifyFailure(detail)
-    end
-end
-
-local function clearOverride()
-    current.override_active = false
-    current.override_output = "inherit"
-    current.override_file = ""
-    current.override_model = ""
-    current.override_profile = ""
-    activeStopFlag = ""
-end
-
-local function notifyTransition(state)
-    if cfg("notify_transitions") ~= true then
-        return
-    end
-    if
-        state ~= "idle"
-        and state ~= "recording"
-        and state ~= "streaming"
-        and state ~= "transcribing"
-        and state ~= "stopped"
-    then
-        return
-    end
-    local message = ""
-    if state == "stopped" then
-        message = noctalia.tr("notifications.state.stopped")
-    elseif state == "idle" then
-        message = noctalia.tr("notifications.state.idle")
-    elseif state == "recording" then
-        message = noctalia.tr("notifications.state.recording")
-    elseif state == "streaming" then
-        message = noctalia.tr("notifications.state.streaming")
-    elseif state == "transcribing" then
-        message = noctalia.tr("notifications.state.transcribing")
-    end
-    noctalia.notify(noctalia.tr("plugin.name"), message)
 end
 
 local function applyStatusLine(line)
@@ -159,7 +91,7 @@ local function applyStatusLine(line)
             current.state = "unknown"
             current.raw_state = "malformed"
         end
-        setFailure(noctalia.tr("errors.malformed_status", { error = cleanText(decodeError, 160) }), true)
+        setFailure(noctalia.tr("errors.malformed_status", { error = cleanText(decodeError, 160) }))
         return
     end
 
@@ -177,9 +109,6 @@ local function applyStatusLine(line)
     elseif normalized == "idle" or normalized == "stopped" then
         current.recording_started_at = 0
         current.elapsed_approximate = false
-        if RECORDING_STATES[previousState] or PROCESSING_STATES[previousState] then
-            clearOverride()
-        end
     end
 
     current.state = normalized
@@ -191,17 +120,8 @@ local function applyStatusLine(line)
     current.backend = cleanText(decoded.backend, 120)
     current.observed_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
     current.last_error = ""
-    lastNotifiedError = ""
     hasGoodStatus = true
     publish()
-
-    if wasGood and normalized ~= previousState then
-        if normalized == "error" then
-            notifyFailure(noctalia.tr("notifications.state.error"))
-        else
-            notifyTransition(normalized)
-        end
-    end
 end
 
 local function stateAllows(action)
@@ -223,133 +143,7 @@ local function stateAllows(action)
     return false, noctalia.tr("errors.unknown_action", { action = tostring(action) })
 end
 
-local function validateSimpleOverride(value, kind)
-    local text = noctalia.string.trim(tostring(value or ""))
-    if text == "" then
-        return ""
-    end
-
-    local maximum = if kind == "model" then 200 else 128
-    local pattern = if kind == "model" then "^[%w%._%+%-%/]+$" else "^[%w%._%-]+$"
-    if #text > maximum or text:match(pattern) == nil then
-        return nil
-    end
-    return text
-end
-
-local function triStateFlag(value, enabledFlag, disabledFlag)
-    if value == nil or value == "" or value == "inherit" then
-        return "", true
-    elseif value == "on" then
-        return enabledFlag, true
-    elseif value == "off" then
-        return disabledFlag, true
-    end
-    return "", false
-end
-
-local function buildStartOverrides(payload)
-    local supplied = type(payload) == "table" and type(payload.overrides) == "table"
-    if not supplied then
-        return {}, {
-            active = false,
-            output = "inherit",
-            file = "",
-            model = "",
-            profile = "",
-            stop_flag = "",
-        }
-    end
-    if cfg("enable_one_shot_overrides") ~= true then
-        return nil, noctalia.tr("errors.overrides_disabled")
-    end
-
-    local overrides = payload.overrides
-    local output = tostring(overrides.output or "inherit")
-    local outputFlags = {
-        inherit = "",
-        type = "--type",
-        clipboard = "--clipboard",
-        paste = "--paste",
-        file = "--file",
-    }
-    if outputFlags[output] == nil then
-        return nil, noctalia.tr("errors.invalid_output")
-    end
-
-    local flags = {}
-    local filePath = ""
-    local stopFlag = ""
-    if output == "file" then
-        local configuredPath = noctalia.string.trim(tostring(overrides.file_path or ""))
-        if configuredPath == "" or #configuredPath > 4096 or configuredPath:find("[%c]") ~= nil then
-            return nil, noctalia.tr("errors.invalid_file")
-        end
-        if configuredPath:sub(1, 1) ~= "/" and configuredPath:sub(1, 2) ~= "~/" then
-            return nil, noctalia.tr("errors.absolute_file")
-        end
-        filePath = noctalia.expandPath(configuredPath)
-        if filePath:sub(1, 1) ~= "/" then
-            return nil, noctalia.tr("errors.absolute_file")
-        end
-        table.insert(flags, shellQuote("--file=" .. filePath))
-    elseif output ~= "inherit" then
-        table.insert(flags, outputFlags[output])
-        stopFlag = outputFlags[output]
-    end
-
-    local model = validateSimpleOverride(overrides.model, "model")
-    if model == nil then
-        return nil, noctalia.tr("errors.invalid_model")
-    elseif model ~= "" then
-        table.insert(flags, "--model")
-        table.insert(flags, shellQuote(model))
-    end
-
-    local profile = validateSimpleOverride(overrides.profile, "profile")
-    if profile == nil then
-        return nil, noctalia.tr("errors.invalid_profile")
-    elseif profile ~= "" then
-        table.insert(flags, "--profile")
-        table.insert(flags, shellQuote(profile))
-    end
-
-    local triStates = {
-        { overrides.auto_submit, "--auto-submit", "--no-auto-submit" },
-        { overrides.shift_enter_newlines, "--shift-enter-newlines", "--no-shift-enter-newlines" },
-        { overrides.smart_auto_submit, "--smart-auto-submit", "--no-smart-auto-submit" },
-    }
-    for _, item in ipairs(triStates) do
-        local flag, valid = triStateFlag(item[1], item[2], item[3])
-        if not valid then
-            return nil, noctalia.tr("errors.invalid_tristate")
-        end
-        if flag ~= "" then
-            table.insert(flags, flag)
-        end
-    end
-
-    return flags,
-        {
-            active = #flags > 0,
-            output = output,
-            file = filePath,
-            model = model,
-            profile = profile,
-            stop_flag = stopFlag,
-        }
-end
-
-local function applyStartedOverride(override)
-    current.override_active = override.active == true
-    current.override_output = tostring(override.output or "inherit")
-    current.override_file = tostring(override.file or "")
-    current.override_model = tostring(override.model or "")
-    current.override_profile = tostring(override.profile or "")
-    activeStopFlag = tostring(override.stop_flag or "")
-end
-
-local function runControl(command, action, startedOverride)
+local function runControl(command, action)
     actionPending = true
     current.pending_action = action
     current.last_error = ""
@@ -361,7 +155,7 @@ local function runControl(command, action, startedOverride)
         current.last_action = action
 
         if result.timedOut then
-            setFailure(noctalia.tr("errors.action_timeout"), true)
+            setFailure(noctalia.tr("errors.action_timeout"))
             return
         end
         if result.exitCode ~= 0 then
@@ -369,63 +163,46 @@ local function runControl(command, action, startedOverride)
             if detail == "" then
                 detail = noctalia.tr("errors.action_exit", { code = result.exitCode })
             end
-            setFailure(detail, true)
+            setFailure(detail)
             return
         end
 
         current.last_error = ""
-        if action == "start" and type(startedOverride) == "table" then
-            applyStartedOverride(startedOverride)
-        end
         publish()
     end, 15000)
 
     if not accepted then
         actionPending = false
         current.pending_action = ""
-        setFailure(noctalia.tr("errors.action_not_launched"), true)
+        setFailure(noctalia.tr("errors.action_not_launched"))
     end
 end
 
-local function startRecording(payload)
+local function startRecording()
     local allowed, reason = stateAllows("start")
     if not allowed then
-        setFailure(reason, true)
+        setFailure(reason)
         return
     end
-
-    local flags, overrideOrError = buildStartOverrides(payload)
-    if flags == nil then
-        setFailure(overrideOrError, true)
-        return
-    end
-    local command = "voxtype record start"
-    if #flags > 0 then
-        command ..= " " .. table.concat(flags, " ")
-    end
-    runControl(command, "start", overrideOrError)
+    runControl("voxtype record start", "start")
 end
 
 local function stopRecording()
     local allowed, reason = stateAllows("stop")
     if not allowed then
-        setFailure(reason, true)
+        setFailure(reason)
         return
     end
-    local command = "voxtype record stop"
-    if activeStopFlag ~= "" then
-        command ..= " " .. activeStopFlag
-    end
-    runControl(command, "stop", nil)
+    runControl("voxtype record stop", "stop")
 end
 
 local function cancelRecording()
     local allowed, reason = stateAllows("cancel")
     if not allowed then
-        setFailure(reason, true)
+        setFailure(reason)
         return
     end
-    runControl("voxtype record cancel", "cancel", nil)
+    runControl("voxtype record cancel", "cancel")
 end
 
 local function joinStringArray(value)
@@ -444,7 +221,7 @@ local function runDiagnostics()
         return
     end
     if not current.available then
-        setFailure(noctalia.tr("errors.missing_voxtype"), true)
+        setFailure(noctalia.tr("errors.missing_voxtype"))
         return
     end
 
@@ -480,7 +257,6 @@ local function runDiagnostics()
 
         if errorMessage ~= "" then
             noctalia.state.set(DIAGNOSTICS_KEY, { pending = false, error = errorMessage })
-            notifyFailure(errorMessage)
             return
         end
 
@@ -533,26 +309,26 @@ local function dispatchCommand(command)
         return
     end
     if actionPending then
-        setFailure(noctalia.tr("errors.action_pending"), true)
+        setFailure(noctalia.tr("errors.action_pending"))
         return
     end
 
     if action == "toggle" then
         if current.state == "idle" then
-            startRecording(nil)
+            startRecording()
         elseif RECORDING_STATES[current.state] then
             stopRecording()
         else
-            setFailure(noctalia.tr("errors.toggle_unavailable"), true)
+            setFailure(noctalia.tr("errors.toggle_unavailable"))
         end
     elseif action == "start" then
-        startRecording(command)
+        startRecording()
     elseif action == "stop" then
         stopRecording()
     elseif action == "cancel" then
         cancelRecording()
     else
-        setFailure(noctalia.tr("errors.unknown_action", { action = action }), true)
+        setFailure(noctalia.tr("errors.unknown_action", { action = action }))
     end
 end
 
@@ -575,7 +351,7 @@ local function startFollower()
         current.raw_state = "missing"
         current.available = false
         current.follower_active = false
-        setFailure(noctalia.tr("errors.missing_voxtype"), false)
+        setFailure(noctalia.tr("errors.missing_voxtype"))
         return
     end
 
@@ -585,7 +361,7 @@ local function startFollower()
     if not accepted then
         current.state = "unknown"
         current.raw_state = "listener-failed"
-        setFailure(noctalia.tr("errors.listener_not_started"), true)
+        setFailure(noctalia.tr("errors.listener_not_started"))
         return
     end
     publish()
@@ -627,12 +403,6 @@ function update()
     if RECORDING_STATES[current.state] then
         publish()
     end
-end
-
-function onConfigChanged()
-    -- No settings change requires replacing the follower; republish so every
-    -- client immediately re-evaluates its presentation/notification policy.
-    publish()
 end
 
 function onExit(_signal, _reason)

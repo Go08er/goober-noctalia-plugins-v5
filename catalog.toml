@@ -3,7 +3,7 @@
 [[plugin]]
 id = "goober/hydra-update-examiner"
 name = "Hydra Update Examiner"
-version = "0.3.0"
+version = "0.4.0"
 author = "goober"
 license = "MIT"
 icon = "server-bolt"
@@ -16,7 +16,7 @@ dependencies = ["bash", "curl", "jq", "perl", "grep", "awk", "sed", "head", "tr"
 [[plugin]]
 id = "goober/nocvox"
 name = "NocVox"
-version = "0.1.0"
+version = "0.3.0"
 author = "goober"
 license = "MIT"
 icon = "microphone"

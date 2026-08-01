@@ -15,8 +15,8 @@ source using one of the methods below.
 
 | Plugin | Version | Status |
 | --- | --- | --- |
-| `goober/hydra-update-examiner` | `0.3.0` | Beta.7/API 15, VM-validated |
-| `goober/nocvox` | `0.1.0` | Beta.7/API 17 companion MVP |
+| `goober/hydra-update-examiner` | `0.4.0` | Beta.7/API 15, streamlined v5 settings |
+| `goober/nocvox` | `0.3.0` | Beta.7/API 17 focused control companion |
 | `goober/wall-in-one` | `0.2.0` | Beta.7/API 17 coordination preview |
 
 ## Repository layout
@@ -128,7 +128,7 @@ enabled = true
 
 [widget.hydra-readiness]
 type = "goober/hydra-update-examiner:hydra"
-use_shared_glyphs = false
+display_mode = "on_hover"
 
 [widget.nocvox]
 type = "goober/nocvox:nocvox"
@@ -137,7 +137,7 @@ type = "goober/nocvox:nocvox"
 type = "goober/wall-in-one:wall-in-one"
 
 [plugin_settings."goober/hydra-update-examiner"]
-shared_display_mode = "on_hover"
+refresh_interval_minutes = 60
 ```
 
 Add the desired widget keys to a bar section using the rest of your normal bar
@@ -192,15 +192,12 @@ disable the Git source while developing if you want to avoid that ambiguity.
 NocVox listens to one extended `voxtype status --follow` stream and
 forwards only supported recording start, stop, cancel, and on-demand diagnostic
 commands. It never installs, starts, stops, updates, configures, or supervises
-the VoxType daemon. The default bar gestures remain left toggle and
-middle/right cancel. Advanced one-shot output/model/profile controls are off by
-default.
-
-Clipboard, paste, and file are explicit one-recording VoxType destinations.
-The plugin does not read the clipboard or persist transcripts. File output is
-exclusive rather than a simultaneous backup; see
-[`nocvox/README.md`](nocvox/README.md) for the privacy and output
-details.
+the VoxType daemon. The default bar actions are left-click toggle, right-click
+details, and Noctalia's normal middle-click widget settings. Start, stop, and
+cancel use VoxType's configured defaults; NocVox has no per-recording override
+or notification subsystem. The plugin does not read the clipboard or persist transcripts; see
+[`nocvox/README.md`](nocvox/README.md) for the full ownership and privacy
+boundary.
 
 ### Wall-in-One coordination and pairing
 
@@ -248,18 +245,18 @@ requirements and safety boundaries.
 
 ### Hydra Update Examiner customization
 
-The plugin gear exposes channel, polling, threshold, shared text mode and
-colors, plus optional plugin-wide shared glyph names. Current Noctalia renders
-root plugin glyph settings as text fields. For its native searchable glyph
-picker, middle-click a placed widget, leave **Use shared glyphs** off, and use
-the button adjacent to each glyph field. **Use shared text and colors** is an
-independent toggle, so placements can inherit those values while selecting
-their own glyphs. Right-click opens the native action panel.
+The plugin gear exposes only the singleton poller's channel, interval, and
+readiness-threshold controls. Middle-click a placed widget to edit that
+placement's text mode, colors, glyphs, and native Actions bindings together.
+The glyph fields use Noctalia's searchable picker. Left-click refresh and
+right-click panel defaults are ordinary native actions, so they are visible and
+replaceable in the same widget editor; middle-click keeps the shell's standard
+settings route.
 
-When updating from v0.2.0, `use_shared_presentation` continues to control text
-and colors but no longer controls glyphs. V0.3.0 defaults the new
-`use_shared_glyphs` widget setting to `false`; enable it on a placement only if
-that placement should retain v0.2.0's plugin-wide glyph behavior.
+V0.4.0 removes the temporary shared/local appearance duplication from v0.2 and
+v0.3. Existing widget-local display, color, and glyph values remain applicable;
+obsolete `shared_*` and `use_shared_*` keys can be removed from handwritten
+configuration.
 
 Run the repository checks with:
 
@@ -297,10 +294,11 @@ not vendored here while the beta API is changing quickly.
 ## Publication status
 
 This repository is a directly importable custom Git source for native v5
-testing. The two new plugins remain local staging work until an explicit
-publication step. None of the plugins has been submitted to, accepted into, or
-registered with Noctalia's built-in official or community catalogs. See
-`PORTING.md` and each plugin README for migration decisions and remaining work.
+testing. Hydra Update Examiner and NocVox are ready for direct testing here; the
+next Wall-in-One revision remains local staging work until its own publication
+step. None of the plugins has been submitted to, accepted into, or registered
+with Noctalia's built-in official or community catalogs. See `PORTING.md` and
+each plugin README for migration decisions and remaining work.
 
 ## License
 
