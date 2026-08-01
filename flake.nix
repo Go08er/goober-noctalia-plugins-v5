@@ -1,5 +1,5 @@
 {
-  description = "Noctalia v5 Hydra Update Examiner staging and VM tests";
+  description = "Noctalia v5 plugin source and isolated VM tests";
 
   inputs = {
     # Match the Nixpkgs snapshot used by the tagged beta.7 host.
@@ -21,18 +21,36 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      vmTest = import ./tests/vm {
+      hydraVmTest = import ./tests/vm {
+        inherit pkgs;
+        pluginRoot = ./.;
+        noctaliaPackage = noctalia.packages.${system}.default;
+      };
+      nocvoxVmTest = import ./tests/vm/nocvox.nix {
+        inherit pkgs;
+        pluginRoot = ./.;
+        noctaliaPackage = noctalia.packages.${system}.default;
+      };
+      wallInOneVmTest = import ./tests/vm/wall-in-one.nix {
         inherit pkgs;
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
       };
     in
     {
-      checks.${system}.noctalia-vm = vmTest;
+      checks.${system} = {
+        noctalia-vm = hydraVmTest;
+        nocvox-vm = nocvoxVmTest;
+        wall-in-one-vm = wallInOneVmTest;
+      };
 
       packages.${system} = {
-        vm-test = vmTest;
-        vm-test-driver = vmTest.driverInteractive;
+        vm-test = hydraVmTest;
+        vm-test-driver = hydraVmTest.driverInteractive;
+        vm-test-nocvox = nocvoxVmTest;
+        vm-test-nocvox-driver = nocvoxVmTest.driverInteractive;
+        vm-test-wall-in-one = wallInOneVmTest;
+        vm-test-wall-in-one-driver = wallInOneVmTest.driverInteractive;
       };
     };
 }

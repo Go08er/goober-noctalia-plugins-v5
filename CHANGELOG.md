@@ -2,7 +2,42 @@
 
 All notable staging changes will be recorded here.
 
-## 0.3.0 - Native glyph selection
+## Wall-in-One 0.2.0 - Live/static coordination preview
+
+- Rename the early wallpaper hub and its plugin, widget, panel, service, and
+  Control Center IDs to `goober/wall-in-one`.
+- Discover Wallhaven, W Engine, mpvpaper, and an optional open-only provider,
+  while retaining Noctalia's native selector and next/previous/random routes.
+- Route only documented provider panels and service commands; providers retain
+  ownership of their renderers, files, and scheduling.
+- Export full-resolution stills from a configured video or a configured W Engine
+  Workshop project into a selected directory. Video projects use FFmpeg;
+  scene/web projects use their preview until a cooperative capture adapter is
+  present.
+- Pair an exported still through `setWallpaper` so Noctalia persists a real
+  image for its backdrop, hooks, lock-screen fallback, and wallpaper-derived
+  colors while the dynamic provider remains active.
+- Add selectable color-scheme synchronization and an optional palette-output
+  leader for Noctalia's single global palette. Preserve explicit lock-screen
+  wallpaper overrides instead of rewriting them.
+- Define a versioned, opt-in W Engine status/capture handshake for rendered
+  stills while keeping current upstream W Engine on safe video/preview fallback.
+  Do not inspect process arguments or provider-private state, start a second
+  renderer, or start a competing rotation scheduler.
+
+## NocVox 0.1.0 - Companion MVP
+
+- Add an API 17 singleton listener for the extended VoxType status stream with
+  live idle, recording, streaming, transcribing, stopped, and unknown states.
+- Add a configurable bar widget with native glyph selectors, default
+  toggle/cancel/cancel gestures, an attached control/diagnostics panel, and
+  state-aware action gating.
+- Add disabled-by-default, validated one-shot output/model/profile/text-action
+  overrides without editing or supervising the existing VoxType installation.
+- Keep speech private: no transcript, audio, log, or clipboard content is read
+  or persisted; clipboard/paste/file remain explicit VoxType output modes.
+
+## Hydra Update Examiner 0.3.0 - Native glyph selection
 
 - Make Noctalia's native searchable per-widget glyph picker the default through
   `use_shared_glyphs = false`.
@@ -18,7 +53,7 @@ All notable staging changes will be recorded here.
 - Normalize empty glyph values to valid state-specific defaults and pin both
   shared/local glyph-and-color inheritance combinations with VM render crops.
 
-## 0.2.0 - Customization parity
+## Hydra Update Examiner 0.2.0 - Customization parity
 
 - Restore all 13 v4-style controls to the plugin settings page as shared data
   and appearance defaults.
@@ -36,7 +71,7 @@ All notable staging changes will be recorded here.
   settings actions, all three hot-reload paths, screenshots, and clean
   shutdown.
 
-## 0.1.0 - Public test candidate
+## Hydra Update Examiner 0.1.0 - Public test candidate
 
 - Start a native Noctalia v5 source repository layout.
 - Publish the repository as a directly importable custom Git source and

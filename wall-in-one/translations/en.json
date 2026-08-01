@@ -1,0 +1,302 @@
+{
+  "actions": {
+    "capture_current": "Export W Engine still",
+    "capture_pair": "Export + pair W Engine still",
+    "configured_unavailable": "{action} — configured but unavailable",
+    "extra_provider_open": "Open custom provider",
+    "hub_open": "Open Wall-in-One",
+    "manual_pair": "Pair selected still",
+    "mpvpaper_clear": "Clear this output",
+    "mpvpaper_clear_all": "Clear all outputs",
+    "mpvpaper_open": "Open mpvpaper",
+    "mpvpaper_pause": "Pause mpvpaper",
+    "mpvpaper_resume": "Resume mpvpaper",
+    "mpvpaper_toggle": "Toggle mpvpaper",
+    "native_next": "Next static",
+    "native_open": "Open Noctalia wallpapers",
+    "native_previous": "Previous static",
+    "native_random": "Random static",
+    "no_action": "No action",
+    "video_capture": "Export configured video still",
+    "video_capture_pair": "Export + pair configured video",
+    "w_engine_cycle_stop": "Stop W Engine rotation",
+    "w_engine_next": "Next W Engine wallpaper",
+    "w_engine_open": "Open W Engine",
+    "w_engine_stop": "Stop W Engine wallpaper",
+    "wallhaven_open": "Open Wallhaven"
+  },
+  "availability": {
+    "current_scene": "No Workshop ID was supplied by the W Engine adapter or configured in Wall-in-One settings.",
+    "extra": "The custom provider panel is not configured or its plugin is disabled.",
+    "manual_pair": "Choose a readable static image to pair first.",
+    "mpvpaper": "The official mpvpaper plugin is not enabled.",
+    "mpvpaper_ipc": "The official mpvpaper service or Noctalia command client is unavailable.",
+    "native_cli": "Noctalia's command client is unavailable.",
+    "output": "No focused output is available for this command.",
+    "unknown": "The configured action is unknown.",
+    "video": "Choose a readable video source. Video and animated-image extraction also requires the optional ffmpeg command.",
+    "w_engine": "The W Engine plugin is not enabled.",
+    "w_engine_ipc": "The W Engine plugin or Noctalia command client is unavailable.",
+    "wallhaven": "The official Wallhaven plugin is not enabled."
+  },
+  "capture": {
+    "directory": "Still directory: {path}",
+    "in_progress": "Still export in progress: {path}",
+    "last": "Last export: {provider} at {time}\n{path}",
+    "manual_behavior": "Manual pairing checks the selected image's signature through a temporary staging copy, adds full decode validation when optional ffmpeg is present, then makes the original path Noctalia's persisted wallpaper without retaining the staging copy. Use a durable file path that will remain available.",
+    "manual_source": "Selected static backing: {path}",
+    "none": "No still has been exported yet.",
+    "video_requirement": "Configured-video export is deterministic and uses the optional ffmpeg command at the selected frame time. Without ffmpeg, only video and animated-image extraction is unavailable; static pairing and provider controls still work.",
+    "video_source": "Configured video: {path}\nFrame time: {second}s",
+    "w_engine_adapter_boundary": "The cooperative W Engine adapter reports the active Workshop ID and owns rendered capture. After successful provider discovery, Wall-in-One sends wall-in-one-probe-v1; the adapter must re-send capabilities and current output state, or stale adapter flags clear after 10 seconds. Each capture request names a unique PNG under Wall-in-One's pluginDataDir()/staging directory, and the adapter must return exactly that requested path. Optional ffmpeg performs decode validation; without it Wall-in-One uses the Workshop source/preview fallback. Wall-in-One never reaches into provider-private state or signals the live renderer directly.",
+    "w_engine_adapter_capture": "W Engine adapter reports Workshop {id} on {output}; rendered capture is available when optional ffmpeg can decode-validate its PNG, otherwise export uses the source/preview fallback.",
+    "w_engine_adapter_status": "W Engine adapter reports Workshop {id} on {output}; capture is not advertised, so export uses the safe source/preview fallback.",
+    "w_engine_configured": "Configured Workshop fallback: {id}",
+    "w_engine_fallback_boundary": "Without a cooperative capture adapter, Wall-in-One does not claim to capture the live frame. It exports a real frame from Workshop video projects or copies the Workshop preview for scene/web projects.",
+    "w_engine_unavailable": "No cooperative W Engine status or numeric Workshop fallback is available. Configure a Workshop ID, select a static backing, or use configured-video export."
+  },
+  "common": {
+    "all_outputs": "all outputs",
+    "off": "off",
+    "on": "on",
+    "unknown": "unknown",
+    "unset": "not configured"
+  },
+  "diagnostics": {
+    "last_action_error": "Last action error: {error}",
+    "ownership": "Noctalia owns persisted static wallpapers and color generation. W Engine and mpvpaper own live processes. Wall-in-One uses their documented panel/service IPC and never reads provider-private plugin state.",
+    "probe_error": "Provider discovery failed: {error}",
+    "probe_ok": "Enabled-plugin discovery completed at {time}.",
+    "probing": "Checking enabled plugins and public command capabilities...",
+    "storage_error": "Wall-in-One storage is disabled. Config: {config} Runtime: {runtime}",
+    "storage_ok": "Schema-v1 config and schema-v2 runtime storage are healthy. Legacy schema-v1 runtime data is migrated atomically when loaded."
+  },
+  "errors": {
+    "action_unavailable": "Configured action '{action}' is unavailable: {reason}",
+    "backup": "Could not create the last-known-good backup.",
+    "capture_directory": "Could not create or use the still directory. A selected export directory must be an absolute path.",
+    "capture_failed": "Still export failed.",
+    "capture_failed_detail": "Still export failed: {detail}",
+    "capture_helper": "The Wall-in-One still-export helper is missing.",
+    "capture_busy": "A W Engine adapter capture is already in progress for this output.",
+    "capture_source": "Workshop item {id} has no usable video source or preview fallback.",
+    "capture_start": "Could not start the still-export helper.",
+    "color_cli": "The still was paired, but Noctalia's command client was unavailable for color synchronization.",
+    "color_probe_start": "Could not inspect Noctalia's current color source and scheme.",
+    "color_sync": "The still was paired, but color synchronization failed: {detail}",
+    "color_sync_start": "The still was paired, but the color-scheme command could not start.",
+    "config_action": "Invalid {button} gesture action: {action}",
+    "config_gestures": "config.json has no gestures object.",
+    "config_invalid": "config.json is invalid.",
+    "config_not_object": "config.json must contain an object.",
+    "config_save": "Could not save the Wall-in-One configuration.",
+    "config_schema": "Unsupported config.json schema version: {version}",
+    "data_directory": "The plugin data directory is unavailable.",
+    "decode": "Invalid JSON: {detail}",
+    "encode": "Could not encode plugin data.",
+    "ffmpeg": "ffmpeg is required to export a frame from this video.",
+    "install": "Could not install the atomic data update.",
+    "manual_pair": "The selected static backing is missing or could not be validated as an image by the Wall-in-One helper.",
+    "mpvpaper_ipc": "mpvpaper control failed: {detail}",
+    "mpvpaper_ipc_start": "Could not start the mpvpaper control command.",
+    "native_switch": "Static wallpaper switch failed: {detail}",
+    "native_switch_start": "Could not start the Noctalia wallpaper command.",
+    "no_current_scene": "No numeric Workshop ID was reported by the adapter or configured as a fallback.",
+    "noctalia_cli": "The noctalia command client is unavailable.",
+    "provider_probe": "The enabled-plugin query returned no result.",
+    "provider_probe_detail": "Enabled-plugin discovery failed: {detail}",
+    "provider_probe_start": "Could not start enabled-plugin discovery.",
+    "provider_probe_timeout": "Enabled-plugin discovery timed out.",
+    "read": "Could not read plugin data.",
+    "runtime_invalid": "runtime.json is invalid.",
+    "runtime_not_object": "runtime.json must contain an object.",
+    "runtime_providers": "runtime.json has no providers or pairs object.",
+    "runtime_save": "Could not save Wall-in-One runtime state.",
+    "runtime_schema": "Unsupported runtime.json schema version: {version}",
+    "storage_disabled": "Wall-in-One is disabled because its stored state is invalid. See Diagnostics.",
+    "video_source": "Choose a readable configured video source first.",
+    "w_engine_ipc": "W Engine control failed: {detail}",
+    "w_engine_ipc_start": "Could not start the W Engine control command.",
+    "w_engine_adapter": "The cooperative W Engine capture request failed or returned something other than the exact requested staging path: {detail}",
+    "w_engine_adapter_start": "Could not start the cooperative W Engine capture request.",
+    "w_engine_adapter_timeout": "The cooperative W Engine capture request did not return its exact requested staging PNG before the deadline.",
+    "write": "Could not write the temporary data file."
+  },
+  "notifications": {
+    "captured": "Still exported to {path}",
+    "paired": "Still exported and paired through Noctalia: {path}"
+  },
+  "pairing": {
+    "behavior": "Pairing applies the exported still as Noctalia's persisted wallpaper, so the lock screen, overview/backdrop, compositor blur or xray integrations, theme generation, and wallpaper hooks have a real image while a live provider renders above it.",
+    "current": "Paired backing for {output}: {provider}\n{path}",
+    "global_palette": "Noctalia has one global palette. With multiple outputs, choose a palette leader or the most recently paired output determines the generated colors.",
+    "last_applied": "last applied output",
+    "lockscreen_override": "An explicit lock-screen wallpaper path overrides the paired Noctalia wallpaper. Clear or update that override in Noctalia if the lock screen does not follow the pair.",
+    "none": "No static backing is recorded for {output}.",
+    "palette": "Configured scheme: {configured}\nPalette leader: {leader}\nCurrent Noctalia color state: {active}",
+    "settings": "Automatic export: {automatic} · Pair exported still: {pair} · Color sync: {colors}"
+  },
+  "panel": {
+    "capture": {
+      "description": "Export representative stills into pluginDataDir()/captures or an absolute directory you select, then optionally persist one through Noctalia as the live wallpaper's static backing.",
+      "title": "Still export"
+    },
+    "close": "Close",
+    "diagnostics": {
+      "description": "Storage health, capability discovery, and ownership boundaries.",
+      "title": "Diagnostics"
+    },
+    "open": "Open",
+    "pairing": {
+      "description": "Keep a real static wallpaper behind dynamic providers for colors, lock screen, overview, blur, xray, and wallpaper hooks.",
+      "title": "Static pairing and colors"
+    },
+    "providers": {
+      "control_boundary": "Provider buttons call documented Noctalia plugin IPC. Wall-in-One does not infer playback state or mutate provider-private files.",
+      "description": "Discovery uses Noctalia's enabled-plugin list. Each provider keeps ownership of its renderer and library.",
+      "mpvpaper_controls": "mpvpaper service",
+      "native_controls": "Noctalia static rotation",
+      "title": "Providers",
+      "w_engine_controls": "W Engine service"
+    },
+    "reprobe": "Refresh capabilities",
+    "settings": "Open plugin settings",
+    "shortcuts": {
+      "description": "Assign independent actions to all three bar buttons. A missing provider never causes a silent fallback.",
+      "left": "Left click",
+      "middle": "Middle click",
+      "right": "Right click",
+      "shortcut_limit": "The Control Center tile currently supports the left and right mappings only; the bar widget supports all three.",
+      "title": "Shortcuts"
+    },
+    "subtitle": "Static + live coordination with explicit ownership"
+  },
+  "plugin": {
+    "title": "Wall-in-One"
+  },
+  "providers": {
+    "extra": {
+      "available": "Custom public panel is available: {panel}",
+      "disabled": "Configured plugin {id} is not enabled.",
+      "name": "Custom provider panel",
+      "unconfigured": "No full plugin:panel ID is configured."
+    },
+    "mpvpaper": {
+      "available": "Official mpvpaper picker and documented service IPC are available.",
+      "disabled": "The official mpvpaper plugin is not enabled.",
+      "missing_commands": "The plugin is enabled, but mpvpaper or mpv is missing; the picker opens but playback cannot start.",
+      "name": "mpvpaper"
+    },
+    "native": {
+      "available": "Noctalia's persisted wallpaper, selector, transitions, and hooks.",
+      "name": "Noctalia static wallpapers"
+    },
+    "probe_failed": "Availability is unknown because enabled-plugin discovery failed.",
+    "w_engine": {
+      "adapter_full": "W Engine adapter v{version} advertises current-status and rendered-capture support. Rendered capture requires optional ffmpeg for decode validation; source/preview fallback remains available without it.",
+      "adapter_status": "W Engine adapter v{version} reports current Workshop IDs; still export uses source/preview fallback.",
+      "disabled": "W Engine is not enabled.",
+      "missing_renderer": "W Engine is enabled, but linux-wallpaperengine is missing; its panel opens but playback may not start.",
+      "name": "W Engine",
+      "no_adapter": "W Engine is enabled. No fresh cooperative adapter response is connected; configure a Workshop ID for safe source/preview export. Adapter flags and current output state expire 10 seconds after an unanswered Wall-in-One refresh probe."
+    },
+    "wallhaven": {
+      "available": "Official Wallhaven browser is enabled.",
+      "disabled": "The official Wallhaven plugin is not enabled.",
+      "name": "Wallhaven"
+    }
+  },
+  "settings": {
+    "auto_capture": {
+      "description": "When a cooperative W Engine status adapter reports a new Workshop ID, request a rendered still if supported or use the safe source/preview fallback.",
+      "label": "Automatically export adapter-reported sources"
+    },
+    "capture_directory": {
+      "description": "Absolute directory for exported video frames, Workshop previews, and rendered scene stills. Leave empty to use Wall-in-One's pluginDataDir()/captures directory.",
+      "label": "Still directory"
+    },
+    "color": {
+      "description": "Theme-token color for this bar placement.",
+      "label": "Color"
+    },
+    "color_scheme": {
+      "description": "Noctalia scheme selected when an exported still is paired.",
+      "label": "Wallpaper color scheme",
+      "options": {
+        "dysfunctional": "Dysfunctional",
+        "faithful": "Faithful",
+        "m3_content": "Material 3 Content",
+        "m3_fruit_salad": "Material 3 Fruit Salad",
+        "m3_monochrome": "Material 3 Monochrome",
+        "m3_rainbow": "Material 3 Rainbow",
+        "m3_tonal_spot": "Material 3 Tonal Spot",
+        "muted": "Muted",
+        "soft": "Soft",
+        "vibrant": "Vibrant"
+      }
+    },
+    "extra_provider_panel": {
+      "description": "Optional full panel ID, such as vendor/plugin:panel. Wall-in-One can discover and open it but assumes no private control or status API.",
+      "label": "Custom provider panel ID"
+    },
+    "glyph": {
+      "description": "Choose a glyph with Noctalia's native searchable glyph selector.",
+      "label": "Glyph"
+    },
+    "label": {
+      "description": "Text displayed beside the glyph for this placement.",
+      "label": "Label"
+    },
+    "manual_pair_file": {
+      "description": "Existing image whose signature Wall-in-One validates through temporary staging before persisting the original path through Noctalia as a live wallpaper's static backing. Optional ffmpeg adds full decode validation. No lasting copy is kept, so use a durable path.",
+      "label": "Manual static backing"
+    },
+    "pair_static": {
+      "description": "After automatic export, persist the still as Noctalia's wallpaper for lock screen, overview, blur/xray, hooks, and theme input.",
+      "label": "Pair exported still with Noctalia"
+    },
+    "palette_output": {
+      "description": "Optional output connector whose paired still should win Noctalia's single global palette. Leave empty for last-applied wins.",
+      "label": "Global palette leader output"
+    },
+    "scene_screenshot_delay": {
+      "description": "Frame delay from 1 to 120 passed to a cooperative W Engine capture adapter when optional ffmpeg decode validation is available. Its request deadline is at least 60 seconds and extends to this delay plus 60 seconds. It has no effect on source/preview fallback exports.",
+      "label": "Adapter capture delay"
+    },
+    "show_label": {
+      "description": "Show the configured text beside the glyph.",
+      "label": "Show label"
+    },
+    "sync_colors": {
+      "description": "Set Noctalia's global color source to wallpaper and use the selected scheme when pairing. This changes the global palette, not just one output.",
+      "label": "Synchronize Noctalia colors"
+    },
+    "video_frame_second": {
+      "description": "Timestamp, in seconds, used for configured videos and Workshop video projects.",
+      "label": "Video still timestamp"
+    },
+    "video_source": {
+      "description": "Video or animated-image file used by deterministic Export configured video actions. The optional ffmpeg command is required only for video or animated-image extraction.",
+      "label": "Configured video source"
+    },
+    "workshop_directory": {
+      "description": "Optional additional Wallpaper Engine Workshop content/431960 directory.",
+      "label": "Additional Workshop directory"
+    },
+    "workshop_id": {
+      "description": "Numeric Wallpaper Engine Workshop item used when no cooperative W Engine status adapter reports the active item. Video projects export a frame; scene/web projects use their preview.",
+      "label": "Workshop ID fallback"
+    }
+  },
+  "shortcut": {
+    "config_error": "Wall-in-One config error",
+    "label": "Wall-in-One"
+  },
+  "widget": {
+    "starting": "Wall-in-One is starting...",
+    "storage_error": "Wall-in-One storage is invalid. Open its panel through Noctalia IPC to view Diagnostics.",
+    "tooltip_left": "Left: {action}",
+    "tooltip_middle": "Middle: {action}",
+    "tooltip_right": "Right: {action}"
+  }
+}
