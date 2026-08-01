@@ -49,34 +49,17 @@ local function acceptsStatus(nextStatus)
 end
 
 local function presentationFor(state)
-    local sharedPresentation = widgetCfg("use_shared_presentation") ~= false
-    local sharedGlyphs = widgetCfg("use_shared_glyphs") == true
     if state == "launched" then
-        local glyphKey = if sharedGlyphs then "shared_launched_glyph" else "launched_glyph"
-        local glyph = glyphCfg(glyphKey, "rocket")
-        local color = if sharedPresentation then widgetCfg("shared_launched_color") else widgetCfg("launched_color")
-        return glyph, color
+        return glyphCfg("launched_glyph", "rocket"), widgetCfg("launched_color")
     elseif state == "close" then
-        local glyphKey = if sharedGlyphs then "shared_close_glyph" else "close_glyph"
-        local glyph = glyphCfg(glyphKey, "server-spark")
-        local color = if sharedPresentation then widgetCfg("shared_close_color") else widgetCfg("close_color")
-        return glyph, color
+        return glyphCfg("close_glyph", "server-spark"), widgetCfg("close_color")
     elseif state == "stalled" or state == "stale" or state == "error" then
-        local glyphKey = if sharedGlyphs then "shared_stalled_glyph" else "stalled_glyph"
-        local glyph = glyphCfg(glyphKey, "server-off")
-        local color = if sharedPresentation then widgetCfg("shared_stalled_color") else widgetCfg("stalled_color")
-        return glyph, color
+        return glyphCfg("stalled_glyph", "server-off"), widgetCfg("stalled_color")
     end
-    local glyphKey = if sharedGlyphs then "shared_running_glyph" else "running_glyph"
-    local glyph = glyphCfg(glyphKey, "server-bolt")
-    local color = if sharedPresentation then widgetCfg("shared_running_color") else widgetCfg("running_color")
-    return glyph, color
+    return glyphCfg("running_glyph", "server-bolt"), widgetCfg("running_color")
 end
 
 local function displayMode()
-    if widgetCfg("use_shared_presentation") ~= false then
-        return tostring(widgetCfg("shared_display_mode") or "always")
-    end
     return tostring(widgetCfg("display_mode") or "always")
 end
 
@@ -157,14 +140,6 @@ serviceReady = noctalia.state.get(READY_KEY) == true
 function update()
     noctalia.setUpdateInterval(60 * 60 * 1000)
     render(noctalia.state.get(STATUS_KEY), true)
-end
-
-function onClick()
-    send("refresh")
-end
-
-function onRightClick()
-    noctalia.togglePanel("goober/hydra-update-examiner:actions")
 end
 
 function onHover(entered)

@@ -40,10 +40,10 @@ fixtures.
 ## Hydra Update Examiner
 
 The Hydra suite covers beta.7 native lint and config validation; two independent
-widget placements; shared/local text, color, and glyph inheritance; service,
-widget, and panel IPC; hover rendering; all three hot-reload paths; scoped
-settings; the response helper; screenshots; and keyboard opening of Noctalia's
-native searchable glyph menu.
+widget presentations; native action defaults; service, widget, and panel IPC;
+hover rendering; all three hot-reload paths; correctly scoped polling and
+appearance settings; the response helper; screenshots; and keyboard opening of
+Noctalia's native searchable glyph menu.
 
 The headless compositor has no physical pointer, so the hover probe calls the
 production `onHover(true)` callback through a temporary guest-only hot reload.
@@ -57,9 +57,10 @@ The NocVox suite imports and enables the real plugin, creates two placements,
 and verifies there is exactly one long-lived status follower. It covers normal,
 malformed, and future status values; state-aware toggle/stop/cancel; command
 failure recovery; diagnostics and a reload while diagnostics are pending; safe
-shell quoting; invalid override rejection; attached-panel rendering; missing
-glyph detection; and disable cleanup without stopping the externally owned
-daemon sentinel.
+fixed recording commands with no per-recording flags; attached-panel rendering;
+missing glyph detection; and disable cleanup without stopping the externally
+owned daemon sentinel. Static coverage separately rejects every NocVox desktop
+notification call.
 
 ## Wall-in-One
 

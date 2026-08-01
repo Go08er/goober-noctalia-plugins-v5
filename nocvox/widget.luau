@@ -8,14 +8,6 @@ local PANEL_ID = "goober/nocvox:details"
 
 local RECORDING_STATES = { recording = true, streaming = true }
 local PROCESSING_STATES = { transcribing = true, processing = true }
-local VALID_ACTIONS = {
-    toggle = true,
-    start = true,
-    stop = true,
-    cancel = true,
-    panel = true,
-    none = true,
-}
 
 local status = nil
 local serviceReady = false
@@ -57,19 +49,6 @@ local function stateLabel(state)
     return noctalia.tr("states.unknown")
 end
 
-local function outputLabel(output)
-    if output == "type" then
-        return noctalia.tr("overrides.output.type")
-    elseif output == "clipboard" then
-        return noctalia.tr("overrides.output.clipboard")
-    elseif output == "paste" then
-        return noctalia.tr("overrides.output.paste")
-    elseif output == "file" then
-        return noctalia.tr("overrides.output.file")
-    end
-    return ""
-end
-
 local function elapsedText(current)
     local startedAt = tonumber(current.recording_started_at) or 0
     if startedAt <= 0 then
@@ -83,32 +62,6 @@ local function elapsedText(current)
         return string.format("%s%d:%02d", prefix, minutes, seconds)
     end
     return string.format("%s%ds", prefix, seconds)
-end
-
-local function overrideName(current)
-    if current.override_active ~= true then
-        return ""
-    end
-    local parts = {}
-    local output = tostring(current.override_output or "inherit")
-    if output ~= "inherit" then
-        local label = outputLabel(output)
-        if label ~= "" then
-            table.insert(parts, label)
-        end
-    end
-    local model = tostring(current.override_model or "")
-    if model ~= "" then
-        table.insert(parts, noctalia.tr("overrides.model", { value = model }))
-    end
-    local profile = tostring(current.override_profile or "")
-    if profile ~= "" then
-        table.insert(parts, noctalia.tr("overrides.profile", { value = profile }))
-    end
-    if #parts == 0 then
-        table.insert(parts, noctalia.tr("overrides.text_actions"))
-    end
-    return table.concat(parts, " · ")
 end
 
 local function presentation(current)
@@ -159,70 +112,7 @@ local function presentation(current)
         text = if widthMode == "expanded" then stateLabel("unknown") else "?"
     end
 
-    if visible and cfg("show_override_name") == true then
-        local override = overrideName(current)
-        if override ~= "" then
-            text = if text == "" then override else text .. " · " .. override
-        end
-    end
     return glyph, color, text, visible
-end
-
-local function actionLabel(action)
-    if action == "toggle" then
-        return noctalia.tr("actions.toggle")
-    elseif action == "start" then
-        return noctalia.tr("actions.start")
-    elseif action == "stop" then
-        return noctalia.tr("actions.stop")
-    elseif action == "cancel" then
-        return noctalia.tr("actions.cancel")
-    elseif action == "panel" then
-        return noctalia.tr("actions.panel")
-    end
-    return noctalia.tr("actions.none")
-end
-
-local function actionUnavailableReason(action, current)
-    if action == "none" or action == "panel" then
-        return ""
-    end
-    if current.available ~= true then
-        return noctalia.tr("errors.missing_voxtype")
-    end
-    local state = tostring(current.state or "unknown")
-    if state == "stopped" then
-        return noctalia.tr("errors.daemon_stopped")
-    elseif action == "start" and state ~= "idle" then
-        return noctalia.tr("errors.start_unavailable")
-    elseif action == "stop" and not RECORDING_STATES[state] then
-        return noctalia.tr("errors.stop_unavailable")
-    elseif action == "cancel" and not RECORDING_STATES[state] and not PROCESSING_STATES[state] then
-        return noctalia.tr("errors.cancel_unavailable")
-    elseif action == "toggle" and state ~= "idle" and not RECORDING_STATES[state] then
-        return noctalia.tr("errors.toggle_unavailable")
-    end
-    return ""
-end
-
-local function gestureLine(configKey, current)
-    local action = tostring(cfg(configKey) or "none")
-    if not VALID_ACTIONS[action] then
-        action = "none"
-    end
-    local line = ""
-    if configKey == "left_action" then
-        line = noctalia.tr("widget.gesture.left", { action = actionLabel(action) })
-    elseif configKey == "middle_action" then
-        line = noctalia.tr("widget.gesture.middle", { action = actionLabel(action) })
-    else
-        line = noctalia.tr("widget.gesture.right", { action = actionLabel(action) })
-    end
-    local reason = actionUnavailableReason(action, current)
-    if reason ~= "" then
-        line ..= " " .. noctalia.tr("widget.unavailable_suffix", { reason = reason })
-    end
-    return line
 end
 
 local function tooltipFor(current)
@@ -238,11 +128,6 @@ local function tooltipFor(current)
         table.insert(lines, noctalia.tr("widget.daemon_external"))
     end
 
-    local override = overrideName(current)
-    if override ~= "" then
-        table.insert(lines, noctalia.tr("widget.active_override", { value = override }))
-    end
-
     if cfg("tooltip_show_model") == true and tostring(current.model or "") ~= "" then
         table.insert(lines, noctalia.tr("widget.model", { value = tostring(current.model) }))
     end
@@ -254,9 +139,7 @@ local function tooltipFor(current)
     end
 
     table.insert(lines, "")
-    table.insert(lines, gestureLine("left_action", current))
-    table.insert(lines, gestureLine("middle_action", current))
-    table.insert(lines, gestureLine("right_action", current))
+    table.insert(lines, noctalia.tr("widget.actions_hint"))
 
     local lastError = tostring(current.last_error or "")
     if lastError ~= "" then
@@ -306,20 +189,6 @@ local function send(action)
     sendNow(action)
 end
 
-local function perform(configKey)
-    local action = tostring(cfg(configKey) or "none")
-    if not VALID_ACTIONS[action] then
-        action = "none"
-    end
-    if action == "none" then
-        return
-    elseif action == "panel" then
-        noctalia.togglePanel(PANEL_ID)
-    else
-        send(action)
-    end
-end
-
 noctalia.state.watch(STATUS_KEY, render)
 status = noctalia.state.get(STATUS_KEY)
 
@@ -342,18 +211,6 @@ end
 
 function onConfigChanged()
     render(noctalia.state.get(STATUS_KEY))
-end
-
-function onClick()
-    perform("left_action")
-end
-
-function onMiddleClick()
-    perform("middle_action")
-end
-
-function onRightClick()
-    perform("right_action")
 end
 
 function onIpc(event, _payload)

@@ -25,13 +25,13 @@ end
 
 local function presentationFor(state)
     if state == "launched" then
-        return noctalia.getConfig("shared_launched_glyph"), noctalia.getConfig("shared_launched_color")
+        return "rocket", "primary"
     elseif state == "close" then
-        return noctalia.getConfig("shared_close_glyph"), noctalia.getConfig("shared_close_color")
+        return "server-spark", "tertiary"
     elseif state == "stalled" or state == "stale" or state == "error" then
-        return noctalia.getConfig("shared_stalled_glyph"), noctalia.getConfig("shared_stalled_color")
+        return "server-off", "error"
     end
-    return noctalia.getConfig("shared_running_glyph"), noctalia.getConfig("shared_running_color")
+    return "server-bolt", "secondary"
 end
 
 local function render()

@@ -2,6 +2,36 @@
 
 All notable staging changes will be recorded here.
 
+## Hydra Update Examiner 0.4.0 - Native v5 settings scopes
+
+- Keep the shared channel, poll interval, and readiness threshold in the plugin
+  settings owned by the singleton service.
+- Put text mode, colors, searchable glyph pickers, and native gesture actions
+  together in each bar placement's widget editor.
+- Remove the duplicated shared/local appearance controls and inheritance
+  switches introduced during the initial v5 compatibility port.
+
+## NocVox 0.3.0 - One widget configuration surface
+
+- Move tooltip fields, state colors, labels, width, and glyphs into the placed
+  widget's settings; the singleton listener has no global policy to configure.
+- Replace the custom gesture dropdowns with native v5 Actions defaults: left
+  toggles recording, right opens details, and middle opens widget settings.
+- Remove the now-empty plugin-settings button from the details panel and point
+  users to the exact per-placement editor instead.
+
+## NocVox 0.2.0 - Focused control companion
+
+- Remove the per-recording output/model/profile/text-action override system.
+  Start, stop, and cancel now always use the independently managed VoxType
+  daemon's configured defaults.
+- Remove all NocVox desktop notifications and their settings. State, action
+  errors, diagnostic errors, and copy results remain visible in the widget or
+  panel.
+- Retain the singleton live-status follower, configurable gestures, native glyph
+  selectors, palette controls, state-aware controls, and privacy-safe read-only
+  diagnostics.
+
 ## Wall-in-One 0.2.0 - Live/static coordination preview
 
 - Rename the early wallpaper hub and its plugin, widget, panel, service, and
