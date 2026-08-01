@@ -17,7 +17,7 @@ source using one of the methods below.
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | Beta.7/API 15, streamlined v5 settings |
 | `goober/nocvox` | `0.3.0` | Beta.7/API 17 focused control companion |
-| `goober/wall-in-one` | `0.2.0` | Beta.7/API 17 coordination preview |
+| `goober/wall-in-one` | `0.4.0` | Beta.7/API 17 mixed wallpaper staging |
 
 ## Repository layout
 
@@ -45,11 +45,15 @@ wall-in-one/
   README.md
   thumbnail.webp
   service.luau
+  renderer.luau
+  motionbgs.luau
   panel.luau
   widget.luau
   shortcut.luau
   translations/en.json
   scripts/capture-still
+  scripts/renderer-supervisor
+  scripts/motionbgs-provider
 tools/validate.py
 flake.nix
 flake.lock
@@ -201,47 +205,44 @@ boundary.
 
 ### Wall-in-One coordination and pairing
 
-Wall-in-One provides one configurable bar and Control Center entry point for
-Noctalia's native wallpaper controls and compatible live/background plugins.
-It discovers enabled plugins through Noctalia's public plugin list and routes
-only their documented interfaces: the Wallhaven browser, W Engine's panel and
-`next`/`cycle-stop`/`stop` service messages, and mpvpaper's picker plus
-`pause`/`resume`/`toggle`/`clear` service messages. An advanced full panel ID
-can expose another provider as an open-only adapter. Each provider keeps
-ownership of its renderer, files, and scheduling.
+Wall-in-One `0.4.0` combines Noctalia stills and palette controls, the official
+Wallhaven browser, local video/mpvpaper, MotionBGS search and download, and the
+Steam Wallpaper Engine cache in one attached hub. Every live source receives a
+real persisted still for the lock-screen fallback, wallpaper hooks, color
+generation, overview/backdrop, and compositor blur or xray consumers.
 
-For a configured video, Wall-in-One exports a full-resolution frame with FFmpeg
-into the selected capture directory. A configured W Engine Workshop ID can use
-the same path for video projects; scene and web projects safely export the
-Workshop preview. Current upstream W Engine has no public status or capture API,
-so Wall-in-One neither guesses its current project from process arguments nor
-starts a competing renderer. A versioned cooperative handshake is ready for a
-future W Engine adapter to report the active ID and return a same-process
-rendered capture.
+Its per-output scheduler can mix static paths, downloaded/local videos, and
+numeric Workshop projects. It persists interval and sequential, shuffle-bag,
+or random order plus start/stop/pause/resume/next/previous controls. Generated
+video and Workshop frames default to Noctalia's wallpaper directory.
 
-**Capture and pair** applies the exported still with Noctalia's
-`setWallpaper(output, path)` runtime API. The dynamic provider keeps rendering,
-while Noctalia persists a real static wallpaper for color generation, backdrop
-and blur consumers, wallpaper hooks, and a lock screen configured to follow the
-wallpaper. A lock screen with its own explicit image continues to use that
-image; Wall-in-One does not overwrite that setting.
+Auto backend mode prefers an enabled external W Engine or mpvpaper plugin.
+Apply-by-source and mixed live cycling use Wall-in-One's internal owner only
+after that external plugin is disabled, preventing competing renderers. Owned
+children stay in one cancellable `runStream` process group on the safe bottom
+layer; Noctalia's static surface remains enabled and teardown needs no queued
+restoration call.
 
-Noctalia has one global palette, not one palette per output. With color sync
-enabled, Wall-in-One selects the configured wallpaper color scheme; on a
-multi-output setup, **Palette output** chooses which paired still is reapplied
-last as the deterministic palette leader. Without a leader, the last paired
-output wins. Disabling Wall-in-One's color-sync command does not freeze an
-existing wallpaper-sourced palette: applying a new wallpaper may still cause
-Noctalia itself to regenerate colors.
+MotionBGS has no versioned API, so the scraper is bounded, rate-limited, and
+best effort. The hub always retains a direct MotionBGS browser link. A scraper
+failure never affects downloaded videos, paired stills, or saved cycles. Every
+download is installed atomically with a provenance sidecar; wallpaper rights
+remain with their respective creators, and the plugin's MIT license does not
+grant redistribution rights. WaifuX's public GPL-3.0 profile was used only to
+cross-check factual site routes and selectors; no WaifuX implementation code
+was copied.
+
+Noctalia still has one global palette, not one per output. Color sync and the
+optional palette-leader connector remain explicit settings; an independent
+lock-screen image remains untouched.
 
 Open the hub directly with
 `noctalia msg panel-toggle goober/wall-in-one:hub`, then assign **Open
 Wall-in-One** to a gesture if you want a permanent UI route. The Wall-in-One
 bar glyph and NocVox's idle, active, stopped, and unknown-state glyphs use
-Noctalia's native per-placement searchable selector. Coordinated mixed-provider
-rotation is still refinement work; Wall-in-One does not start a competing
-timer yet. See [`wall-in-one/README.md`](wall-in-one/README.md) for current
-requirements and safety boundaries.
+Noctalia's native per-placement searchable selector. See
+[`wall-in-one/README.md`](wall-in-one/README.md) for renderer ownership,
+provider fallbacks, provenance, and the full capability matrix.
 
 ### Hydra Update Examiner customization
 

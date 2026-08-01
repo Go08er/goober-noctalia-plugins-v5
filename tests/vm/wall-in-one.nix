@@ -11,6 +11,7 @@ let
   runtimeRoot = "/run/noctalia-wall-in-one-vm";
   stateRoot = "/var/lib/noctalia-wall-in-one-vm";
   cacheRoot = "/var/cache/noctalia-wall-in-one-vm";
+  configRoot = "${stateRoot}/config";
   guestSourceRoot = "${stateRoot}/plugin-source";
   sourceName = "wall-in-one-vm";
   sourceUrl = "file://${guestSourceRoot}";
@@ -19,12 +20,15 @@ let
   clonedRepoRoot = "${sourceStorageRoot}/repo";
   pluginId = "goober/wall-in-one";
   serviceId = "${pluginId}:coordinator";
+  rendererServiceId = "${pluginId}:renderer";
+  motionServiceId = "${pluginId}:motionbgs";
   widgetId = "${pluginId}:wall-in-one";
   materializedRoot =
     "${stateRoot}/state/noctalia/plugins/materialized/${sourceName}/wall-in-one";
   pluginDataRoot =
     "${stateRoot}/state/noctalia/plugins/data/goober/wall-in-one";
   captureRoot = "/home/${testUser}/Pictures/Wall-in-One";
+  videoRoot = "/home/${testUser}/Videos/Wall-in-One";
 
   manifest = builtins.fromTOML (
     builtins.readFile (pluginRoot + "/wall-in-one/plugin.toml")
@@ -169,12 +173,69 @@ let
     magick -size 96x64 'xc:#406080' "png:$out"
   '';
 
+  fixtureVideoStill = pkgs.runCommand "wall-in-one-vm-video-still.png" {
+    nativeBuildInputs = [ pkgs.imagemagick ];
+  } ''
+    magick -size 96x64 'xc:#208060' "png:$out"
+  '';
+
+  fixtureWorkshopStill = pkgs.runCommand "wall-in-one-vm-workshop-still.png" {
+    nativeBuildInputs = [ pkgs.imagemagick ];
+  } ''
+    magick -size 96x64 'xc:#802060' "png:$out"
+  '';
+
+  fixtureGif = pkgs.runCommand "wall-in-one-vm-animated.gif" {
+    nativeBuildInputs = [ pkgs.imagemagick ];
+  } ''
+    magick -size 96x64 -delay 10 'xc:#d08020' -delay 10 'xc:#20a0d0' \
+      -loop 0 "gif:$out"
+  '';
+
   fixtureVideo = pkgs.runCommand "wall-in-one-vm-video.mp4" {
     nativeBuildInputs = [ pkgs.ffmpeg ];
   } ''
     ffmpeg -nostdin -y -loglevel error \
       -f lavfi -i 'color=c=#804060:s=96x64:d=2' \
       -c:v mpeg4 -pix_fmt yuv420p -f mp4 "$out"
+  '';
+
+  fixtureWorkshop = pkgs.runCommand "wall-in-one-vm-workshop" { } ''
+    mkdir -p "$out/431960001"
+    cp ${fixtureStill} "$out/431960001/preview.png"
+    cp ${fixtureVideo} "$out/431960001/wallpaper.mp4"
+    printf '%s\n' '{"title":"VM Night City","type":"video","file":"wallpaper.mp4","preview":"preview.png"}' \
+      > "$out/431960001/project.json"
+  '';
+
+  motionSearchHtml = pkgs.writeText "motionbgs-search.html" ''
+    <!doctype html><html><body>
+      <a href="/night-city" title="Night City Live Wallpaper">
+        <span class="ttl">Night City</span>
+        <span class="frm">4K</span>
+        <img src="/media/4242/thumb.jpg">
+      </a>
+      <a href="https://evil.example/not-a-card" title="Ignore Live Wallpaper">
+        <span class="ttl">Cross origin</span>
+      </a>
+    </body></html>
+  '';
+  motionDetailHtml = pkgs.writeText "motionbgs-detail.html" ''
+    <!doctype html><html><head>
+      <meta property="og:title" content="Night City Live Wallpaper">
+      <meta property="og:image" content="/media/4242/poster.jpg">
+      <meta property="og:video" content="/media/4242/preview.mp4">
+    </head><body>
+      <a href="/dl/hd/4242/">1920x1080 (3.5 MB)</a>
+      <a href="/dl/4k/4242/">3840x2160 (9.0 MB)</a>
+    </body></html>
+  '';
+  motionChallengeHtml = pkgs.writeText "motionbgs-challenge.html" ''
+    <!doctype html><html><head><title>Just a moment...</title></head>
+    <body><p>Checking your browser</p></body></html>
+  '';
+  motionMarkupHtml = pkgs.writeText "motionbgs-markup.html" ''
+    <!doctype html><html><body><main>Fixture layout changed</main></body></html>
   '';
 
   wEngineService = pkgs.writeText "w-engine-vm-service.luau" ''
@@ -399,6 +460,11 @@ let
 
       if [[ "$#" -ge 2 && "$1" == "msg" ]]; then
         case "$2" in
+          wallpaper-get)
+            [[ "$#" -eq 3 && "$3" == "HEADLESS-1" ]] || exit 65
+            printf '%s\n' "${fixtureStill}"
+            exit 0
+            ;;
           wallpaper-next|wallpaper-previous|wallpaper-random)
             printf '%s\n' "ok"
             exit 0
@@ -411,20 +477,116 @@ let
     '';
   };
 
+  fakeMotionBgsHelper = pkgs.writeText "wall-in-one-motionbgs-provider-fixture" ''
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    {
+      printf '%q' "$1"
+      for argument in "''${@:2}"; do
+        printf '\t%q' "$argument"
+      done
+      printf '\n'
+    } >> /tmp/wall-in-one-vm-motion-calls.log
+
+    mode=$(cat /tmp/wall-in-one-vm-motion-mode 2>/dev/null || printf good)
+    case ''${1:-} in
+      self-test)
+        [[ $# -eq 1 ]] || exit 64
+        printf 'WIO-MBG1\tok\tself-test\n'
+        ;;
+      fetch-html)
+        [[ $# -eq 3 ]] || exit 64
+        url=$2
+        destination=$3
+        case $mode in
+          good)
+            case $url in
+              https://motionbgs.com/night-city) source=${motionDetailHtml} ;;
+              *) source=${motionSearchHtml} ;;
+            esac
+            effective=$url
+            ;;
+          challenge)
+            source=${motionChallengeHtml}
+            effective=$url
+            ;;
+          markup)
+            source=${motionMarkupHtml}
+            effective=$url
+            ;;
+          cross-origin)
+            source=${motionSearchHtml}
+            effective=https://evil.example/search
+            ;;
+          deny)
+            printf 'WIO-MBG1\terror\tfixture-deny\tcache miss unexpectedly reached helper\n'
+            exit 69
+            ;;
+          *) exit 64 ;;
+        esac
+        temporary="$destination.part"
+        cp -- "$source" "$temporary"
+        mv -f -- "$temporary" "$destination"
+        bytes=$(stat -c %s -- "$destination")
+        printf 'WIO-MBG1\tok\t200\t%s\ttext/html\t%s\t%s\n' \
+          "$effective" "$bytes" "$destination"
+        ;;
+      download)
+        [[ $# -eq 8 ]] || exit 64
+        slug=$3
+        quality=$4
+        directory=$5
+        destination="$directory/$slug.$quality.mp4"
+        temporary="$destination.part"
+        cp -- ${fixtureVideo} "$temporary"
+        mv -f -- "$temporary" "$destination"
+        bytes=$(stat -c %s -- "$destination")
+        effective="https://motionbgs.com/dl/$quality/4242/"
+        printf \
+          '{"schema":1,"provider":"MotionBGS","title":"Night City","source_page":"https://motionbgs.com/night-city","download_url":"%s","quality":"%s","bytes":%s}\n' \
+          "$effective" "$quality" "$bytes" \
+          > "$destination.motionbgs.json.part"
+        mv -f -- "$destination.motionbgs.json.part" "$destination.motionbgs.json"
+        printf 'WIO-MBG1\tok\t200\t%s\tvideo/mp4\t%s\t%s\n' \
+          "$effective" "$bytes" "$destination"
+        ;;
+      *)
+        printf 'WIO-MBG1\terror\tusage\tfixture expected fetch-html, download, or self-test\n'
+        exit 64
+        ;;
+    esac
+  '';
+
   fakeWallpaperEngine = pkgs.writeShellApplication {
     name = "linux-wallpaperengine";
+    runtimeInputs = [ pkgs.coreutils ];
     text = ''
-      printf '%s\n' "$*" >> /tmp/wall-in-one-vm-engine-invocations.log
-      printf '%s\n' "Wall-in-One must not launch the provider renderer" >&2
-      exit 97
+      pid=$$
+      printf '%s\n' "$pid" > /tmp/wall-in-one-vm-engine-current.pid
+      {
+        printf '%s\0' "$pid"
+        printf '%s\0' "$@"
+      } > "/tmp/wall-in-one-vm-engine-$pid.args"
+      printf '%s\n' "$pid" >> /tmp/wall-in-one-vm-engine-invocations.log
+      trap 'exit 0' TERM INT HUP
+      while :; do sleep 1; done
     '';
   };
 
   fakeMpvpaper = pkgs.writeShellApplication {
     name = "mpvpaper";
+    runtimeInputs = [ pkgs.coreutils ];
     text = ''
-      printf '%s\n' "$*" >> /tmp/wall-in-one-vm-mpvpaper-invocations.log
-      exit 97
+      pid=$$
+      printf '%s\n' "$pid" > /tmp/wall-in-one-vm-mpvpaper-current.pid
+      {
+        printf '%s\0' "$pid"
+        printf '%s\0' "$@"
+      } > "/tmp/wall-in-one-vm-mpvpaper-$pid.args"
+      printf '%s\n' "$pid" >> /tmp/wall-in-one-vm-mpvpaper-invocations.log
+      trap 'exit 0' TERM INT HUP
+      while :; do sleep 1; done
     '';
   };
 
@@ -450,6 +612,16 @@ let
   vmProbe = pkgs.writeText "wall-in-one-vm-probe.luau" ''
     local vmProductionOnIpc = onIpc
     local vmCommandSequence = 900000
+    local vmPreviousAck = noctalia.state.get(COMMAND_ACK_KEY)
+    if type(vmPreviousAck) == "table" then
+        vmCommandSequence = math.max(vmCommandSequence, tonumber(vmPreviousAck.sequence) or 0)
+    end
+
+    local function vmHandle(request)
+        vmCommandSequence += 1
+        request.sequence = vmCommandSequence
+        handleCommand(request)
+    end
 
     function onIpc(event, payload)
         if event == "vm-probe" then
@@ -458,24 +630,52 @@ let
                     .. tostring(payload or "")
                     .. " probe_ok="
                     .. tostring(providers.probe_ok)
+                    .. " wallhaven_allowed="
+                    .. tostring(providers.wallhaven.allowed)
                     .. " wallhaven="
                     .. tostring(providers.wallhaven.available)
+                    .. " w_allowed="
+                    .. tostring(providers.w_engine.allowed)
                     .. " w_enabled="
                     .. tostring(providers.w_engine.plugin_enabled)
                     .. " w_command="
                     .. tostring(providers.w_engine.renderer_available)
                     .. " w_available="
                     .. tostring(providers.w_engine.available)
+                    .. " w_backend="
+                    .. tostring(providers.w_engine.effective_backend)
+                    .. " w_apply="
+                    .. tostring(providers.w_engine.apply_available)
+                    .. " w_conflict="
+                    .. tostring(providers.w_engine.conflict)
                     .. " adapter_capture="
                     .. tostring(providers.w_engine.adapter_capture)
                     .. " adapter_status="
                     .. tostring(providers.w_engine.adapter_status)
                     .. " current="
                     .. tostring(providers.w_engine.current["HEADLESS-1"] or "")
+                    .. " mpv_allowed="
+                    .. tostring(providers.mpvpaper.allowed)
                     .. " mpvpaper="
                     .. tostring(providers.mpvpaper.available)
                     .. " mpv_command="
                     .. tostring(providers.mpvpaper.command_available)
+                    .. " mpv_backend="
+                    .. tostring(providers.mpvpaper.effective_backend)
+                    .. " mpv_apply="
+                    .. tostring(providers.mpvpaper.apply_available)
+                    .. " mpv_conflict="
+                    .. tostring(providers.mpvpaper.conflict)
+                    .. " renderer_ready="
+                    .. tostring(type(rendererStatus) == "table" and rendererStatus.ready == true)
+                    .. " renderer_owned="
+                    .. tostring(
+                        type(rendererStatus) == "table"
+                            and type(rendererStatus.outputs) == "table"
+                            and type(rendererStatus.outputs["HEADLESS-1"]) == "table"
+                    )
+                    .. " extra_allowed="
+                    .. tostring(providers.extra.allowed)
                     .. " left="
                     .. tostring(config.gestures.left)
                     .. " middle="
@@ -486,21 +686,130 @@ let
                     .. tostring(configValid and runtimeValid)
             )
         elseif event == "vm-map-right-random" then
-            vmCommandSequence += 1
-            handleCommand({
+            vmHandle({
                 kind = "set_mapping",
                 button = "right",
                 action = "native_random",
-                sequence = vmCommandSequence,
             })
         elseif event == "vm-map-left-previous" then
-            vmCommandSequence += 1
-            handleCommand({
+            vmHandle({
                 kind = "set_mapping",
                 button = "left",
                 action = "native_previous",
-                sequence = vmCommandSequence,
             })
+        elseif event == "vm-apply-video" then
+            vmHandle({
+                kind = "apply_entry",
+                output = "HEADLESS-1",
+                entry = { kind = "video", source = "${fixtureVideo}", label = "VM video" },
+            })
+        elseif event == "vm-apply-workshop" then
+            vmHandle({
+                kind = "apply_entry",
+                output = "HEADLESS-1",
+                entry = { kind = "workshop", source = "431960001", label = "VM Workshop" },
+            })
+        elseif event == "vm-cycle-seed" then
+            vmHandle({
+                kind = "cycle_add_entry",
+                output = "HEADLESS-1",
+                entry = { kind = "static", source = "${fixtureStill}", label = "VM still" },
+            })
+            vmHandle({
+                kind = "cycle_add_entry",
+                output = "HEADLESS-1",
+                entry = {
+                    kind = "video",
+                    source = "${fixtureVideo}",
+                    still_path = "${fixtureVideoStill}",
+                    label = "VM video",
+                },
+            })
+            vmHandle({
+                kind = "cycle_add_entry",
+                output = "HEADLESS-1",
+                entry = {
+                    kind = "workshop",
+                    source = "431960001",
+                    still_path = "${fixtureWorkshopStill}",
+                    label = "VM Workshop",
+                },
+            })
+            vmHandle({
+                kind = "cycle_options",
+                output = "HEADLESS-1",
+                interval_seconds = 60,
+                order = "sequential",
+            })
+        elseif event == "vm-cycle-action" then
+            vmHandle({
+                kind = "action",
+                output = "HEADLESS-1",
+                action = "cycle_" .. tostring(payload or ""),
+            })
+        elseif event == "vm-cycle-probe" then
+            local state = type(runtime.cycles["HEADLESS-1"]) == "table" and runtime.cycles["HEADLESS-1"] or {}
+            local owned = type(rendererStatus.outputs) == "table" and rendererStatus.outputs["HEADLESS-1"] or {}
+            noctalia.log(
+                "WALL_IN_ONE_VM_CYCLE "
+                    .. tostring(payload or "")
+                    .. " running=" .. tostring(state.running == true)
+                    .. " paused=" .. tostring(state.paused == true)
+                    .. " cursor=" .. tostring(tonumber(state.cursor) or 0)
+                    .. " history=" .. tostring(type(state.history) == "table" and #state.history or 0)
+                    .. " applying=" .. tostring(cycleApplying["HEADLESS-1"] ~= nil)
+                    .. " backend=" .. tostring((type(owned) == "table" and owned.backend) or "none")
+            )
+        elseif event == "vm-library-refresh" then
+            refreshLibrary()
+            local completed = stepLibraryScan()
+            local scan = type(libraryScan) == "table" and libraryScan or {}
+            noctalia.log(
+                "WALL_IN_ONE_VM_LIBRARY_REFRESH "
+                    .. tostring(payload or "")
+                    .. " completed=" .. tostring(completed == true)
+                    .. " scanning=" .. tostring(library.scanning == true)
+                    .. " queued_videos=" .. tostring(type(scan.video_entries) == "table" and #scan.video_entries or 0)
+                    .. " processed_videos=" .. tostring(type(scan.videos) == "table" and #scan.videos or 0)
+                    .. " phase=" .. tostring(scan.phase or "")
+            )
+        elseif event == "vm-library-probe" then
+            noctalia.log(
+                "WALL_IN_ONE_VM_LIBRARY "
+                    .. tostring(payload or "")
+                    .. " scanning=" .. tostring(library.scanning == true)
+                    .. " videos=" .. tostring(type(library.videos) == "table" and #library.videos or 0)
+                    .. " workshops=" .. tostring(type(library.workshops) == "table" and #library.workshops or 0)
+            )
+        elseif event == "vm-motion-search" or event == "vm-motion-search-force" then
+            vmHandle({
+                kind = "motionbgs_search",
+                query = tostring(payload or "night city"),
+                force = event == "vm-motion-search-force",
+            })
+        elseif event == "vm-motion-details" then
+            vmHandle({ kind = "motionbgs_details", slug = tostring(payload or "night-city"), force = true })
+        elseif event == "vm-motion-download" then
+            vmHandle({ kind = "motionbgs_download", slug = tostring(payload or "night-city"), quality = "hd" })
+        elseif event == "vm-motion-clear" then
+            vmHandle({ kind = "motionbgs_clear" })
+        elseif event == "vm-motion-probe" then
+            local items = type(motionBgsResults) == "table" and motionBgsResults.items or {}
+            local selected = type(motionBgsResults) == "table" and motionBgsResults.selected or {}
+            local downloaded = type(motionBgsStatus) == "table" and motionBgsStatus.last_download or {}
+            noctalia.log(
+                "WALL_IN_ONE_VM_MOTION "
+                    .. tostring(payload or "")
+                    .. " available=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.available == true)
+                    .. " busy=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.busy == true)
+                    .. " action=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.last_action or "")
+                    .. " error_kind=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.last_error_kind or "")
+                    .. " cached=" .. tostring(type(motionBgsResults) == "table" and motionBgsResults.cached == true)
+                    .. " items=" .. tostring(type(items) == "table" and #items or 0)
+                    .. " first=" .. tostring(type(items[1]) == "table" and items[1].slug or "")
+                    .. " selected=" .. tostring(type(selected) == "table" and selected.slug or "")
+                    .. " download=" .. tostring(type(downloaded) == "table" and downloaded.path or "")
+            )
         elseif type(vmProductionOnIpc) == "function" then
             vmProductionOnIpc(event, payload)
         end
@@ -513,7 +822,9 @@ let
     fakeMpv
     pkgs.bash
     pkgs.coreutils
+    pkgs.curl
     pkgs.ffmpeg
+    pkgs.xdg-utils
   ];
   noctaliaRuntimePackages = pluginRuntimePackages ++ [ pkgs.git ];
 
@@ -531,7 +842,20 @@ let
     source = []
 
     [plugin_settings."${pluginId}"]
+    use_wallhaven = true
+    use_w_engine = true
+    use_mpvpaper = true
+    use_motionbgs = true
+    use_extra_provider = true
+    w_engine_backend = "auto"
+    mpvpaper_backend = "auto"
     capture_directory = "${captureRoot}"
+    video_directory = "${videoRoot}"
+    motionbgs_download_directory = "${videoRoot}"
+    motionbgs_quality = "hd"
+    motionbgs_result_limit = 24
+    motionbgs_cache_minutes = 30
+    motionbgs_max_download_mb = 16
     auto_capture = false
     pair_static = true
     sync_colors = true
@@ -540,9 +864,29 @@ let
     video_source = "${fixtureVideo}"
     manual_pair_file = "${fixtureStill}"
     video_frame_second = 0
-    workshop_id = ""
-    workshop_directory = ""
+    workshop_id = "431960001"
+    workshop_directory = "${fixtureWorkshop}"
     scene_screenshot_delay = 3
+    w_engine_scaling = "fill"
+    w_engine_clamp = "border"
+    w_engine_fps = 60
+    w_engine_volume = 15
+    w_engine_silent = false
+    w_engine_noautomute = true
+    w_engine_no_audio_processing = true
+    w_engine_disable_particles = true
+    w_engine_disable_mouse = true
+    w_engine_disable_parallax = true
+    w_engine_no_fullscreen_pause = false
+    w_engine_fullscreen_pause_only_active = true
+    mpv_mute = true
+    mpv_hardware_decode = true
+    mpv_auto_pause = true
+    mpv_auto_pause_mode = "FULL"
+    mpv_options = "keep-open=yes"
+    cycle_interval_minutes = 15
+    cycle_order = "sequential"
+    cycle_start_on_load = false
     extra_provider_panel = ""
 
     [widget.wall-in-one-a]
@@ -573,11 +917,18 @@ let
     text = ''
       install -d -m 0755 \
         "${guestSourceRoot}" \
+        "${configRoot}/noctalia" \
         "${stateRoot}/state/noctalia" \
         "${stateRoot}/data/noctalia" \
         "${cacheRoot}/noctalia" \
-        /tmp/noctalia-wall-in-one-tools
+        /tmp/noctalia-wall-in-one-tools \
+        "${captureRoot}" \
+        "${videoRoot}"
+      for index in 1 2 3 4 5 6; do
+        cp ${fixtureVideo} "${videoRoot}/library-$index.mp4"
+      done
       cp -R --no-preserve=ownership ${stagedSource}/. "${guestSourceRoot}/"
+      cp ${vmConfig} "${configRoot}/noctalia/config.toml"
       chmod -R u+w "${guestSourceRoot}"
       cp ${fakeWallpaperEngine}/bin/linux-wallpaperengine \
         /tmp/noctalia-wall-in-one-tools/linux-wallpaperengine
@@ -601,11 +952,13 @@ let
       : > /tmp/wall-in-one-vm-engine-invocations.log
       : > /tmp/wall-in-one-vm-mpvpaper-invocations.log
       : > /tmp/wall-in-one-vm-mpv-invocations.log
+      : > /tmp/wall-in-one-vm-motion-calls.log
       printf '%s\n' all > /tmp/wall-in-one-vm-provider-mode
+      printf '%s\n' good > /tmp/wall-in-one-vm-motion-mode
       touch "${stateRoot}/state/noctalia/.setup-complete"
 
       export PATH="${fakeNoctalia}/bin:/tmp/noctalia-wall-in-one-tools:$PATH"
-      export NOCTALIA_CONFIG_HOME="/etc/noctalia-wall-in-one-vm"
+      export NOCTALIA_CONFIG_HOME="${configRoot}"
       export NOCTALIA_STATE_HOME="${stateRoot}/state"
       export NOCTALIA_DATA_HOME="${stateRoot}/data"
       export XDG_CACHE_HOME="${cacheRoot}"
@@ -737,6 +1090,67 @@ pkgs.testers.runNixOSTest (
               "runuser -u ${testUser} -- sh -c " + shlex.quote(command)
           )
 
+      def set_integrations(enabled: bool):
+          value = str(enabled).lower()
+          expression = (
+              r"s/^([[:space:]]*use_(wallhaven|w_engine|mpvpaper|extra_provider)"
+              r"[[:space:]]*=[[:space:]]*)(true|false)$/\1" + value + "/"
+          )
+          machine.succeed(
+              "sed -i -E "
+              + shlex.quote(expression)
+              + " ${configRoot}/noctalia/config.toml"
+          )
+
+      def set_integration(name: str, enabled: bool):
+          assert name in ("wallhaven", "w_engine", "mpvpaper", "extra_provider")
+          value = str(enabled).lower()
+          expression = (
+              r"s/^([[:space:]]*use_"
+              + name
+              + r"[[:space:]]*=[[:space:]]*)(true|false)$/\1"
+              + value
+              + "/"
+          )
+          machine.succeed(
+              "sed -i -E "
+              + shlex.quote(expression)
+              + " ${configRoot}/noctalia/config.toml"
+          )
+
+      def set_backend(name: str, backend: str):
+          assert name in ("w_engine", "mpvpaper")
+          assert backend in ("auto", "external", "internal")
+          expression = (
+              r's/^([[:space:]]*'
+              + name
+              + r'_backend[[:space:]]*=[[:space:]]*)"[^"]*"$/\1"'
+              + backend
+              + r'"/'
+          )
+          machine.succeed(
+              "sed -i -E "
+              + shlex.quote(expression)
+              + " ${configRoot}/noctalia/config.toml"
+          )
+
+      def set_manual_pair(path: str):
+          assert "|" not in path
+          expression = (
+              r's|^([[:space:]]*manual_pair_file[[:space:]]*=[[:space:]]*)"[^"]*"$|\1"'
+              + path
+              + r'"|'
+          )
+          machine.succeed(
+              "sed -i -E "
+              + shlex.quote(expression)
+              + " ${configRoot}/noctalia/config.toml"
+          )
+
+      def set_motion_mode(mode: str):
+          command = "printf '%s\\n' " + shlex.quote(mode) + " > /tmp/wall-in-one-vm-motion-mode"
+          machine.succeed("runuser -u ${testUser} -- sh -c " + shlex.quote(command))
+
       probe_number = [0]
       def wait_provider(
           *,
@@ -745,11 +1159,23 @@ pkgs.testers.runNixOSTest (
           w_enabled: bool,
           w_command: bool,
           w_available: bool,
+          w_backend: str | None = None,
+          w_apply: bool | None = None,
+          w_conflict: bool | None = None,
+          wallhaven_allowed: bool | None = None,
+          w_allowed: bool | None = None,
           adapter_capture: bool | None = None,
           adapter_status: bool | None = None,
           current: str | None = None,
+          mpv_allowed: bool | None = None,
           mpvpaper: bool | None = None,
           mpv_command: bool | None = None,
+          mpv_backend: str | None = None,
+          mpv_apply: bool | None = None,
+          mpv_conflict: bool | None = None,
+          renderer_ready: bool | None = None,
+          renderer_owned: bool | None = None,
+          extra_allowed: bool | None = None,
           left: str | None = None,
           right: str | None = None,
           storage: bool = True,
@@ -765,16 +1191,40 @@ pkgs.testers.runNixOSTest (
               f"w_available={str(w_available).lower()}",
               f"storage={str(storage).lower()}",
           ]
+          if wallhaven_allowed is not None:
+              fragments.append(f"wallhaven_allowed={str(wallhaven_allowed).lower()}")
+          if w_allowed is not None:
+              fragments.append(f"w_allowed={str(w_allowed).lower()}")
+          if w_backend is not None:
+              fragments.append(f"w_backend={w_backend}")
+          if w_apply is not None:
+              fragments.append(f"w_apply={str(w_apply).lower()}")
+          if w_conflict is not None:
+              fragments.append(f"w_conflict={str(w_conflict).lower()}")
           if adapter_capture is not None:
               fragments.append(f"adapter_capture={str(adapter_capture).lower()}")
           if adapter_status is not None:
               fragments.append(f"adapter_status={str(adapter_status).lower()}")
           if current is not None:
               fragments.append(f"current={current}")
+          if mpv_allowed is not None:
+              fragments.append(f"mpv_allowed={str(mpv_allowed).lower()}")
           if mpvpaper is not None:
               fragments.append(f"mpvpaper={str(mpvpaper).lower()}")
           if mpv_command is not None:
               fragments.append(f"mpv_command={str(mpv_command).lower()}")
+          if mpv_backend is not None:
+              fragments.append(f"mpv_backend={mpv_backend}")
+          if mpv_apply is not None:
+              fragments.append(f"mpv_apply={str(mpv_apply).lower()}")
+          if mpv_conflict is not None:
+              fragments.append(f"mpv_conflict={str(mpv_conflict).lower()}")
+          if renderer_ready is not None:
+              fragments.append(f"renderer_ready={str(renderer_ready).lower()}")
+          if renderer_owned is not None:
+              fragments.append(f"renderer_owned={str(renderer_owned).lower()}")
+          if extra_allowed is not None:
+              fragments.append(f"extra_allowed={str(extra_allowed).lower()}")
           if left is not None:
               fragments.append(f"left={left}")
           if right is not None:
@@ -788,6 +1238,56 @@ pkgs.testers.runNixOSTest (
               noctalia_command("plugin ${serviceId} all probe")
               + " >/dev/null && "
               + noctalia_command(f"plugin ${serviceId} all vm-probe {token}")
+              + " >/dev/null && "
+              + filters
+          )
+
+      cycle_probe_number = [0]
+      def wait_cycle(*, running: bool, paused: bool, cursor: int, history: int, applying: bool, backend: str):
+          cycle_probe_number[0] += 1
+          token = f"cycle-{cycle_probe_number[0]}"
+          fragments = (
+              f"WALL_IN_ONE_VM_CYCLE {token}",
+              f"running={str(running).lower()}",
+              f"paused={str(paused).lower()}",
+              f"cursor={cursor}",
+              f"history={history}",
+              f"applying={str(applying).lower()}",
+              f"backend={backend}",
+          )
+          filters = journal
+          for fragment in fragments:
+              filters += f" | grep -F -- {shlex.quote(fragment)}"
+          machine.wait_until_succeeds(
+              noctalia_command(f"plugin ${serviceId} all vm-cycle-probe {token}")
+              + " >/dev/null && "
+              + filters
+          )
+
+      def drive_cycle(action: str, condition: str):
+          # Check first so a completed asynchronous action cannot be repeated
+          # and overshoot its target between polling iterations.
+          machine.wait_until_succeeds(
+              "(" + condition + ") || ("
+              + noctalia_command(f"plugin ${serviceId} all vm-cycle-action {action}")
+              + " >/dev/null && "
+              + condition
+              + ")"
+          )
+
+      motion_probe_number = [0]
+      def wait_motion(**expected):
+          motion_probe_number[0] += 1
+          token = f"motion-{motion_probe_number[0]}"
+          filters = journal + " | grep -F -- " + shlex.quote(
+              f"WALL_IN_ONE_VM_MOTION {token}"
+          )
+          for key, value in expected.items():
+              if isinstance(value, bool):
+                  value = str(value).lower()
+              filters += " | grep -F -- " + shlex.quote(f"{key}={value}")
+          machine.wait_until_succeeds(
+              noctalia_command(f"plugin ${serviceId} all vm-motion-probe {token}")
               + " >/dev/null && "
               + filters
           )
@@ -875,6 +1375,13 @@ pkgs.testers.runNixOSTest (
           + " > ${pluginDataRoot}/runtime.json; "
           "chown ${testUser}:users ${pluginDataRoot}/runtime.json"
       )
+      machine.succeed(
+          "install -d -o ${testUser} -g users ${pluginDataRoot}/staging; "
+          "printf owned > ${pluginDataRoot}/staging/capture-owned-startup.png; "
+          "printf unrelated > ${pluginDataRoot}/staging/unrelated-sentinel.png; "
+          "printf unrelated > ${pluginDataRoot}/staging/capture-unrelated.txt; "
+          "chown -R ${testUser}:users ${pluginDataRoot}/staging"
+      )
       for fixture_id, fixture_directory in (
           ("noctalia/wallhaven", "wallhaven"),
           ("tadomika_ari/w-engine", "w-engine"),
@@ -888,7 +1395,28 @@ pkgs.testers.runNixOSTest (
           )
       assert noctalia_msg("plugins enable ${pluginId}").strip().startswith("ok")
       wait_log("started service '${serviceId}'")
+      wait_log("started service '${rendererServiceId}'")
+      wait_log("started service '${motionServiceId}'")
       wait_log('creating #0 "wall-in-one-test"')
+      machine.wait_until_fails(
+          "test -e ${pluginDataRoot}/staging/capture-owned-startup.png"
+      )
+      machine.succeed(
+          "test -f ${pluginDataRoot}/staging/unrelated-sentinel.png; "
+          "test -f ${pluginDataRoot}/staging/capture-unrelated.txt; "
+          "rm ${pluginDataRoot}/staging/unrelated-sentinel.png "
+          "${pluginDataRoot}/staging/capture-unrelated.txt"
+      )
+
+      machine.succeed(
+          "runuser -u ${testUser} -- bash "
+          "${materializedRoot}/scripts/motionbgs-provider self-test "
+          "| grep -Fx $'WIO-MBG1\\tok\\tself-test'"
+      )
+      machine.succeed(
+          "cp ${fakeMotionBgsHelper} ${materializedRoot}/scripts/motionbgs-provider; "
+          "chmod 0755 ${materializedRoot}/scripts/motionbgs-provider"
+      )
 
       # Pin the exact beta.7 output grammar before feeding equivalent controlled
       # snapshots to the service subprocess fixture.
@@ -906,15 +1434,60 @@ pkgs.testers.runNixOSTest (
       wait_log("hot reload: reloaded service '${serviceId}'")
       wait_provider(
           probe_ok=True,
+          wallhaven_allowed=True,
           wallhaven=True,
+          w_allowed=True,
           w_enabled=True,
           w_command=True,
           w_available=True,
+          w_backend="external",
+          w_apply=False,
+          w_conflict=False,
+          mpv_allowed=True,
           mpvpaper=True,
           mpv_command=True,
+          mpv_backend="external",
+          mpv_apply=False,
+          mpv_conflict=False,
+          renderer_ready=True,
+          extra_allowed=True,
           left="native_open",
           right="w_engine_open",
       )
+
+      # Refresh performs only bounded candidate collection synchronously. One
+      # explicit production scan step consumes exactly the four-item budget;
+      # normal update ticks finish the remaining videos and Workshop metadata.
+      library_refresh_token = "bounded-library-refresh"
+      noctalia_msg(
+          f"plugin ${serviceId} all vm-library-refresh {library_refresh_token}"
+      )
+      for fragment in (
+          f"WALL_IN_ONE_VM_LIBRARY_REFRESH {library_refresh_token}",
+          "completed=false",
+          "scanning=true",
+          "queued_videos=6",
+          "processed_videos=4",
+          "phase=videos",
+      ):
+          wait_log(fragment)
+      library_done_token = "bounded-library-done"
+      library_filters = journal
+      for fragment in (
+          f"WALL_IN_ONE_VM_LIBRARY {library_done_token}",
+          "scanning=false",
+          "videos=6",
+          "workshops=1",
+      ):
+          library_filters += f" | grep -F -- {shlex.quote(fragment)}"
+      machine.wait_until_succeeds(
+          noctalia_command(
+              f"plugin ${serviceId} all vm-library-probe {library_done_token}"
+          )
+          + " >/dev/null && "
+          + library_filters
+      )
+
       wait_log("W_ENGINE_VM_SERVICE wall-in-one-probe-v1")
       noctalia_msg("plugin tadomika_ari/w-engine:start all announce")
       wait_provider(
@@ -930,18 +1503,27 @@ pkgs.testers.runNixOSTest (
           mpv_command=True,
       )
 
-      # Initial storage is versioned and contains only the documented registry.
+      # Legacy runtime is migrated without losing observations or pairs. The
+      # current documents include the persistent reel and dynamic-pair stores.
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e "
-          "'.schema_version == 1 and .gestures.left == \"native_open\" "
+          "'.schema_version == 2 and .gestures.left == \"native_open\" "
           "and .gestures.middle == \"wallhaven_open\" "
-          "and .gestures.right == \"w_engine_open\"' "
+          "and .gestures.right == \"w_engine_open\" and (.reels | type) == \"object\"' "
           "${pluginDataRoot}/config.json"
       )
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e "
-          "'.schema_version == 2 and .providers.w_engine.enabled == true "
+          "'.schema_version == 3 and .providers.w_engine.enabled == true "
+          "and .providers.wallhaven.allowed == true "
+          "and .providers.wallhaven.available == true "
+          "and .providers.w_engine.allowed == true "
+          "and .providers.w_engine.available == true "
+          "and .providers.mpvpaper.allowed == true "
+          "and .providers.mpvpaper.available == true "
           "and .providers.mpvpaper.enabled == true "
+          "and (.pair_registry | type) == \"object\" "
+          "and (.cycles | type) == \"object\" "
           "and .pairs[\"LEGACY-OUTPUT\"].capture_method == \"legacy-fixture\"' "
           "${pluginDataRoot}/runtime.json"
       )
@@ -1016,8 +1598,8 @@ pkgs.testers.runNixOSTest (
       noctalia_msg("plugin ${serviceId} all open-provider mpvpaper")
       wait_log("MPVPAPER_VM_PANEL_OPEN")
 
-      # Documented provider controls route to the provider-owned fixture
-      # services. Wall-in-One never invokes either renderer executable.
+      # Auto mode routes documented controls to the provider-owned services and
+      # does not launch an internal duplicate.
       for event, provider_event in (
           ("w-engine-next", "next"),
           ("w-engine-cycle-stop", "cycle-stop"),
@@ -1035,6 +1617,367 @@ pkgs.testers.runNixOSTest (
       ):
           noctalia_msg(f"plugin ${serviceId} all {event}")
           wait_log(f"MPVPAPER_VM_SERVICE {provider_event}")
+
+      machine.succeed("test ! -s /tmp/wall-in-one-vm-engine-invocations.log")
+      machine.succeed("test ! -s /tmp/wall-in-one-vm-mpvpaper-invocations.log")
+
+      # Explicit internal selection while the external plugins are enabled is
+      # a hard conflict. Both apply paths fail closed without a second child.
+      set_backend("w_engine", "internal")
+      set_backend("mpvpaper", "internal")
+      wait_provider(
+          probe_ok=True,
+          wallhaven=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          w_backend="none",
+          w_apply=False,
+          w_conflict=True,
+          mpvpaper=True,
+          mpv_command=True,
+          mpv_backend="none",
+          mpv_apply=False,
+          mpv_conflict=True,
+          renderer_ready=True,
+      )
+      noctalia_msg("plugin ${serviceId} all vm-apply-video")
+      noctalia_msg("plugin ${serviceId} all vm-apply-workshop")
+      machine.sleep(1)
+      machine.succeed("test ! -s /tmp/wall-in-one-vm-engine-invocations.log")
+      machine.succeed("test ! -s /tmp/wall-in-one-vm-mpvpaper-invocations.log")
+
+      # With no external plugin detected, the same explicit settings activate
+      # the internal owners. The fakes stay alive so exact argv/replacement and
+      # teardown can be checked without a real live-wallpaper compositor.
+      set_provider_mode("none")
+      wait_provider(
+          probe_ok=True,
+          wallhaven=False,
+          w_enabled=False,
+          w_command=True,
+          w_available=False,
+          w_backend="internal",
+          w_apply=True,
+          w_conflict=False,
+          mpvpaper=False,
+          mpv_command=True,
+          mpv_backend="internal",
+          mpv_apply=True,
+          mpv_conflict=False,
+          renderer_ready=True,
+      )
+      noctalia_msg("plugin ${serviceId} all vm-apply-video")
+      machine.wait_until_succeeds("test -s /tmp/wall-in-one-vm-mpvpaper-current.pid")
+      mpv_pid = machine.succeed("cat /tmp/wall-in-one-vm-mpvpaper-current.pid").strip()
+      machine.succeed(f"kill -0 {mpv_pid}")
+      mpv_args = machine.succeed(
+          f"tr '\\0' '\\n' < /tmp/wall-in-one-vm-mpvpaper-{mpv_pid}.args"
+      ).splitlines()
+      assert mpv_args[1:6] == ["--layer", "bottom", "--auto-pause", "FULL", "--auto-mode"], mpv_args
+      assert mpv_args[-2:] == ["HEADLESS-1", "${fixtureVideo}"], mpv_args
+      mpv_options = mpv_args[mpv_args.index("-o") + 1]
+      for token in (
+          "loop-file=inf",
+          "panscan=1.0",
+          "terminal=no",
+          "no-audio",
+          "hwdec=auto",
+          "keep-open=yes",
+      ):
+          assert token in mpv_options, (token, mpv_options)
+
+      noctalia_msg("plugin ${serviceId} all vm-apply-workshop")
+      machine.wait_until_succeeds("test -s /tmp/wall-in-one-vm-engine-current.pid")
+      engine_pid = machine.succeed("cat /tmp/wall-in-one-vm-engine-current.pid").strip()
+      machine.succeed(f"kill -0 {engine_pid}")
+      machine.wait_until_fails(f"kill -0 {mpv_pid}")
+      engine_args = machine.succeed(
+          f"tr '\\0' '\\n' < /tmp/wall-in-one-vm-engine-{engine_pid}.args"
+      ).splitlines()
+      assert engine_args[1:] == [
+          "--screen-root", "HEADLESS-1", "--bg", "431960001",
+          "--scaling", "fill", "--clamp", "border", "--layer", "bottom",
+          "--fps", "60", "--volume", "15", "--noautomute",
+          "--no-audio-processing", "--disable-particles", "--disable-mouse",
+          "--disable-parallax", "--fullscreen-pause-only-active",
+      ], engine_args
+      assert machine.succeed(
+          "systemctl show -p MainPID --value wall-in-one-renderer-sentinel.service"
+      ).strip() == sentinel_pid
+
+      # Seed and drive one persistent mixed reel while both internal backends
+      # are active. The first static entry replaces the existing live child;
+      # later entries exercise owned pause/resume/replacement.
+      noctalia_msg("plugin ${serviceId} all vm-cycle-seed")
+      machine.wait_until_succeeds(
+          "${lib.getExe pkgs.jq} -e "
+          "'.schema_version == 2 "
+          "and .reels[\"HEADLESS-1\"].interval_seconds == 60 "
+          "and .reels[\"HEADLESS-1\"].order == \"sequential\" "
+          "and (.reels[\"HEADLESS-1\"].entries | length) == 3 "
+          "and .reels[\"HEADLESS-1\"].entries[0].kind == \"static\" "
+          "and .reels[\"HEADLESS-1\"].entries[1].kind == \"video\" "
+          "and .reels[\"HEADLESS-1\"].entries[1].still_path == \"${fixtureVideoStill}\" "
+          "and .reels[\"HEADLESS-1\"].entries[2].kind == \"workshop\" "
+          "and .reels[\"HEADLESS-1\"].entries[2].still_path == \"${fixtureWorkshopStill}\"' "
+          "${pluginDataRoot}/config.json"
+      )
+      drive_cycle(
+          "start",
+          "${lib.getExe pkgs.jq} -e "
+          "'.schema_version == 3 and .cycles[\"HEADLESS-1\"].running == true "
+          "and .cycles[\"HEADLESS-1\"].paused == false "
+          "and .cycles[\"HEADLESS-1\"].cursor == 1 "
+          "and .cycles[\"HEADLESS-1\"].next_due > now "
+          "and (.cycles[\"HEADLESS-1\"].history | length) == 1' "
+          "${pluginDataRoot}/runtime.json",
+      )
+      machine.wait_until_fails(f"kill -0 {engine_pid}")
+      wait_cycle(running=True, paused=False, cursor=1, history=1, applying=False, backend="none")
+
+      drive_cycle(
+          "next",
+          "${lib.getExe pkgs.jq} -e '.cycles[\"HEADLESS-1\"].cursor == 2 "
+          "and (.cycles[\"HEADLESS-1\"].history | length) == 2' "
+          "${pluginDataRoot}/runtime.json",
+      )
+      machine.wait_until_succeeds(
+          "test -s /tmp/wall-in-one-vm-mpvpaper-current.pid; "
+          "test \"$(cat /tmp/wall-in-one-vm-mpvpaper-current.pid)\" != " + mpv_pid
+      )
+      cycle_mpv_pid = machine.succeed("cat /tmp/wall-in-one-vm-mpvpaper-current.pid").strip()
+      machine.succeed(f"kill -0 {cycle_mpv_pid}")
+      machine.wait_until_succeeds(
+          noctalia_command("wallpaper-get HEADLESS-1")
+          + " | grep -Fx -- ${fixtureVideoStill}"
+      )
+      wait_cycle(running=True, paused=False, cursor=2, history=2, applying=False, backend="mpvpaper")
+      drive_cycle(
+          "pause",
+          "${lib.getExe pkgs.jq} -e '.cycles[\"HEADLESS-1\"].paused == true' "
+          "${pluginDataRoot}/runtime.json",
+      )
+      machine.wait_until_succeeds(
+          f"test \"$(awk '/^State:/ {{print $2}}' /proc/{cycle_mpv_pid}/status)\" = T"
+      )
+      wait_cycle(running=True, paused=True, cursor=2, history=2, applying=False, backend="mpvpaper")
+      noctalia_msg("plugin ${serviceId} all vm-cycle-action next")
+      machine.sleep(1)
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e '.cycles[\"HEADLESS-1\"].paused == true "
+          "and .cycles[\"HEADLESS-1\"].cursor == 2 "
+          "and (.cycles[\"HEADLESS-1\"].history | length) == 2' "
+          "${pluginDataRoot}/runtime.json"
+      )
+      machine.succeed(
+          f"test \"$(awk '/^State:/ {{print $2}}' /proc/{cycle_mpv_pid}/status)\" = T"
+      )
+      drive_cycle(
+          "resume",
+          "${lib.getExe pkgs.jq} -e '.cycles[\"HEADLESS-1\"].running == true "
+          "and .cycles[\"HEADLESS-1\"].paused == false' ${pluginDataRoot}/runtime.json",
+      )
+      machine.wait_until_succeeds(
+          f"test \"$(awk '/^State:/ {{print $2}}' /proc/{cycle_mpv_pid}/status)\" != T"
+      )
+      wait_cycle(running=True, paused=False, cursor=2, history=2, applying=False, backend="mpvpaper")
+
+      drive_cycle(
+          "next",
+          "${lib.getExe pkgs.jq} -e '.cycles[\"HEADLESS-1\"].cursor == 3 "
+          "and (.cycles[\"HEADLESS-1\"].history | length) == 3' "
+          "${pluginDataRoot}/runtime.json",
+      )
+      machine.wait_until_succeeds(
+          "test \"$(cat /tmp/wall-in-one-vm-engine-current.pid)\" != " + engine_pid
+      )
+      cycle_engine_pid = machine.succeed("cat /tmp/wall-in-one-vm-engine-current.pid").strip()
+      machine.succeed(f"kill -0 {cycle_engine_pid}")
+      machine.wait_until_fails(f"kill -0 {cycle_mpv_pid}")
+      machine.wait_until_succeeds(
+          noctalia_command("wallpaper-get HEADLESS-1")
+          + " | grep -Fx -- ${fixtureWorkshopStill}"
+      )
+      wait_cycle(running=True, paused=False, cursor=3, history=3, applying=False, backend="w-engine")
+
+      drive_cycle(
+          "previous",
+          "${lib.getExe pkgs.jq} -e '.cycles[\"HEADLESS-1\"].cursor == 2 "
+          "and (.cycles[\"HEADLESS-1\"].history | length) == 2' "
+          "${pluginDataRoot}/runtime.json",
+      )
+      wait_cycle(running=True, paused=False, cursor=2, history=2, applying=False, backend="mpvpaper")
+      history_before_random = int(machine.succeed(
+          "${lib.getExe pkgs.jq} '.cycles[\"HEADLESS-1\"].history | length' "
+          "${pluginDataRoot}/runtime.json"
+      ))
+      # `previous` persists its cursor before the renderer acknowledges the
+      # replacement. Retrying the command+observation pair proves the
+      # coordinator rejects overlap and accepts the next action once idle.
+      machine.wait_until_succeeds(
+          noctalia_command("plugin ${serviceId} all vm-cycle-action random")
+          + " >/dev/null && test $(${lib.getExe pkgs.jq} "
+          "'.cycles[\"HEADLESS-1\"].history | length' "
+          "${pluginDataRoot}/runtime.json) -gt " + str(history_before_random)
+      )
+      drive_cycle(
+          "stop",
+          "${lib.getExe pkgs.jq} -e '.cycles[\"HEADLESS-1\"].running == false "
+          "and .cycles[\"HEADLESS-1\"].paused == false "
+          "and .cycles[\"HEADLESS-1\"].next_due == 0' "
+          "${pluginDataRoot}/runtime.json",
+      )
+      wait_provider(
+          probe_ok=True,
+          wallhaven=False,
+          w_enabled=False,
+          w_command=True,
+          w_available=False,
+          w_backend="internal",
+          w_apply=True,
+          w_conflict=False,
+          mpvpaper=False,
+          mpv_command=True,
+          mpv_backend="internal",
+          mpv_apply=True,
+          mpv_conflict=False,
+          renderer_ready=True,
+          renderer_owned=False,
+      )
+      assert machine.succeed(
+          "systemctl show -p MainPID --value wall-in-one-renderer-sentinel.service"
+      ).strip() == sentinel_pid
+
+      # Losing the external-ownership observation is not evidence that no
+      # external owner exists. Force a provider probe failure while an internal
+      # child is live: both backends must fail closed and the exact owned child
+      # must stop, without touching the unrelated sentinel. A successful probe
+      # is required before internal apply becomes available again.
+      previous_mpv_invocations = len(
+          machine.succeed("cat /tmp/wall-in-one-vm-mpvpaper-invocations.log").splitlines()
+      )
+      noctalia_msg("plugin ${serviceId} all vm-apply-video")
+      machine.wait_until_succeeds(
+          "test $(wc -l < /tmp/wall-in-one-vm-mpvpaper-invocations.log) -gt "
+          + str(previous_mpv_invocations)
+      )
+      probe_failure_pid = machine.succeed(
+          "cat /tmp/wall-in-one-vm-mpvpaper-current.pid"
+      ).strip()
+      machine.succeed(f"kill -0 {probe_failure_pid}")
+      set_provider_mode("fail")
+      wait_provider(
+          probe_ok=False,
+          wallhaven=False,
+          w_enabled=False,
+          w_command=True,
+          w_available=False,
+          w_backend="none",
+          w_apply=False,
+          w_conflict=False,
+          mpvpaper=False,
+          mpv_command=True,
+          mpv_backend="none",
+          mpv_apply=False,
+          mpv_conflict=False,
+          renderer_ready=True,
+          renderer_owned=False,
+      )
+      machine.wait_until_fails(f"kill -0 {probe_failure_pid}")
+      assert machine.succeed(
+          "systemctl show -p MainPID --value wall-in-one-renderer-sentinel.service"
+      ).strip() == sentinel_pid
+
+      set_provider_mode("none")
+      wait_provider(
+          probe_ok=True,
+          wallhaven=False,
+          w_enabled=False,
+          w_command=True,
+          w_available=False,
+          w_backend="internal",
+          w_apply=True,
+          w_conflict=False,
+          mpvpaper=False,
+          mpv_command=True,
+          mpv_backend="internal",
+          mpv_apply=True,
+          mpv_conflict=False,
+          renderer_ready=True,
+          renderer_owned=False,
+      )
+
+      set_backend("w_engine", "auto")
+      set_backend("mpvpaper", "auto")
+      set_provider_mode("all")
+      wait_provider(
+          probe_ok=True,
+          wallhaven=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          w_backend="external",
+          w_apply=False,
+          w_conflict=False,
+          mpvpaper=True,
+          mpv_command=True,
+          mpv_backend="external",
+          mpv_apply=False,
+          mpv_conflict=False,
+      )
+      machine.wait_until_fails(f"kill -0 {engine_pid}")
+      assert machine.succeed(
+          "systemctl show -p MainPID --value wall-in-one-renderer-sentinel.service"
+      ).strip() == sentinel_pid
+
+      # MotionBGS runs entirely against pinned local HTML/MP4 fixtures. The
+      # shipped helper's self-test ran before replacement above.
+      wait_motion(available=True, busy=False)
+      set_motion_mode("good")
+      noctalia_msg("plugin ${serviceId} all vm-motion-search 'night city'")
+      wait_motion(action="search", cached=False, items=1, first="night-city")
+      motion_calls_after_search = len(
+          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      )
+
+      # A fresh cache hit must not invoke even a deliberately failing helper.
+      set_motion_mode("deny")
+      noctalia_msg("plugin ${serviceId} all vm-motion-search 'night city'")
+      wait_motion(action="search", cached=True, items=1, first="night-city")
+      assert len(
+          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      ) == motion_calls_after_search
+
+      set_motion_mode("good")
+      noctalia_msg("plugin ${serviceId} all vm-motion-details night-city")
+      wait_motion(action="details", selected="night-city")
+
+      set_motion_mode("challenge")
+      noctalia_msg("plugin ${serviceId} all vm-motion-search-force challenge")
+      wait_motion(action="search", error_kind="challenge", busy=False)
+      set_motion_mode("markup")
+      noctalia_msg("plugin ${serviceId} all vm-motion-search-force changed-layout")
+      wait_motion(action="search", error_kind="site-markup", busy=False)
+      set_motion_mode("cross-origin")
+      noctalia_msg("plugin ${serviceId} all vm-motion-search-force wrong-origin")
+      wait_motion(action="search", error_kind="protocol", busy=False)
+
+      set_motion_mode("good")
+      noctalia_msg("plugin ${serviceId} all vm-motion-download night-city")
+      motion_download = "${videoRoot}/night-city.hd.mp4"
+      wait_motion(action="download", download=motion_download, busy=False)
+      machine.succeed("${lib.getExe pkgs.ffmpeg} -v error -i " + motion_download + " -f null -")
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          "'.schema == 1 and .provider == \"MotionBGS\" and .quality == \"hd\"' "
+          + motion_download
+          + ".motionbgs.json"
+      )
+      machine.fail("test -e " + motion_download + ".part")
+      machine.fail("test -e " + motion_download + ".motionbgs.json.part")
+      noctalia_msg("plugin ${serviceId} all vm-motion-clear")
+      wait_motion(action="clear", items=0, selected="")
 
       # Native switching uses only Noctalia's fixed IPC verbs and an optional
       # validated output name.
@@ -1056,8 +1999,244 @@ pkgs.testers.runNixOSTest (
       assert all(len(call) in (2, 3) for call in native_calls), native_calls
       assert all(len(call) == 2 or call[2] == "HEADLESS-1" for call in native_calls), native_calls
 
-      # The immutable VM config opts into an absolute export directory from
-      # boot. The private pluginDataDir()/captures default is pinned by the
+      # All detected integrations start allowed. Each setting can then hard
+      # force-off Wall-in-One's panel, IPC, status-adapter, and W Engine
+      # capture routes without disabling or stopping the provider plugins.
+      before_wallhaven_open = machine.succeed(journal).count("WALLHAVEN_VM_PANEL_OPEN")
+      before_w_engine_next = machine.succeed(journal).count("W_ENGINE_VM_SERVICE next")
+      before_w_engine_capture = machine.succeed(journal).count("W_ENGINE_VM_SERVICE capture-v1")
+      before_mpvpaper_pause = machine.succeed(journal).count("MPVPAPER_VM_SERVICE pause")
+
+      set_integration("w_engine", False)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=False,
+          w_enabled=True,
+          w_command=True,
+          w_available=False,
+          adapter_capture=False,
+          adapter_status=False,
+          current="",
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+      noctalia_msg("plugin ${serviceId} all w-engine-next")
+      noctalia_msg("plugin ${serviceId} all capture")
+      noctalia_msg("plugin tadomika_ari/w-engine:start all announce")
+      machine.sleep(1)
+      assert machine.succeed(journal).count("W_ENGINE_VM_SERVICE next") == before_w_engine_next
+      assert machine.succeed(journal).count("W_ENGINE_VM_SERVICE capture-v1") == before_w_engine_capture
+      set_integration("w_engine", True)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+
+      set_integration("wallhaven", False)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=False,
+          wallhaven=False,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+      noctalia_msg("plugin ${serviceId} all open-provider wallhaven")
+      machine.sleep(1)
+      assert machine.succeed(journal).count("WALLHAVEN_VM_PANEL_OPEN") == before_wallhaven_open
+      set_integration("wallhaven", True)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+
+      set_integration("mpvpaper", False)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=False,
+          mpvpaper=False,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+      noctalia_msg("plugin ${serviceId} all mpvpaper-pause")
+      machine.sleep(1)
+      assert machine.succeed(journal).count("MPVPAPER_VM_SERVICE pause") == before_mpvpaper_pause
+      set_integration("mpvpaper", True)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+
+      set_integration("extra_provider", False)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=False,
+      )
+      set_integration("extra_provider", True)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+
+      # All four gates can also be disabled together while public Noctalia
+      # wallpaper inspection remains available.
+      set_integrations(False)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=False,
+          wallhaven=False,
+          w_allowed=False,
+          w_enabled=True,
+          w_command=True,
+          w_available=False,
+          adapter_capture=False,
+          adapter_status=False,
+          current="",
+          mpv_allowed=False,
+          mpvpaper=False,
+          mpv_command=True,
+          extra_allowed=False,
+      )
+      noctalia_msg("plugin tadomika_ari/w-engine:start all announce")
+      machine.sleep(1)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=False,
+          wallhaven=False,
+          w_allowed=False,
+          w_enabled=True,
+          w_command=True,
+          w_available=False,
+          adapter_capture=False,
+          adapter_status=False,
+          current="",
+          mpv_allowed=False,
+          mpvpaper=False,
+          mpv_command=True,
+          extra_allowed=False,
+      )
+
+      # Reading Noctalia's public wallpaper-get path remains independent of
+      # every live-provider integration. The copy is an export only and does
+      # not re-pair or mutate the current wallpaper.
+      noctalia_msg("plugin ${serviceId} all capture-backing")
+      machine.wait_until_succeeds(
+          "find ${captureRoot} -maxdepth 1 -type f "
+          "-name 'wall-in-one-backing-*-HEADLESS-1.png' -size +0c | grep -q ."
+      )
+      backing_still = machine.succeed(
+          "find ${captureRoot} -maxdepth 1 -type f "
+          "-name 'wall-in-one-backing-*-HEADLESS-1.png' -print -quit"
+      ).strip()
+      machine.succeed(
+          "${lib.getExe pkgs.ffmpeg} -v error -i "
+          + shlex.quote(backing_still)
+          + " -f null -"
+      )
+      machine.wait_until_succeeds(
+          "${lib.getExe pkgs.jq} -e --arg path "
+          + shlex.quote(backing_still)
+          + " '.last_capture.provider == \"noctalia\" "
+          + "and .last_capture.method == \"noctalia-current-backing\" "
+          + "and .last_capture.dynamic_id == \"backing:${fixtureStill}\" "
+          + "and .last_capture.path == $path' "
+          + "${pluginDataRoot}/runtime.json"
+      )
+      machine.wait_until_succeeds(
+          "grep -F $'\\tmsg\\twallpaper-get\\tHEADLESS-1' "
+          "/tmp/wall-in-one-vm-noctalia-calls.log"
+      )
+
+      set_integrations(True)
+      wait_provider(
+          probe_ok=True,
+          wallhaven_allowed=True,
+          wallhaven=True,
+          w_allowed=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          mpv_allowed=True,
+          mpvpaper=True,
+          mpv_command=True,
+          extra_allowed=True,
+      )
+      noctalia_msg("plugin tadomika_ari/w-engine:start all announce")
+      wait_provider(
+          probe_ok=True,
+          wallhaven=True,
+          w_enabled=True,
+          w_command=True,
+          w_available=True,
+          adapter_capture=True,
+          adapter_status=True,
+          current="431960001",
+          mpvpaper=True,
+          mpv_command=True,
+      )
+
+      # The staged VM config opts into an absolute export directory from boot.
+      # The private pluginDataDir()/captures default is pinned by the
       # static contract test without mutating a user's live configuration.
       noctalia_msg("plugin tadomika_ari/w-engine:start all announce")
       wait_provider(
@@ -1076,15 +2255,25 @@ pkgs.testers.runNixOSTest (
       # A configured video is decoded by the bounded helper, exported into the
       # selected absolute directory, persisted as Noctalia's static pair, and
       # used as the explicit wallpaper palette source.
+      previous_capture = machine.succeed(
+          "${lib.getExe pkgs.jq} -r '.last_capture.path // \"\"' "
+          "${pluginDataRoot}/runtime.json"
+      ).strip()
       noctalia_msg("plugin ${serviceId} all capture-video-pair")
       machine.wait_until_succeeds(
-          "find ${captureRoot} -maxdepth 1 -type f "
-          "-name 'wall-in-one-video-*-HEADLESS-1.png' -size +0c | grep -q ."
+          "${lib.getExe pkgs.jq} -e --arg previous "
+          + shlex.quote(previous_capture)
+          + " '.last_capture.provider == \"video\" "
+          + "and .last_capture.path != $previous "
+          + "and (.last_capture.path | length) > 0' "
+          + "${pluginDataRoot}/runtime.json"
       )
       video_still = machine.succeed(
-          "find ${captureRoot} -maxdepth 1 -type f "
-          "-name 'wall-in-one-video-*-HEADLESS-1.png' -print -quit"
+          "${lib.getExe pkgs.jq} -r '.last_capture.path' "
+          "${pluginDataRoot}/runtime.json"
       ).strip()
+      assert video_still.startswith("${captureRoot}/wall-in-one-video-")
+      assert video_still.endswith("-HEADLESS-1.png")
       machine.succeed(
           "${lib.getExe pkgs.ffmpeg} -v error -i "
           + shlex.quote(video_still)
@@ -1098,7 +2287,7 @@ pkgs.testers.runNixOSTest (
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e --arg path "
           + shlex.quote(video_still)
-          + " '.schema_version == 2 "
+          + " '.schema_version == 3 "
           + "and .last_capture.provider == \"video\" "
           + "and .last_capture.path == $path "
           + "and .pairs[\"HEADLESS-1\"].still_path == $path "
@@ -1132,7 +2321,7 @@ pkgs.testers.runNixOSTest (
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e --arg path "
           + shlex.quote(engine_still)
-          + " '.schema_version == 2 "
+          + " '.schema_version == 3 "
           + "and .last_capture.provider == \"w_engine\" "
           + "and .last_capture.dynamic_id == \"431960001\" "
           + "and .last_capture.method == \"w-engine-adapter-v1\" "
@@ -1199,6 +2388,53 @@ pkgs.testers.runNixOSTest (
           "${pluginDataRoot}/runtime.json"
       )
 
+      # Animated manual selections are decoded into a durable PNG rather than
+      # persisting a transient validation staging path or the animated source.
+      set_manual_pair("${fixtureGif}")
+      machine.wait_until_succeeds(
+          noctalia_command("plugin ${serviceId} all pair-manual")
+          + " >/dev/null && ${lib.getExe pkgs.jq} -e "
+          + shlex.quote(
+              '.pairs["HEADLESS-1"].provider == "manual" '
+              'and .pairs["HEADLESS-1"].dynamic_id == "manual:${fixtureGif}" '
+              'and .pairs["HEADLESS-1"].still_path != "${fixtureGif}" '
+              'and (.pairs["HEADLESS-1"].still_path | endswith(".png"))'
+          )
+          + " ${pluginDataRoot}/runtime.json"
+      )
+      gif_still = machine.succeed(
+          "${lib.getExe pkgs.jq} -r '.pairs[\"HEADLESS-1\"].still_path' "
+          "${pluginDataRoot}/runtime.json"
+      ).strip()
+      assert gif_still.startswith("${captureRoot}/wall-in-one-manual-"), gif_still
+      assert gif_still.endswith("-HEADLESS-1.png"), gif_still
+      machine.succeed(
+          "${lib.getExe pkgs.ffmpeg} -v error -i "
+          + shlex.quote(gif_still)
+          + " -f null -"
+      )
+      service_reload_marker = "hot reload: reloaded service '${serviceId}'"
+      gif_reloads_before = machine.succeed(journal).count(service_reload_marker)
+      machine.succeed(
+          "printf '\\n-- VM GIF persistence reload probe\\n' >> ${materializedRoot}/service.luau"
+      )
+      machine.wait_until_succeeds(
+          f"test $({journal} | grep -Fc -- {shlex.quote(service_reload_marker)}) "
+          f"-gt {gif_reloads_before}"
+      )
+      machine.wait_until_succeeds(
+          noctalia_command("wallpaper-get HEADLESS-1")
+          + " | grep -Fx -- "
+          + shlex.quote(gif_still)
+      )
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e --arg path "
+          + shlex.quote(gif_still)
+          + " '.pairs[\"HEADLESS-1\"].still_path == $path' "
+          + "${pluginDataRoot}/runtime.json"
+      )
+      set_manual_pair("${fixtureStill}")
+
       # Adapter readiness is a lease, not a permanent inference. A successful
       # provider discovery probes W Engine; silence expires stale capability
       # and current-source flags after the ten-second grace period.
@@ -1257,8 +2493,12 @@ pkgs.testers.runNixOSTest (
       )
       machine.fail("test -e ${pluginDataRoot}/config.json.tmp")
 
+      persistence_reloads_before = machine.succeed(journal).count(service_reload_marker)
       machine.succeed("printf '\\n-- VM persistence reload probe\\n' >> ${materializedRoot}/service.luau")
-      wait_log("hot reload: reloaded service '${serviceId}'")
+      machine.wait_until_succeeds(
+          f"test $({journal} | grep -Fc -- {shlex.quote(service_reload_marker)}) "
+          f"-gt {persistence_reloads_before}"
+      )
       wait_provider(
           probe_ok=True,
           wallhaven=True,
@@ -1267,6 +2507,19 @@ pkgs.testers.runNixOSTest (
           w_available=True,
           left="native_previous",
           right="native_random",
+      )
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          "'.schema_version == 2 and (.reels[\"HEADLESS-1\"].entries | length) == 3' "
+          "${pluginDataRoot}/config.json"
+      )
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          "'.schema_version == 3 and .cycles[\"HEADLESS-1\"].running == false "
+          "and (.cycles[\"HEADLESS-1\"].history | type) == \"array\" "
+          "and (.pair_registry[\"video:${fixtureVideo}\"].still_path | type) == \"string\" "
+          "and (.pair_registry[\"431960001\"].still_path | type) == \"string\"' "
+          "${pluginDataRoot}/runtime.json"
       )
       noctalia_msg("plugin ${serviceId} all gesture right")
       machine.wait_until_succeeds(
@@ -1295,8 +2548,13 @@ pkgs.testers.runNixOSTest (
           call for call in fixture_calls()
           if len(call) >= 2 and call[:2] == ["msg", "wallpaper-next"]
       ])
+      service_start_marker = "started service '${serviceId}'"
+      service_starts_before = machine.succeed(journal).count(service_start_marker)
       assert noctalia_msg("plugins enable ${pluginId}").strip().startswith("ok")
-      wait_log("started service '${serviceId}'")
+      machine.wait_until_succeeds(
+          f"test $({journal} | grep -Fc -- {shlex.quote(service_start_marker)}) "
+          f"-gt {service_starts_before}"
+      )
       machine.sleep(1)
       assert machine.succeed("cat ${pluginDataRoot}/config.json").strip() == "{broken-json"
       noctalia_msg("plugin ${serviceId} all next")
@@ -1307,9 +2565,9 @@ pkgs.testers.runNixOSTest (
       ])
       assert after_native == before_native
 
-      # Ownership boundaries are enforced statically and dynamically. Pairing
-      # intentionally uses setWallpaper, but never disables Noctalia's surface,
-      # scrapes process/private state, or launches/signals a provider renderer.
+      # Ownership boundaries are enforced statically and dynamically. The
+      # coordinator/capture helper never signal processes; only the dedicated
+      # supervisor may signal its exact child-PID map.
       for forbidden in (
           "setWallpaperEnabled(",
           "pgrep",
@@ -1322,9 +2580,9 @@ pkgs.testers.runNixOSTest (
           "pkill",
       ):
           machine.fail(
-              "grep -R --include='*.luau' --include='capture-still' -F -- "
+              "grep -F -- "
               + shlex.quote(forbidden)
-              + " ${materializedRoot}"
+              + " ${materializedRoot}/service.luau ${materializedRoot}/scripts/capture-still"
           )
       machine.succeed(
           "grep -F 'noctalia.setWallpaper(' ${materializedRoot}/service.luau"
@@ -1340,13 +2598,28 @@ pkgs.testers.runNixOSTest (
           "| grep -Fv 'commandExists(\"linux-wallpaperengine\")'"
       )
       machine.fail(
-          "grep -R -E --include='*.luau' --include='capture-still' "
+          "grep -E "
           "'(^|[^[:alnum:]_])(kill|killall|pkill)([^[:alnum:]_]|$)' "
-          "${materializedRoot}"
+          "${materializedRoot}/service.luau ${materializedRoot}/scripts/capture-still"
       )
-      machine.succeed("test ! -s /tmp/wall-in-one-vm-engine-invocations.log")
-      machine.succeed("test ! -s /tmp/wall-in-one-vm-mpvpaper-invocations.log")
+      machine.succeed(
+          "grep -F 'declare -A child_pid=()' ${materializedRoot}/scripts/renderer-supervisor"
+      )
+      machine.succeed(
+          "grep -F 'kill -TERM \"$pid\"' ${materializedRoot}/scripts/renderer-supervisor"
+      )
+      machine.fail(
+          "grep -v '^[[:space:]]*#' ${materializedRoot}/scripts/renderer-supervisor "
+          "| grep -E 'pgrep|pkill|killall|setsid|systemd-run'"
+      )
+      machine.succeed("test -s /tmp/wall-in-one-vm-engine-invocations.log")
+      machine.succeed("test -s /tmp/wall-in-one-vm-mpvpaper-invocations.log")
       machine.succeed("test ! -s /tmp/wall-in-one-vm-mpv-invocations.log")
+      machine.succeed(
+          "for log in /tmp/wall-in-one-vm-engine-invocations.log "
+          "/tmp/wall-in-one-vm-mpvpaper-invocations.log; do "
+          "while read -r pid; do ! kill -0 \"$pid\" 2>/dev/null; done < \"$log\"; done"
+      )
       machine.fail(
           "find ${pluginDataRoot}/captures ${captureRoot} -type f "
           "\\( -name '*.part' -o -name '*.part.*' \\) | grep -q ."
@@ -1368,6 +2641,15 @@ pkgs.testers.runNixOSTest (
           assert forbidden not in logs, f"unexpected log marker: {forbidden}"
 
       noctalia_msg("plugins disable ${pluginId}")
+      machine.wait_until_fails(
+          "find ${runtimeRoot}/noctalia-wall-in-one -maxdepth 1 -type p "
+          "-name 'renderer-*.fifo' | grep -q ."
+      )
+      machine.succeed(
+          "for log in /tmp/wall-in-one-vm-engine-invocations.log "
+          "/tmp/wall-in-one-vm-mpvpaper-invocations.log; do "
+          "while read -r pid; do ! kill -0 \"$pid\" 2>/dev/null; done < \"$log\"; done"
+      )
       machine.succeed("systemctl is-active --quiet wall-in-one-renderer-sentinel.service")
       assert machine.succeed(
           "systemctl show -p MainPID --value wall-in-one-renderer-sentinel.service"

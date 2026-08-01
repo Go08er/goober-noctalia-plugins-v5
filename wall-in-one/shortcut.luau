@@ -64,7 +64,7 @@ local function actionAvailable(action)
     elseif action == "w_engine_open" then
         return wEngine.available == true
     elseif action == "w_engine_next" or action == "w_engine_cycle_stop" or action == "w_engine_stop" then
-        return wEngine.plugin_enabled == true and current.noctalia_cli == true
+        return wEngine.available == true and current.noctalia_cli == true
     elseif action == "mpvpaper_open" then
         return mpvpaper.available == true
     elseif
@@ -74,11 +74,13 @@ local function actionAvailable(action)
         or action == "mpvpaper_clear"
         or action == "mpvpaper_clear_all"
     then
-        return mpvpaper.plugin_enabled == true and current.noctalia_cli == true
+        return mpvpaper.available == true and current.noctalia_cli == true
+    elseif action == "capture_backing" then
+        return current.noctalia_cli == true and focusedOutput() ~= ""
     elseif action == "capture_current" or action == "capture_pair" then
         local adapterId = type(wEngine.current) == "table" and tostring(wEngine.current[focusedOutput()] or "") or ""
         local configuredId = type(status.settings) == "table" and tostring(status.settings.workshop_id or "") or ""
-        return adapterId:match("^%d+$") ~= nil or configuredId:match("^%d+$") ~= nil
+        return wEngine.allowed == true and (adapterId:match("^%d+$") ~= nil or configuredId:match("^%d+$") ~= nil)
     elseif action == "video_capture" or action == "video_capture_pair" then
         return type(status.settings) == "table" and tostring(status.settings.video_source or "") ~= ""
     elseif action == "manual_pair" then

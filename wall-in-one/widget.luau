@@ -14,6 +14,7 @@ local ACTION_LABEL_KEYS = {
     native_previous = "actions.native_previous",
     native_random = "actions.native_random",
     wallhaven_open = "actions.wallhaven_open",
+    motionbgs_open = "actions.motionbgs_open",
     w_engine_open = "actions.w_engine_open",
     w_engine_next = "actions.w_engine_next",
     w_engine_cycle_stop = "actions.w_engine_cycle_stop",
@@ -24,10 +25,25 @@ local ACTION_LABEL_KEYS = {
     mpvpaper_toggle = "actions.mpvpaper_toggle",
     mpvpaper_clear = "actions.mpvpaper_clear",
     mpvpaper_clear_all = "actions.mpvpaper_clear_all",
+    capture_backing = "actions.capture_backing",
     capture_current = "actions.capture_current",
     capture_pair = "actions.capture_pair",
     video_capture = "actions.video_capture",
     video_capture_pair = "actions.video_capture_pair",
+    video_apply_pair = "actions.video_apply_pair",
+    workshop_apply_pair = "actions.workshop_apply_pair",
+    cycle_start = "actions.cycle_start",
+    cycle_stop = "actions.cycle_stop",
+    cycle_pause = "actions.cycle_pause",
+    cycle_resume = "actions.cycle_resume",
+    cycle_next = "actions.cycle_next",
+    cycle_previous = "actions.cycle_previous",
+    cycle_random = "actions.cycle_random",
+    cycle_add_static = "actions.cycle_add_static",
+    cycle_add_video = "actions.cycle_add_video",
+    cycle_add_workshop = "actions.cycle_add_workshop",
+    cycle_remove_last = "actions.cycle_remove_last",
+    cycle_clear = "actions.cycle_clear",
     manual_pair = "actions.manual_pair",
     extra_provider_open = "actions.extra_provider_open",
     hub_open = "actions.hub_open",
@@ -83,7 +99,7 @@ local function actionAvailable(action)
     elseif action == "w_engine_open" then
         return wEngine.available == true
     elseif action == "w_engine_next" or action == "w_engine_cycle_stop" or action == "w_engine_stop" then
-        return wEngine.plugin_enabled == true and current.noctalia_cli == true
+        return wEngine.available == true and current.noctalia_cli == true
     elseif action == "mpvpaper_open" then
         return mpvpaper.available == true
     elseif
@@ -93,11 +109,13 @@ local function actionAvailable(action)
         or action == "mpvpaper_clear"
         or action == "mpvpaper_clear_all"
     then
-        return mpvpaper.plugin_enabled == true and current.noctalia_cli == true
+        return mpvpaper.available == true and current.noctalia_cli == true
+    elseif action == "capture_backing" then
+        return current.noctalia_cli == true and outputName() ~= ""
     elseif action == "capture_current" or action == "capture_pair" then
         local adapterId = type(wEngine.current) == "table" and tostring(wEngine.current[outputName()] or "") or ""
         local configuredId = type(status.settings) == "table" and tostring(status.settings.workshop_id or "") or ""
-        return adapterId:match("^%d+$") ~= nil or configuredId:match("^%d+$") ~= nil
+        return wEngine.allowed == true and (adapterId:match("^%d+$") ~= nil or configuredId:match("^%d+$") ~= nil)
     elseif action == "video_capture" or action == "video_capture_pair" then
         return type(status.settings) == "table" and tostring(status.settings.video_source or "") ~= ""
     elseif action == "manual_pair" then

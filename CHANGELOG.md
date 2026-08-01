@@ -20,6 +20,26 @@ All notable staging changes will be recorded here.
 - Remove the now-empty plugin-settings button from the details panel and point
   users to the exact per-placement editor instead.
 
+## Wall-in-One 0.4.0 - Unified live library and mixed scheduler
+
+- Add an API-17 internal renderer owner for `linux-wallpaperengine` and current
+  mpvpaper, with exact child-PID supervision, hotplug-safe controls, bottom-layer
+  playback, and complete `runStream` process-group teardown.
+- Auto-browse local videos and Steam Wallpaper Engine Workshop projects; apply
+  live sources only after generating or reusing a real Noctalia static pair.
+- Add persistent per-output static/video/Workshop cycles with configurable
+  interval, sequential/shuffle/random order, history, pause/resume, and manual
+  navigation.
+- Add a bounded MotionBGS HTML search/download provider with atomic local
+  imports, source sidecars, explicit degraded status, and a permanent direct
+  browser fallback.
+- Preserve the official Wallhaven browser and external provider controls,
+  default detected integrations on, and refuse internal renderer startup while
+  another enabled plugin owns that backend.
+- Move the default generated-still location to Noctalia's wallpaper directory
+  and retain the complete color scheme, palette-leader, renderer, widget glyph,
+  label, and gesture customization surface.
+
 ## NocVox 0.2.0 - Focused control companion
 
 - Remove the per-recording output/model/profile/text-action override system.
@@ -31,6 +51,20 @@ All notable staging changes will be recorded here.
 - Retain the singleton live-status follower, configurable gestures, native glyph
   selectors, palette controls, state-aware controls, and privacy-safe read-only
   diagnostics.
+
+## Wall-in-One 0.3.0 - Provider policy and backing export
+
+- Enable each detected Wallhaven, W Engine, mpvpaper, and custom-panel
+  integration by default, with an independent Wall-in-One force-off that never
+  disables, stops, or uninstalls the provider itself.
+- Gate panels, controls, adapter probes, status, and W Engine capture routes on
+  the effective detected-and-allowed provider state.
+- Export the current per-output backing reported by Noctalia into the selected
+  still directory. This safely saves a representative backing already supplied
+  by W Engine without reading its private frame or thumbnail cache.
+- Document that W Engine 1.1.0 already owns its timer, representative static
+  backing, color handoff, and previous-wallpaper restoration. Wall-in-One does
+  not duplicate that scheduler or take over its renderer.
 
 ## Wall-in-One 0.2.0 - Live/static coordination preview
 
