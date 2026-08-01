@@ -16,7 +16,7 @@ nix build -L .#vm-test-wall-in-one
 | --- | --- |
 | `vm-test` | Hydra rendering, actions, hot reload, settings, and native searchable glyph picker |
 | `vm-test-nocvox` | NocVox singleton listener, state/control matrix, diagnostics, validation, privacy, and teardown |
-| `vm-test-wall-in-one` | Provider discovery/control, still capture and pairing, color policy, persistence, panel rendering, and renderer ownership boundaries |
+| `vm-test-wall-in-one` | Provider policy, internal renderer ownership, persistent mixed reels, pairing/colors, MotionBGS offline protocol, persistence, and panel rendering |
 
 Each suite also exposes an interactive driver by adding `-driver` to its
 package name. For example:
@@ -64,25 +64,62 @@ notification call.
 
 ## Wall-in-One
 
-The Wall-in-One suite imports the coordinator beside controlled Wallhaven,
-W Engine, and mpvpaper fixtures. It pins the beta.7 `plugins list` grammar;
-rejects incompatible or look-alike status tokens; exercises the documented
-provider panels and service commands; checks atomic configuration and runtime
-state across reload; and renders the attached hub.
+The Wall-in-One suite imports all three production services beside controlled
+Wallhaven, W Engine, and mpvpaper fixtures. It pins the `plugins list` grammar,
+rejects look-alike status tokens, exercises provider panels and service IPC,
+and verifies that every detected integration can be force-disabled without
+disabling its provider plugin. `auto` prefers an enabled external plugin;
+explicit `internal` plus that plugin is a fail-closed conflict. With providers
+absent, the guest exercises Wall-in-One's internal W Engine and mpvpaper paths.
+A provider-probe failure while an internal child is live makes ownership
+unknown, disables both internal apply paths, and stops only that exact child;
+a successful probe is required before internal rendering is re-enabled.
 
-Capture fixtures cover a configured video and a configured W Engine project,
-verify output in the selected directory, and record the resulting
-`setWallpaper` and color-scheme requests. Multi-output assertions keep
-Noctalia's global-palette rule explicit: the configured palette output is the
-leader, while the last paired output wins when no leader is selected. An
-explicit lock-screen image remains an external override; the plugin only
-persists the paired wallpaper and never rewrites lock-screen configuration.
+The renderer fixture records NUL-delimited argv and keeps each fake child alive
+long enough to test replacement, pause/resume/toggle, stop, output ownership,
+and teardown. Assertions pin `--layer bottom`, mpvpaper's configured
+`--auto-pause FULL|MAX --auto-mode`, exact-PID signals, private `0600` FIFOs,
+and cleanup on reload/disable. An unrelated renderer sentinel and external
+provider PIDs must remain unchanged. The offline Python contract additionally
+drives the production supervisor directly, so these invariants do not rely on
+a real live-wallpaper renderer or compositor behavior.
 
-W Engine discovery remains a cooperative, versioned adapter because v5 has no
-public cross-plugin status API. The guest verifies the handshake boundary and
-safe video/preview fallback; no process arguments or provider-private state are
-inspected, no second renderer is started, and the live renderer sentinel and
-provider-owned schedules remain untouched.
+Capture fixtures cover public Noctalia backing export, configured-video frame
+extraction, cooperative W Engine capture, safe Workshop preview/source
+fallback, durable per-output pairs, the dynamic pair registry, optional color
+sync, animated-GIF-to-PNG manual pairing across reload, safe name-scoped startup
+staging cleanup, and atomic temporary-file cleanup. The configured palette
+output remains the one global leader; an explicit lock-screen image remains an
+external override. The offline helper gate additionally rejects structurally
+invalid WebP and header-only AVIF when no decoder is available.
+
+A persistent schema-2 reel mixes static, video, and Workshop entries. The guest
+drives start/stop/pause/resume/next/previous/random, checks schema-3 cursor,
+history, shuffle-bag, and absolute next-due state, and reloads to prove both the
+reel and runtime survive while the default start-on-load policy remains
+disarmed. Static generation and renderer-event nonce assertions guard against a
+late acknowledgement reviving an entry after stop or replacement. Distinct
+persisted still images for the video and Workshop entries are asserted as the
+actual backing selected before each renderer starts. Library discovery is
+dynamically refreshed with six candidates: one production scan step consumes
+the four-item budget, then ordinary update ticks publish the completed video
+and Workshop inventory. Paused next/previous/random requests are rejected
+without changing the cursor, history, or owned renderer state.
+
+MotionBGS is tested without internet access. A guest-only conservative helper
+returns pinned search/detail HTML and a tiny local MP4 through the exact
+`WIO-MBG1` protocol. Tests cover same-origin parsing, bounded results, HD/4K
+links, cache hits without another fetch, serialized commands, challenge and
+unknown-markup failures, cross-origin rejection, atomic MP4 install, provenance
+sidecar creation, clear, and status/results mirroring. The shipped helper's
+local self-test runs before the fixture is substituted.
+
+Storage assertions migrate legacy config/runtime documents to config schema 2
+and runtime schema 3, preserve prior valid data in `.bak`, reject corrupt or
+future state without overwriting evidence, and leave no `.tmp`, `.part`,
+staging, FIFO, socket, or owned-child leaks. Static gates additionally pin the
+8 MiB read/write ceiling, bounded nested maps/arrays/paths, deterministic pair
+pruning, and active-capture staging cleanup on exit.
 
 All suites treat Luau runtime errors, undeclared settings, failed hot reloads,
 and missing glyph warnings as failures. Run the relevant target after any

@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# Conservative transport helper for Wall-in-One's MotionBGS integration.
+#
+# This helper deliberately does not attempt to solve or evade anti-bot
+# challenges. It only issues serialized public HTTPS GETs selected by the Luau
+# service, follows at most three same-origin redirects itself, and writes every
+# successful response atomically.
+
+readonly protocol='WIO-MBG1'
+readonly origin='https://motionbgs.com'
+readonly user_agent='Wall-in-One/0.4 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
+readonly html_limit=$((1024 * 1024))
+readonly html_timeout=20
+readonly max_redirects=3
+
+clean_field() {
+  local value=${1:-}
+  value=${value//$'\t'/ }
+  value=${value//$'\r'/ }
+  value=${value//$'\n'/ }
+  printf '%s' "${value:0:600}"
+}
+
+emit_error() {
+  printf '%s\terror\t%s\t%s\n' "$protocol" "$(clean_field "${1:-unknown}")" "$(clean_field "${2:-request failed}")"
+}
+
+emit_ok() {
+  printf '%s\tok\t%s\t%s\t%s\t%s\t%s\n' \
+    "$protocol" "$(clean_field "$1")" "$(clean_field "$2")" \
+    "$(clean_field "$3")" "$(clean_field "$4")" "$(clean_field "$5")"
+}
+
+die() {
+  emit_error "$1" "$2"
+  exit "${3:-1}"
+}
+
+has_controls() {
+  [[ ${1:-} == *$'\t'* || ${1:-} == *$'\r'* || ${1:-} == *$'\n'* ]]
+}
+
+valid_absolute_path() {
+  [[ ${1:-} == /* ]] && ! has_controls "$1"
+}
+
+normalize_url() {
+  local candidate=${1:-}
+  has_controls "$candidate" && return 1
+  [[ $candidate != *\\* && $candidate != *'#'* ]] || return 1
+
+  if [[ $candidate == /* && $candidate != //* ]]; then
+    candidate="$origin$candidate"
+  fi
+  [[ $candidate == "$origin" || $candidate == "$origin/"* ]] || return 1
+
+  local path=${candidate#"$origin"}
+  [[ -z $path || $path == /* ]] || return 1
+  [[ $path != *'/../'* && $path != '/..' && $path != *'/..' ]] || return 1
+  printf '%s' "$candidate"
+}
+
+header_value() {
+  local header_file=$1
+  local wanted=${2,,}
+  local line key value found=''
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ $line == *:* ]] || continue
+    key=${line%%:*}
+    if [[ ${key,,} == "$wanted" ]]; then
+      value=${line#*:}
+      value=${value#"${value%%[![:space:]]*}"}
+      found=$value
+    fi
+  done <"$header_file"
+  printf '%s' "$found"
+}
+
+atomic_fetch() {
+  local purpose=$1
+  local start_url=$2
+  local output=$3
+  local max_bytes=$4
+  local max_seconds=$5
+  local expected_type=$6
+
+  command -v curl >/dev/null 2>&1 || die missing-curl 'curl is required for MotionBGS integration' 127
+
+  valid_absolute_path "$output" || die invalid-path 'destination must be an absolute path without controls' 64
+  local output_dir=${output%/*}
+  [[ -d $output_dir ]] || die invalid-path 'destination parent directory does not exist' 72
+
+  local url
+  url=$(normalize_url "$start_url") || die invalid-url 'only same-origin MotionBGS HTTPS URLs are accepted' 64
+
+  umask 077
+  local body header
+  body=$(mktemp -- "$output_dir/.motionbgs-body.XXXXXX") || die local-io 'could not allocate response file' 73
+  header=$(mktemp -- "$output_dir/.motionbgs-header.XXXXXX") || {
+    rm -f -- "$body"
+    die local-io 'could not allocate header file' 73
+  }
+  trap 'rm -f -- "$body" "$header"' EXIT HUP INT TERM
+
+  local redirect=0
+  local deadline=$((SECONDS + max_seconds))
+  local status curl_rc location content_type bytes remaining
+  while :; do
+    : >"$body"
+    : >"$header"
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || die timeout "request exceeded its ${max_seconds}s total deadline" 69
+
+    # CURLOPT_MAXFILESIZE alone cannot stop a chunked response after it has
+    # crossed the limit. RLIMIT_FSIZE supplies the hard local bound as well.
+    status=$(
+      (
+        ulimit -f "$(((max_bytes + 1023) / 1024))" 2>/dev/null || exit 70
+        exec curl \
+          --silent --show-error \
+          --request GET \
+          --connect-timeout 10 \
+          --max-time "$remaining" \
+          --max-filesize "$max_bytes" \
+          --speed-limit 1024 \
+          --speed-time 15 \
+          --proto '=https' \
+          --header 'Accept-Language: en-US,en;q=0.8' \
+          --header "Accept: $expected_type" \
+          --user-agent "$user_agent" \
+          --dump-header "$header" \
+          --output "$body" \
+          --write-out '%{http_code}' \
+          --url "$url"
+      )
+    )
+    curl_rc=$?
+    if (( curl_rc != 0 )); then
+      die transport "curl failed for $purpose (code $curl_rc)" 69
+    fi
+
+    case $status in
+      301|302|303|307|308)
+        (( redirect < max_redirects )) || die redirects 'too many redirects' 69
+        location=$(header_value "$header" location)
+        [[ -n $location ]] || die redirects 'redirect did not include a location' 69
+        url=$(normalize_url "$location") || die redirects 'redirect left motionbgs.com or used an unsafe URL' 69
+        ((redirect += 1))
+        ;;
+      2??)
+        break
+        ;;
+      403|429)
+        die challenge "MotionBGS refused the public request (HTTP $status); no bypass was attempted" 77
+        ;;
+      *)
+        die http "MotionBGS returned HTTP $status" 69
+        ;;
+    esac
+  done
+
+  content_type=$(header_value "$header" content-type)
+  content_type=${content_type%%;*}
+  content_type=${content_type,,}
+  if [[ $purpose == html ]]; then
+    [[ $content_type == text/html || $content_type == application/xhtml+xml ]] \
+      || die content-type "expected HTML but received ${content_type:-unknown}" 65
+  else
+    [[ $content_type == video/mp4 || $content_type == application/octet-stream ]] \
+      || die content-type "expected an MP4 response but received ${content_type:-unknown}" 65
+    LC_ALL=C grep -aq 'ftyp' < <(head -c 64 -- "$body") \
+      || die content-type 'download response did not contain an MP4 file signature' 65
+  fi
+
+  bytes=$(stat -c '%s' -- "$body" 2>/dev/null) || die local-io 'could not inspect response file' 74
+  [[ $bytes =~ ^[0-9]+$ ]] || die local-io 'response size is invalid' 74
+  (( bytes > 0 && bytes <= max_bytes )) || die size-limit 'response was empty or exceeded its configured size limit' 65
+
+  mv -f -- "$body" "$output" || die local-io 'could not install response atomically' 74
+  trap - EXIT HUP INT TERM
+  rm -f -- "$header"
+  emit_ok "$status" "$url" "$content_type" "$bytes" "$output"
+}
+
+json_escape() {
+  local value=${1:-}
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\b'/\\b}
+  value=${value//$'\f'/\\f}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+safe_slug() {
+  [[ ${1:-} =~ ^[a-z0-9][a-z0-9-]{0,119}$ ]]
+}
+
+download_video() {
+  local id=$1
+  local slug=$2
+  local quality=$3
+  local directory=$4
+  local title=$5
+  local max_mib=$6
+  local max_seconds=$7
+
+  [[ $id =~ ^[0-9]{1,12}$ ]] || die invalid-id 'wallpaper id must be numeric' 64
+  safe_slug "$slug" || die invalid-slug 'wallpaper slug is invalid' 64
+  [[ $quality == hd || $quality == 4k ]] || die invalid-quality 'quality must be hd or 4k' 64
+  valid_absolute_path "$directory" || die invalid-path 'download directory must be absolute and contain no controls' 64
+  [[ -d $directory && -w $directory ]] || die invalid-path 'download directory must already exist and be writable' 72
+  [[ $max_mib =~ ^[0-9]+$ ]] || die invalid-limit 'download size limit is invalid' 64
+  (( max_mib >= 16 && max_mib <= 512 )) || die invalid-limit 'download size limit must be 16-512 MiB' 64
+  [[ $max_seconds =~ ^[0-9]+$ ]] || die invalid-timeout 'download timeout is invalid' 64
+  (( max_seconds >= 10 && max_seconds <= 50 )) || die invalid-timeout 'download timeout must be 10-50 seconds' 64
+  has_controls "$title" && die invalid-title 'title contains control characters' 64
+  title=${title:0:240}
+
+  local filename="$slug.$quality.mp4"
+  local final="$directory/$filename"
+  local suffix=1
+  while [[ -e $final || -e "$final.motionbgs.json" ]]; do
+    final="$directory/$slug.$quality-$suffix.mp4"
+    ((suffix += 1))
+    (( suffix <= 9999 )) || die local-io 'could not allocate a unique output filename' 73
+  done
+
+  local max_bytes=$((max_mib * 1024 * 1024))
+  local endpoint="$origin/dl/$quality/$id/"
+  local transfer
+  transfer=$(atomic_fetch video "$endpoint" "$final" "$max_bytes" "$max_seconds" 'video/mp4,application/octet-stream;q=0.8')
+  local fetch_rc=$?
+  if (( fetch_rc != 0 )); then
+    printf '%s\n' "$transfer"
+    exit "$fetch_rc"
+  fi
+  local sidecar_tmp=''
+  # From this point until the sidecar is atomically installed, any ordinary
+  # exit or signal rolls the completed video back so callers never observe a
+  # successful helper result without its provenance record.
+  trap 'rm -f -- "${sidecar_tmp:-}" "$final"' EXIT HUP INT TERM
+
+  local _protocol outcome status effective_url content_type bytes installed
+  IFS=$'\t' read -r _protocol outcome status effective_url content_type bytes installed <<<"$transfer"
+  if [[ $_protocol != "$protocol" || $outcome != ok || $installed != "$final" ]]; then
+    rm -f -- "$final"
+    die protocol 'internal transfer result was malformed' 70
+  fi
+
+  local source_page="$origin/$slug"
+  local timestamp hash=''
+  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash=$(sha256sum -- "$final" | awk '{print $1}')
+  fi
+
+  local sidecar="$final.motionbgs.json"
+  sidecar_tmp=$(mktemp -- "$directory/.motionbgs-metadata.XXXXXX") || {
+    rm -f -- "$final"
+    die local-io 'could not allocate metadata sidecar' 73
+  }
+  if ! (
+    set -e
+    printf '{\n'
+    printf '  "schema": 1,\n'
+    printf '  "provider": "MotionBGS",\n'
+    printf '  "title": "%s",\n' "$(json_escape "$title")"
+    printf '  "source_page": "%s",\n' "$(json_escape "$source_page")"
+    printf '  "download_url": "%s",\n' "$(json_escape "$effective_url")"
+    printf '  "quality": "%s",\n' "$quality"
+    printf '  "content_type": "%s",\n' "$(json_escape "$content_type")"
+    printf '  "bytes": %s,\n' "$bytes"
+    printf '  "sha256": "%s",\n' "$hash"
+    printf '  "downloaded_at": "%s"\n' "$timestamp"
+    printf '}\n'
+  ) >"$sidecar_tmp"; then
+    rm -f -- "$sidecar_tmp" "$final"
+    die local-io 'could not write metadata sidecar' 74
+  fi
+  mv -f -- "$sidecar_tmp" "$sidecar" || {
+    rm -f -- "$final"
+    die local-io 'could not install metadata sidecar atomically' 74
+  }
+  trap - EXIT HUP INT TERM
+
+  emit_ok "$status" "$effective_url" "$content_type" "$bytes" "$final"
+}
+
+self_test() {
+  local good
+  good=$(normalize_url '/search?q=space') || die self-test 'relative URL normalization failed' 70
+  [[ $good == "$origin/search?q=space" ]] || die self-test 'relative URL normalized incorrectly' 70
+  normalize_url 'https://example.com/file.mp4' >/dev/null 2>&1 && die self-test 'cross-origin URL was accepted' 70
+  normalize_url '//evil.example/file' >/dev/null 2>&1 && die self-test 'scheme-relative URL was accepted' 70
+  normalize_url '/media/../secret' >/dev/null 2>&1 && die self-test 'parent path was accepted' 70
+  safe_slug 'night-city-4k' || die self-test 'valid slug was rejected' 70
+  safe_slug '../night-city' && die self-test 'invalid slug was accepted' 70
+  printf '%s\tok\tself-test\n' "$protocol"
+}
+
+case ${1:-} in
+  fetch-html)
+    (( $# == 3 )) || die usage 'fetch-html expects URL and output path' 64
+    atomic_fetch html "$2" "$3" "$html_limit" "$html_timeout" 'text/html,application/xhtml+xml;q=0.9'
+    ;;
+  download)
+    (( $# == 8 )) || die usage 'download expects id, slug, quality, directory, title, max MiB, and timeout' 64
+    download_video "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+    ;;
+  self-test)
+    (( $# == 1 )) || die usage 'self-test accepts no arguments' 64
+    self_test
+    ;;
+  *)
+    die usage 'expected fetch-html, download, or self-test' 64
+    ;;
+esac

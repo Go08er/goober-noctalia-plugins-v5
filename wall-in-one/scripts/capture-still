@@ -41,10 +41,36 @@ validate_image_signature() {
     89504e470d0a1a0a*) [[ "$suffix" == 0000000049454e44ae426082 ]] ;;
     ffd8ff*) [[ "$suffix" == *ffd9 ]] ;;
     474946383761* | 474946383961*) [[ "$suffix" == *3b ]] ;;
-    52494646????????57454250*) return 0 ;;
-    ????????6674797061766966* | ????????6674797061766973*) return 0 ;;
+    52494646????????57454250*) validate_webp_structure ;;
+    # AVIF's ISO-BMFF box graph cannot be established from a short magic
+    # prefix. Without FFmpeg, fail closed instead of promoting header bytes.
+    ????????6674797061766966* | ????????6674797061766973*) return 1 ;;
     *) return 1 ;;
   esac
+}
+
+validate_webp_structure() {
+  local file_size declared offset chunk chunk_size next image_chunk=0
+  local b0 b1 b2 b3
+  file_size=$(stat -c '%s' -- "$temporary") || return 1
+  ((file_size >= 20)) || return 1
+  read -r b0 b1 b2 b3 < <(od -An -tu1 -j 4 -N 4 -- "$temporary") || return 1
+  declared=$((b0 + b1 * 256 + b2 * 65536 + b3 * 16777216))
+  ((declared + 8 == file_size)) || return 1
+
+  offset=12
+  while ((offset + 8 <= file_size)); do
+    chunk=$(od -An -tx1 -j "$offset" -N 4 -- "$temporary" | tr -d '[:space:]') || return 1
+    read -r b0 b1 b2 b3 < <(od -An -tu1 -j $((offset + 4)) -N 4 -- "$temporary") || return 1
+    chunk_size=$((b0 + b1 * 256 + b2 * 65536 + b3 * 16777216))
+    next=$((offset + 8 + chunk_size + chunk_size % 2))
+    ((next > offset && next <= file_size)) || return 1
+    case "$chunk" in
+      56503820 | 5650384c) image_chunk=1 ;;
+    esac
+    offset=$next
+  done
+  ((offset == file_size && image_chunk == 1))
 }
 
 case "$mode" in
