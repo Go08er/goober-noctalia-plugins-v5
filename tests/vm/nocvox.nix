@@ -101,11 +101,9 @@ let
   };
 
   # This is appended only to the materialized guest copy. It exposes internal
-  # state for deterministic assertions and two override-validation probes; the
-  # production plugin remains untouched.
+  # state for deterministic assertions; the production plugin remains untouched.
   nocvoxVmProbe = pkgs.writeText "nocvox-vm-probe.luau" ''
     local vmProductionOnIpc = onIpc
-    local vmCommandSequence = 900000
 
     function onIpc(event, payload)
         if event == "vm-probe" then
@@ -124,32 +122,6 @@ let
                     .. " diagnostics_error="
                     .. tostring(type(vmDiagnostics) == "table" and vmDiagnostics.error or "")
             )
-        elseif event == "vm-file-override" then
-            vmCommandSequence += 1
-            handleCommand({
-                action = "start",
-                sequence = vmCommandSequence,
-                overrides = {
-                    output = "file",
-                    file_path = "/tmp/voice notes/o'clock.txt",
-                    model = "parakeet-tdt-0.6b-v3-int8",
-                    profile = "work_notes",
-                    auto_submit = "on",
-                    shift_enter_newlines = "off",
-                    smart_auto_submit = "inherit",
-                },
-            })
-        elseif event == "vm-invalid-override" then
-            vmCommandSequence += 1
-            handleCommand({
-                action = "start",
-                sequence = vmCommandSequence,
-                overrides = {
-                    output = "file",
-                    file_path = "relative.txt",
-                    profile = "bad;touch-pwned",
-                },
-            })
         elseif type(vmProductionOnIpc) == "function" then
             vmProductionOnIpc(event, payload)
         end
@@ -177,8 +149,13 @@ let
     source = []
 
     [plugin_settings."${pluginId}"]
-    notify_transitions = false
-    notify_failures = false
+    # Simulate an in-place 0.1.x upgrade. This removed key may remain in a
+    # user's settings file. Noctalia reports the obsolete host setting, but
+    # 0.3.x must still load and must not emit a NocVox notification.
+    notify_transitions = true
+
+    [widget.nocvox-a]
+    type = "${widgetId}"
     tooltip_show_model = true
     tooltip_show_device = true
     tooltip_show_backend = true
@@ -187,17 +164,9 @@ let
     transcribing_color = "tertiary"
     stopped_color = "on_surface_variant"
     unknown_color = "tertiary"
-    enable_one_shot_overrides = true
-
-    [widget.nocvox-a]
-    type = "${widgetId}"
-    left_action = "toggle"
-    middle_action = "cancel"
-    right_action = "panel"
     idle_display = "glyph_text"
     active_label = "rec"
     width_mode = "compact"
-    show_override_name = false
     idle_glyph = "microphone"
     active_glyph = "microphone"
     stopped_glyph = "microphone-off"
@@ -205,13 +174,17 @@ let
 
     [widget.nocvox-b]
     type = "${widgetId}"
-    left_action = "toggle"
-    middle_action = "cancel"
-    right_action = "none"
+    tooltip_show_model = false
+    tooltip_show_device = true
+    tooltip_show_backend = false
+    idle_color = "primary"
+    recording_color = "error"
+    transcribing_color = "secondary"
+    stopped_color = "on_surface_variant"
+    unknown_color = "tertiary"
     idle_display = "glyph_only"
     active_label = "elapsed"
     width_mode = "expanded"
-    show_override_name = true
     idle_glyph = "microphone"
     active_glyph = "wave-sine"
     stopped_glyph = "microphone-off"
@@ -462,8 +435,14 @@ pkgs.testers.runNixOSTest (
           "plugins source add ${sourceName} git ${sourceUrl}"
       ).strip() == "ok"
       assert noctalia_msg("plugins enable ${pluginId}").strip().startswith("ok")
+      wait_log("plugin_settings.goober/nocvox.notify_transitions: unknown setting")
       wait_log("started service '${serviceId}'")
       wait_log('creating #0 "nocvox-test"')
+      for placement in ("nocvox-a", "nocvox-b"):
+          wait_log(
+              f"widget.{placement}: left=plugin ${serviceId} all toggle, "
+              "right=panel-toggle ${pluginId}:details, middle=settings-open-widget"
+          )
       follower_count(1)
 
       # Install bounded test probes and ensure service hot reload replaces—not
@@ -480,16 +459,19 @@ pkgs.testers.runNixOSTest (
       # State-aware toggle and cancel behavior.
       assert noctalia_msg("plugin ${serviceId} all toggle").strip() == "ok: dispatched 1"
       machine.wait_until_succeeds("grep -F $'\\trecord\\tstart' /tmp/nocvox-vm-calls.log")
+      assert ["record", "start"] in calls(), calls()
 
       emit_status({"alt": "recording", "model": "parakeet", "device": "default", "backend": "cpu"})
       wait_state("recording", "recording", 0)
       assert noctalia_msg("plugin ${serviceId} all toggle").strip() == "ok: dispatched 1"
       machine.wait_until_succeeds("grep -F $'\\trecord\\tstop' /tmp/nocvox-vm-calls.log")
+      assert ["record", "stop"] in calls(), calls()
 
       emit_status({"alt": "streaming"})
       wait_state("streaming", "streaming", 0)
       assert noctalia_msg("plugin ${serviceId} all cancel").strip() == "ok: dispatched 1"
       machine.wait_until_succeeds("grep -F $'\\trecord\\tcancel' /tmp/nocvox-vm-calls.log")
+      assert ["record", "cancel"] in calls(), calls()
 
       control_count = len([call for call in calls() if call and call[0] == "record"])
       emit_status({"alt": "transcribing"})
@@ -534,29 +516,16 @@ pkgs.testers.runNixOSTest (
       machine.succeed("rm /tmp/nocvox-vm-hold-diagnostics")
       follower_count(1)
 
-      # Shell quoting must preserve the optional --file argument as one token.
-      assert noctalia_msg("plugin ${serviceId} all vm-file-override").strip() == "ok: dispatched 1"
-      machine.wait_until_succeeds(
-          "grep -F -- \"--file=/tmp/voice\\ notes/o\\'clock.txt\" "
-          "/tmp/nocvox-vm-calls.log"
-      )
-      file_calls = [
-          call for call in calls()
-          if call[:2] == ["record", "start"]
-          and "--file=/tmp/voice notes/o'clock.txt" in call
-      ]
-      assert len(file_calls) == 1, file_calls
-      assert "--auto-submit" in file_calls[0]
-      assert "--no-shift-enter-newlines" in file_calls[0]
+      # Every recording control uses the daemon's configured defaults. No
+      # per-recording flags may be appended to any command.
+      record_calls = [call for call in calls() if call and call[0] == "record"]
+      assert all(
+          call in (["record", "start"], ["record", "stop"], ["record", "cancel"])
+          for call in record_calls
+      ), record_calls
 
-      # Invalid dynamic values fail closed and do not reach VoxType.
       emit_status({"alt": "idle"})
       wait_state("idle", "idle", 1)
-      before_invalid = len([call for call in calls() if call and call[0] == "record"])
-      noctalia_msg("plugin ${serviceId} all vm-invalid-override")
-      machine.sleep(1)
-      assert len([call for call in calls() if call and call[0] == "record"]) == before_invalid
-      machine.fail("test -e /tmp/touch-pwned")
 
       # A command failure is surfaced without losing the follower.
       machine.succeed("touch /tmp/nocvox-vm-fail-start")

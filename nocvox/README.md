@@ -6,9 +6,9 @@ already installed, configured, and independently managed
 status listener, a customizable bar widget, and an attached details/diagnostics
 panel.
 
-This is a conservative `0.1.0` MVP for Noctalia `5.0.0-beta.7` and VoxType
-`0.7.5`. It targets plugin API 17 so its singleton service starts on an explicit
-plugin enable in that Noctalia release.
+This is a conservative `0.3.0` companion for Noctalia `5.0.0` and VoxType
+`0.7.5`. It targets plugin API 17 so its singleton service starts when the
+plugin is enabled.
 
 ## Hard boundary
 
@@ -35,33 +35,39 @@ disabled. The plugin has no command that changes daemon lifecycle.
 | Entry | ID | Responsibility |
 |---|---|---|
 | Service | `goober/nocvox:listener` | Owns the single status stream, state normalization, safe recording commands, and on-demand diagnostics. |
-| Widget | `goober/nocvox:nocvox` | Renders status and forwards configured gestures to the service. |
-| Panel | `goober/nocvox:details` | Shows supported controls, optional one-shot choices, and privacy-safe diagnostics. |
+| Widget | `goober/nocvox:nocvox` | Renders status and exposes native per-placement actions and presentation settings. |
+| Panel | `goober/nocvox:details` | Shows supported controls, live status details, and privacy-safe diagnostics. |
 
 Entries exchange plain state through `noctalia.state`; no widget placement owns
 another follower. This follows Noctalia's documented
 [shared-state and stream lifecycle](https://docs.noctalia.dev/v5/plugins/development/runtime-api/)
 model.
 
-## Default gestures
+## Controls and default actions
 
-The defaults preserve the previous custom button behavior:
+Recording operations are collected in the attached details panel: Start, Stop
+and transcribe, Cancel/discard, live status, and privacy-safe diagnostics. The
+bar widget uses Noctalia's native per-placement **Actions** editor rather than a
+second set of NocVox gesture dropdowns:
 
 | Gesture | Default |
 |---|---|
 | Left click | State-aware toggle: idle starts; recording/streaming stops and transcribes. |
-| Middle click | Cancel/discard the current recording or transcription. |
-| Right click | Cancel/discard the current recording or transcription. |
+| Middle click | Open this widget placement's settings, Noctalia's standard default. |
+| Right click | Open/close the attached NocVox details panel. |
 
-Noctalia normally reserves middle click to open widget settings, so this plugin
-declares the v5 `middle = "none"` action to free the callback. All three
-gestures can independently be changed in the widget editor to Toggle, Start,
-Stop and transcribe, Cancel, Open/close details, or No action. A saved action is
-never silently replaced when it is unavailable; its tooltip explains the
-current state restriction.
+The manifest defaults are ordinary v5 action commands:
 
-To keep all three defaults and still open the panel, either assign one gesture
-to **Open/close details** or run:
+```toml
+[widget.actions]
+left = "plugin goober/nocvox:listener all toggle"
+right = "panel-toggle goober/nocvox:details"
+```
+
+They appear in the same Actions section as every built-in widget binding and
+can be replaced per placement. For example, bind a spare gesture to
+`plugin goober/nocvox:listener all cancel` for immediate cancel/discard. The
+details panel can also be opened directly:
 
 ```bash
 noctalia msg panel-toggle goober/nocvox:details
@@ -71,13 +77,12 @@ noctalia msg panel-toggle goober/nocvox:details
 
 The widget understands `stopped`, `idle`, `recording`, `streaming`,
 `transcribing`, legacy/future `processing`, `error`, and unknown/malformed
-states. It uses Noctalia palette roles rather than fixed colors. Widget settings
-provide:
+states. It uses Noctalia palette roles rather than fixed colors. Every
+presentation option is per bar placement in that widget's settings:
 
 - glyph-only, `IDLE`, or hidden idle behavior;
 - `REC`, local approximate elapsed time, or glyph-only active labels;
 - compact or expanded state text;
-- optional active one-shot label;
 - native v5 glyph selectors for idle, active, stopped, and unknown states;
 - theme-token colors and model/device/backend tooltip visibility.
 
@@ -87,41 +92,24 @@ values; it is not proof of the resolved microphone or accelerator. A reported
 backend of `unknown` is displayed as-is.
 
 When the daemon is stopped, the details panel deliberately stops at a bounded
-explanation plus Settings/Close controls. It does not offer lifecycle buttons.
+explanation plus the Close control. It does not offer lifecycle buttons.
 
-## Optional one-shot recording overrides
+## Recording commands
 
-Advanced overrides are disabled by default. When explicitly enabled in plugin
-settings, pressing **Start recording** in the details panel may pass only the
-arguments supported by VoxType `0.7.5`:
+NocVox deliberately uses VoxType's configured defaults. Its control surface
+issues only these fixed commands:
 
-- exclusive output destination: daemon default, keyboard type, clipboard,
-  paste, or file;
-- an optional existing model name;
-- an optional existing profile name;
-- inherit/on/off values for auto-submit, Shift+Enter newlines, and smart
-  auto-submit.
+```text
+voxtype record start
+voxtype record stop
+voxtype record cancel
+```
 
-Model and profile strings are syntax-validated, quoted, and passed as one-shot
-references. VoxType remains authoritative for whether those existing names are
-available; the plugin performs no discovery that mutates configuration and
-never creates a profile.
-
-File output is exclusive for that recording. It requires an absolute path or a
-path beginning with `~/`; control characters and overlong paths are rejected,
-the home prefix is expanded by Noctalia, and the complete `--file=...` argument
-is shell-quoted. The plugin does not delete or back up the selected file.
-
-Clipboard and paste are also one-shot **output destinations**, not history.
-NocVox never calls the clipboard-read API and never scrapes, archives,
-restores, or backs up clipboard/transcript contents. That means the originally
-suggested “keep a backup of output in clipboard” feature is intentionally not
-implemented: ordinary dictation exposes no trustworthy transcript-history API,
-and guessing from the clipboard would violate the privacy boundary.
-
-For deterministic output behavior, Stop repeats only the active
-`--type`/`--clipboard`/`--paste` flag that VoxType supports at stop time. File,
-model, profile, and text-processing choices are supplied only to Start.
+There is no per-recording override builder, output selector, model/profile
+selector, transcript history, or clipboard backup. Output and text-processing
+behavior belong in VoxType's own configuration. NocVox also emits no desktop
+notifications; live state and bounded failures stay in its widget, tooltip, and
+panel.
 
 ## Diagnostics
 
@@ -144,11 +132,46 @@ the bar editor. Installing does not enable or place it automatically. The plugin
 does not edit Noctalia's imperative settings file or files under
 `plugins/materialized`.
 
-The manifest uses the current v5
-[manifest/settings schema](https://docs.noctalia.dev/v5/plugins/development/manifest/).
-Plugin-wide notification, tooltip, color, and advanced-override settings live
-under Settings → Plugins. Gesture, label, width, and glyph choices are per bar
-placement in the widget editor.
+The manifest follows the current v5
+[settings scopes](https://docs.noctalia.dev/v5/plugins/development/manifest/):
+settings needed by a service or panel are plugin-wide, while bar appearance is
+per widget placement. NocVox's listener has no configurable global policy, so
+NocVox declares no root settings. Its organization is therefore:
+
+- right-click the widget for recording controls, live status, and diagnostics;
+- by default, middle-click the widget for its labels, tooltip fields, colors,
+  glyph pickers, and native Actions section;
+- use Settings → Plugins for plugin source, enable, and update state. NocVox has
+  no global preference page because its listener has no configurable policy.
+
+This separation is a Noctalia convention rather than a glyph limitation. The
+native searchable glyph picker is tied to widget-entry settings in the current
+v5 UI, which is also the correct scope for a bar icon.
+
+When upgrading from `0.2.x`, reselect any customized tooltip/color values in
+each widget placement. The former root keys (`tooltip_show_*` and the five
+`*_color` keys) are no longer declared globally. Along with the already removed
+`notify_transitions`, `notify_failures`, `enable_one_shot_overrides`, and
+`show_override_name` keys, stale root values have no effect and can be removed
+during normal settings cleanup if Noctalia reports them as unknown.
+
+The former per-widget `left_action`, `middle_action`, and `right_action` select
+keys are also obsolete. They cannot be translated automatically because v5's
+native Actions editor accepts any supported Noctalia action command, not just
+NocVox's old fixed choices. Remove those stale keys and recreate any custom
+bindings in each placement's **Actions** section. For a placement named
+`nocvox-a`, the equivalent persisted shape is:
+
+```toml
+[widget.nocvox-a.actions]
+left = "plugin goober/nocvox:listener all toggle"
+right = "panel-toggle goober/nocvox:details"
+# Leave middle unset for Noctalia's settings-open-widget default, or bind it:
+# middle = "plugin goober/nocvox:listener all cancel"
+```
+
+Use the widget editor for normal migration; the TOML above documents the mapping
+for users who maintain their Noctalia settings declaratively.
 
 ## Validation
 
@@ -168,11 +191,9 @@ matrix is in [`tests/README.md`](tests/README.md).
 - VoxType status does not expose transcript text, audio level, partial text,
   detected language, resolved microphone name, active output mode, or detailed
   transcription failures; the plugin does not invent them.
-- Noctalia beta.7's process `runStream` has no exit callback. This MVP launches
+- Noctalia's process `runStream` has no exit callback. This companion launches
   its follower once and never enters a respawn loop. If the follower itself
   unexpectedly exits, reload the plugin after resolving the cause.
-- Override selections are intentionally ephemeral and reset on plugin reload;
-  the daemon's configured defaults remain authoritative.
 - Meeting management, global engine/model/device changes, and setup/update
   operations remain outside this companion.
 

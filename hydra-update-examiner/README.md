@@ -16,10 +16,9 @@ how close a NixOS or Nixpkgs channel is to publishing its next update.
 | ID | `goober/hydra-update-examiner` |
 | Entries | Bar widget: `hydra`; actions panel: `actions`; service: `status` |
 
-The singleton service polls Hydra once for all widget placements. Text and color
-inheritance is independent of glyph inheritance, so each placement can use the
-shared result with plugin-wide colors while selecting glyphs through Noctalia's
-native per-widget picker.
+The singleton service polls Hydra once for all widget placements. Channel,
+refresh, and threshold controls are plugin-wide; text, colors, glyphs, and
+gesture bindings belong to each bar placement.
 
 ## What it does
 
@@ -82,10 +81,11 @@ enabled = true
 
 [widget.hydra-readiness]
 type = "goober/hydra-update-examiner:hydra"
-use_shared_glyphs = false
+display_mode = "on_hover"
+running_glyph = "server-bolt"
 
 [plugin_settings."goober/hydra-update-examiner"]
-shared_display_mode = "on_hover"
+refresh_interval_minutes = 60
 ```
 
 Add `hydra-readiness` to the desired bar section using your existing bar
@@ -118,13 +118,14 @@ the source root containing `catalog.toml`.
 ## Controls and IPC
 
 - Left click: refresh, subject to a 30-second cooldown.
-- Right click: open the native actions panel, with Refresh, Open Hydra, Plugin
+- Right click: open the native actions panel, with Refresh, Open Hydra, Polling
   settings, and Documentation commands.
 - Middle click: use Noctalia's built-in binding to open this placement's widget
   settings.
 
-User-configured Noctalia widget bindings can override these plugin click
-callbacks.
+Left and right are native plugin action defaults, while middle is Noctalia's
+host default. All three are visible and independently overridable in this
+placement's **Actions** section.
 
 The singleton service can also be driven directly:
 
@@ -143,8 +144,12 @@ noctalia msg plugin goober/hydra-update-examiner:actions all documentation
 
 ## Settings
 
-Open the plugin's gear under **Settings** → **Plugins** to edit all 13 v4-style
-values in one place. The first four configure the shared polling service:
+Hydra follows Noctalia v5's two settings scopes instead of duplicating the same
+controls in both menus.
+
+Open the plugin's gear under **Settings** → **Plugins**, or choose **Polling
+settings** in the right-click panel, for the four values owned by the singleton
+service:
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -153,58 +158,34 @@ values in one place. The first four configure the shared polling service:
 | `refresh_interval_minutes` | `int` | `60` | Poll interval in minutes, from 1 through 1440. |
 | `close_threshold` | `int` | `90` | Readiness percentage, from 1 through 100, at which the close state begins. |
 
-The next five are shared readiness-text and color defaults:
+### Widget appearance and glyph picker
+
+Middle-click a Hydra widget to open that placement's settings. If its normal
+middle-click binding was changed, open the widget's gear under **Settings** →
+**Bar**. All presentation controls are together there:
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `shared_display_mode` | `select` | `always` | `on_hover`, `always`, or `icon_only` readiness text. |
-| `shared_running_color` | `color` | `secondary` | Color used during normal progress. |
-| `shared_stalled_color` | `color` | `error` | Color used for blocked, stale, or error states. |
-| `shared_close_color` | `color` | `tertiary` | Color used at or above `close_threshold`. |
-| `shared_launched_color` | `color` | `primary` | Color used when the candidate revision is published. |
-
-The final four plugin-wide values are an optional shared glyph set:
-
-| Setting | Type | Default | Description |
-| --- | --- | --- | --- |
-| `shared_running_glyph` | `glyph` | `server-bolt` | Shared glyph name for normal progress. |
-| `shared_stalled_glyph` | `glyph` | `server-off` | Shared glyph name for blocked, stale, or error states. |
-| `shared_close_glyph` | `glyph` | `server-spark` | Shared glyph name used near readiness. |
-| `shared_launched_glyph` | `glyph` | `rocket` | Shared glyph name used after publication. |
-
-Current Noctalia v5 renders root plugin `glyph` settings as text fields rather
-than attaching its searchable selector. These names remain available for users
-who want one manually entered glyph set across every placement, but they are not
-the default glyph workflow in v0.3.0.
-
-### Native glyph picker and per-widget controls
-
-Middle-click the Hydra widget to open that placement's settings. If the normal
-middle-click binding was changed, open its gear under **Settings** → **Bar**.
-Leave **Use shared glyphs** off, which is the v0.3.0 default, then press the
-button adjacent to a glyph field. Noctalia opens its native searchable picker;
-choose a glyph and apply it. Repeat for the running, stalled, close, and launched
-states as needed.
-
-The two inheritance switches are independent. **Use shared text and colors**
-controls `display_mode` plus the four colors. **Use shared glyphs** controls only
-the four glyphs. A placement can therefore inherit plugin-wide text and colors
-while using native-picker glyphs. None of these controls require the global
-**Show Advanced** toggle:
-
-| Setting | Type | Default | Description |
-| --- | --- | --- | --- |
-| `use_shared_presentation` | `bool` | `true` | Uses plugin-wide readiness text and colors; turn off to reveal local text/color controls. |
-| `display_mode` | `select` | `always` | Local `on_hover`, `always`, or `icon_only` mode; shown when shared text/colors are off. |
-| `running_color` | `color` | `secondary` | Local normal-progress color; shown when shared text/colors are off. |
-| `stalled_color` | `color` | `error` | Local blocked, stale, or error color; shown when shared text/colors are off. |
-| `close_color` | `color` | `tertiary` | Local close-state color; shown when shared text/colors are off. |
-| `launched_color` | `color` | `primary` | Local publication color; shown when shared text/colors are off. |
-| `use_shared_glyphs` | `bool` | `false` | Uses the plugin-wide shared glyph set when enabled; local native-picker glyphs are the default. |
+| `display_mode` | `select` | `always` | `on_hover`, `always`, or `icon_only` readiness text for this placement. |
+| `running_color` | `color` | `secondary` | Normal-progress color for this placement. |
+| `stalled_color` | `color` | `error` | Blocked, stale, or error color for this placement. |
+| `close_color` | `color` | `tertiary` | Near-readiness color for this placement. |
+| `launched_color` | `color` | `primary` | Publication color for this placement. |
 | `running_glyph` | `glyph` | `server-bolt` | Normal-progress glyph selected with the adjacent picker button. |
 | `stalled_glyph` | `glyph` | `server-off` | Blocked, stale, or error glyph selected with the adjacent picker button. |
 | `close_glyph` | `glyph` | `server-spark` | Near-readiness glyph selected with the adjacent picker button. |
 | `launched_glyph` | `glyph` | `rocket` | Publication glyph selected with the adjacent picker button. |
+
+Press the button adjacent to a glyph field to open Noctalia's searchable
+**Pick a Glyph** menu. The picker is not arbitrarily restricted by Hydra:
+Noctalia v5 currently attaches it to widget-scoped glyph controls, while a
+root plugin `glyph` setting renders as a text field. Keeping glyphs here gives
+the complete native picker and lets two Hydra placements deliberately look
+different.
+
+Click, scroll, and thumb-button bindings are also per placement in the same
+widget editor. This is the v5 convention: service configuration is shared by
+the plugin, while presentation and gestures describe a particular bar widget.
 
 Noctalia sends pointer enter/leave events to the widget, so `on_hover` behaves
 like v4: the glyph remains visible and the readiness text expands only while
@@ -213,33 +194,25 @@ the pointer is over the widget.
 ### Migrating v4 appearance
 
 Noctalia cannot import the old values automatically because v4 used a different
-plugin ID, settings store, and camelCase key names. Re-enter text and colors in
-the plugin gear; choose glyphs in each widget's settings using this mapping:
+plugin ID, settings store, and camelCase key names. Re-enter appearance values
+in each widget's settings using this mapping:
 
 | v4 key | v5 target |
 | --- | --- |
-| `percentDisplayMode` | `shared_display_mode` (`onhover` → `on_hover`, `alwaysShow` → `always`, `alwaysHide` → `icon_only`) |
-| `runningColor` | `shared_running_color` |
-| `stalledColor` | `shared_stalled_color` |
-| `closeColor` | `shared_close_color` |
-| `launchedColor` | `shared_launched_color` |
+| `percentDisplayMode` | Widget `display_mode` (`onhover` → `on_hover`, `alwaysShow` → `always`, `alwaysHide` → `icon_only`) |
+| `runningColor` | Widget `running_color` |
+| `stalledColor` | Widget `stalled_color` |
+| `closeColor` | Widget `close_color` |
+| `launchedColor` | Widget `launched_color` |
 | `runningIcon` | Widget `running_glyph`, selected with the native picker |
 | `stalledIcon` | Widget `stalled_glyph`, selected with the native picker |
 | `closeIcon` | Widget `close_glyph`, selected with the native picker |
 | `launchedIcon` | Widget `launched_glyph`, selected with the native picker |
 
-To reproduce one global v4 icon set instead, enter those names in the four
-`shared_*_glyph` plugin fields and enable **Use shared glyphs** on each
-placement.
-
-### Migrating from v0.2.0
-
-V0.2.0 tied glyph inheritance to `use_shared_presentation`. V0.3.0 separates
-that behavior: `use_shared_presentation` now controls only readiness text and
-colors, while the new `use_shared_glyphs` setting controls glyph inheritance.
-Its default is `false`, so existing placements begin using their widget glyph
-values and gain the adjacent native picker buttons. Set **Use shared glyphs** to
-on for any placement that should retain v0.2.0's plugin-wide glyph behavior.
+V0.4.0 removes the temporary `shared_*` appearance settings and the two
+inheritance switches from v0.2/v0.3. Existing local `display_mode`, color, and
+glyph values remain the active widget settings; obsolete shared keys can be
+deleted from handwritten configuration.
 
 ## Supported channels
 
@@ -318,7 +291,8 @@ Noctalia catalog. The native beta.7/API 15 integration gate passed on
 2026-07-31, including shared and local presentation, hover rendering, the
 attached panel, its documentation and scoped-settings actions, hot reload, and
 clean shutdown. The v0.3.0 harness additionally captures the widget settings
-surface and opens Noctalia's native searchable **Pick a Glyph** menu.
+surface and opens Noctalia's native searchable **Pick a Glyph** menu. V0.4.0
+streamlines the settings scopes without changing the polling protocol.
 
 ## License
 

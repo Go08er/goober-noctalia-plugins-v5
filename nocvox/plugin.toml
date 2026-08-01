@@ -1,6 +1,6 @@
 id = "goober/nocvox"
 name = "NocVox"
-version = "0.1.0"
+version = "0.3.0"
 plugin_api = 17
 author = "goober"
 license = "MIT"
@@ -9,78 +9,6 @@ description = "A live status and recording-control companion for an existing Vox
 deprecated = false
 tags = ["audio", "bar", "indicator", "privacy", "productivity", "recording", "service", "utility"]
 dependencies = ["voxtype"]
-
-# These settings are shared because the singleton service and every presentation
-# entry need the same notification/privacy policy and palette roles.
-[[setting]]
-key = "notify_transitions"
-type = "bool"
-label_key = "settings.notify_transitions.label"
-description_key = "settings.notify_transitions.description"
-default = false
-
-[[setting]]
-key = "notify_failures"
-type = "bool"
-label_key = "settings.notify_failures.label"
-description_key = "settings.notify_failures.description"
-default = true
-
-[[setting]]
-key = "tooltip_show_model"
-type = "bool"
-label_key = "settings.tooltip_show_model.label"
-default = true
-
-[[setting]]
-key = "tooltip_show_device"
-type = "bool"
-label_key = "settings.tooltip_show_device.label"
-default = true
-
-[[setting]]
-key = "tooltip_show_backend"
-type = "bool"
-label_key = "settings.tooltip_show_backend.label"
-default = true
-
-[[setting]]
-key = "idle_color"
-type = "color"
-label_key = "settings.colors.idle"
-default = "on_surface"
-
-[[setting]]
-key = "recording_color"
-type = "color"
-label_key = "settings.colors.recording"
-default = "error"
-
-[[setting]]
-key = "transcribing_color"
-type = "color"
-label_key = "settings.colors.transcribing"
-default = "tertiary"
-
-[[setting]]
-key = "stopped_color"
-type = "color"
-label_key = "settings.colors.stopped"
-default = "on_surface_variant"
-
-[[setting]]
-key = "unknown_color"
-type = "color"
-label_key = "settings.colors.unknown"
-default = "tertiary"
-
-[[setting]]
-key = "enable_one_shot_overrides"
-type = "bool"
-label_key = "settings.enable_overrides.label"
-description_key = "settings.enable_overrides.description"
-default = false
-advanced = true
 
 # The service is the only owner of the long-lived VoxType status follower and
 # the only entry allowed to launch VoxType recording-control commands.
@@ -92,55 +20,64 @@ entry = "service.luau"
 id = "nocvox"
 entry = "widget.luau"
 
-  # Noctalia normally reserves middle click for widget settings. Explicitly
-  # freeing it preserves the historical middle-click cancel behavior.
+  # Use Noctalia's native per-placement Actions editor. Middle is deliberately
+  # omitted so the shell's standard "open this widget's settings" action wins.
+  # Recording commands target the singleton service directly, so two widget
+  # placements can never fan one click into duplicate VoxType commands.
   [widget.actions]
-  middle = "none"
+  left = "plugin goober/nocvox:listener all toggle"
+  right = "panel-toggle goober/nocvox:details"
+
+  # Every declared setting below changes only this bar placement. NocVox's
+  # singleton listener has no user-configurable policy, so there is no second
+  # plugin-wide settings page containing presentation controls.
+  [[widget.setting]]
+  key = "tooltip_show_model"
+  type = "bool"
+  label_key = "settings.tooltip_show_model.label"
+  default = true
 
   [[widget.setting]]
-  key = "left_action"
-  type = "select"
-  label_key = "settings.gestures.left"
-  description_key = "settings.gestures.description"
-  default = "toggle"
-  options = [
-    { value = "toggle", label_key = "actions.toggle" },
-    { value = "start", label_key = "actions.start" },
-    { value = "stop", label_key = "actions.stop" },
-    { value = "cancel", label_key = "actions.cancel" },
-    { value = "panel", label_key = "actions.panel" },
-    { value = "none", label_key = "actions.none" },
-  ]
+  key = "tooltip_show_device"
+  type = "bool"
+  label_key = "settings.tooltip_show_device.label"
+  default = true
 
   [[widget.setting]]
-  key = "middle_action"
-  type = "select"
-  label_key = "settings.gestures.middle"
-  description_key = "settings.gestures.description"
-  default = "cancel"
-  options = [
-    { value = "toggle", label_key = "actions.toggle" },
-    { value = "start", label_key = "actions.start" },
-    { value = "stop", label_key = "actions.stop" },
-    { value = "cancel", label_key = "actions.cancel" },
-    { value = "panel", label_key = "actions.panel" },
-    { value = "none", label_key = "actions.none" },
-  ]
+  key = "tooltip_show_backend"
+  type = "bool"
+  label_key = "settings.tooltip_show_backend.label"
+  default = true
 
   [[widget.setting]]
-  key = "right_action"
-  type = "select"
-  label_key = "settings.gestures.right"
-  description_key = "settings.gestures.description"
-  default = "cancel"
-  options = [
-    { value = "toggle", label_key = "actions.toggle" },
-    { value = "start", label_key = "actions.start" },
-    { value = "stop", label_key = "actions.stop" },
-    { value = "cancel", label_key = "actions.cancel" },
-    { value = "panel", label_key = "actions.panel" },
-    { value = "none", label_key = "actions.none" },
-  ]
+  key = "idle_color"
+  type = "color"
+  label_key = "settings.colors.idle"
+  default = "on_surface"
+
+  [[widget.setting]]
+  key = "recording_color"
+  type = "color"
+  label_key = "settings.colors.recording"
+  default = "error"
+
+  [[widget.setting]]
+  key = "transcribing_color"
+  type = "color"
+  label_key = "settings.colors.transcribing"
+  default = "tertiary"
+
+  [[widget.setting]]
+  key = "stopped_color"
+  type = "color"
+  label_key = "settings.colors.stopped"
+  default = "on_surface_variant"
+
+  [[widget.setting]]
+  key = "unknown_color"
+  type = "color"
+  label_key = "settings.colors.unknown"
+  default = "tertiary"
 
   [[widget.setting]]
   key = "idle_display"
@@ -174,13 +111,6 @@ entry = "widget.luau"
     { value = "compact", label_key = "settings.width_mode.compact" },
     { value = "expanded", label_key = "settings.width_mode.expanded" },
   ]
-
-  [[widget.setting]]
-  key = "show_override_name"
-  type = "bool"
-  label_key = "settings.show_override_name.label"
-  description_key = "settings.show_override_name.description"
-  default = false
 
   # Glyph settings intentionally live at widget scope, where Noctalia v5 shows
   # its native searchable glyph picker.

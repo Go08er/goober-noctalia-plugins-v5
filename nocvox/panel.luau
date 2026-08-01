@@ -12,22 +12,7 @@ local PROCESSING_STATES = { transcribing = true, processing = true }
 local status = nil
 local diagnostics = nil
 local commandSequence = 0
-
--- One-shot selections intentionally live only in this panel runtime. They are
--- not daemon configuration and reset when the plugin reloads.
-local outputValues = { "inherit", "type", "clipboard", "paste", "file" }
-local outputIndex = 0
-local filePath = ""
-local modelOverride = ""
-local profileOverride = ""
-local triStateValues = { "inherit", "on", "off" }
-local autoSubmitIndex = 0
-local shiftEnterIndex = 0
-local smartSubmitIndex = 0
-
-local function cfg(key)
-    return noctalia.getConfig(key)
-end
+local copyFeedback = ""
 
 local function displayValue(value)
     local text = tostring(value or "")
@@ -70,32 +55,28 @@ end
 local function statePresentation(current)
     local state = tostring(current.state or "unknown")
     if current.available ~= true or state == "stopped" then
-        return "microphone-off", tostring(cfg("stopped_color") or "on_surface_variant")
+        return "microphone-off", "on_surface_variant"
     elseif RECORDING_STATES[state] then
-        return "microphone", tostring(cfg("recording_color") or "error")
+        return "microphone", "error"
     elseif PROCESSING_STATES[state] then
-        return "microphone", tostring(cfg("transcribing_color") or "tertiary")
+        return "microphone", "tertiary"
     elseif state == "idle" then
-        return "microphone", tostring(cfg("idle_color") or "on_surface")
+        return "microphone", "on_surface"
     elseif state == "error" then
-        return "microphone-off", tostring(cfg("recording_color") or "error")
+        return "microphone-off", "error"
     end
-    return "microphone", tostring(cfg("unknown_color") or "tertiary")
+    return "microphone", "tertiary"
 end
 
-local function send(action, overrides)
+local function send(action)
     local previous = noctalia.state.get(COMMAND_KEY)
     local previousSequence = if type(previous) == "table" then tonumber(previous.sequence) or 0 else 0
     commandSequence = math.max(commandSequence, previousSequence) + 1
-    local command = {
+    noctalia.state.set(COMMAND_KEY, {
         action = action,
         producer = "details-panel",
         sequence = commandSequence,
-    }
-    if type(overrides) == "table" then
-        command.overrides = overrides
-    end
-    noctalia.state.set(COMMAND_KEY, command)
+    })
 end
 
 local function section(title, children)
@@ -103,61 +84,6 @@ local function section(title, children)
         ui.label({ text = title, fontWeight = "medium", color = "on_surface_variant" }),
         ui.column({ gap = 8 }, children),
     })
-end
-
-local function outputOptions()
-    return {
-        noctalia.tr("panel.overrides.output.inherit"),
-        noctalia.tr("panel.overrides.output.type"),
-        noctalia.tr("panel.overrides.output.clipboard"),
-        noctalia.tr("panel.overrides.output.paste"),
-        noctalia.tr("panel.overrides.output.file"),
-    }
-end
-
-local function triStateOptions()
-    return {
-        noctalia.tr("panel.overrides.tristate.inherit"),
-        noctalia.tr("panel.overrides.tristate.on"),
-        noctalia.tr("panel.overrides.tristate.off"),
-    }
-end
-
-local function outputLabel(output)
-    if output == "type" then
-        return noctalia.tr("overrides.output.type")
-    elseif output == "clipboard" then
-        return noctalia.tr("overrides.output.clipboard")
-    elseif output == "paste" then
-        return noctalia.tr("overrides.output.paste")
-    elseif output == "file" then
-        return noctalia.tr("overrides.output.file")
-    end
-    return ""
-end
-
-local function overrideSummary(current)
-    if current.override_active ~= true then
-        return noctalia.tr("panel.overrides.none_active")
-    end
-    local parts = {}
-    local output = tostring(current.override_output or "inherit")
-    if output ~= "inherit" then
-        local label = outputLabel(output)
-        if label ~= "" then
-            table.insert(parts, label)
-        end
-    end
-    if tostring(current.override_model or "") ~= "" then
-        table.insert(parts, noctalia.tr("overrides.model", { value = tostring(current.override_model) }))
-    end
-    if tostring(current.override_profile or "") ~= "" then
-        table.insert(parts, noctalia.tr("overrides.profile", { value = tostring(current.override_profile) }))
-    end
-    if #parts == 0 then
-        table.insert(parts, noctalia.tr("overrides.text_actions"))
-    end
-    return table.concat(parts, " · ")
 end
 
 local function diagnosticsLines(value)
@@ -248,13 +174,12 @@ local function render()
                     ui.label({ text = table.concat(statusDetails, " · "), color = color, fontSize = 12 }),
                 }),
             }),
-            ui.button({
-                glyph = "settings",
-                variant = "ghost",
-                tooltip = noctalia.tr("panel.settings"),
-                onClick = "onSettings",
-            }),
             ui.button({ glyph = "close", variant = "ghost", tooltip = noctalia.tr("panel.close"), onClick = "onClose" }),
+        }),
+        ui.label({
+            text = noctalia.tr("panel.widget_settings_hint"),
+            color = "on_surface_variant",
+            maxLines = 4,
         }),
     }
 
@@ -318,129 +243,8 @@ local function render()
             text = noctalia.tr("panel.last_status", { value = tostring(current.observed_at or "") }),
             color = "on_surface_variant",
         }),
-        ui.label({
-            text = noctalia.tr("panel.active_override", { value = overrideSummary(current) }),
-            color = "on_surface_variant",
-            maxLines = 3,
-        }),
     }
     table.insert(body, section(noctalia.tr("panel.status"), details))
-
-    if cfg("enable_one_shot_overrides") == true then
-        local overrideControls = {
-            ui.label({ text = noctalia.tr("panel.overrides.explanation"), color = "on_surface_variant", maxLines = 4 }),
-            ui.label({ text = noctalia.tr("panel.overrides.output_label"), fontWeight = "medium" }),
-            ui.select({
-                options = outputOptions(),
-                selectedIndex = outputIndex,
-                enabled = idle,
-                onChange = "onOutputChanged",
-            }),
-        }
-        if outputValues[outputIndex + 1] == "file" then
-            table.insert(
-                overrideControls,
-                ui.label({
-                    text = noctalia.tr("panel.overrides.file_exclusive"),
-                    color = "error",
-                    maxLines = 3,
-                })
-            )
-            table.insert(
-                overrideControls,
-                ui.input({
-                    key = "override-file",
-                    value = filePath,
-                    placeholder = noctalia.tr("panel.overrides.file_placeholder"),
-                    enabled = idle,
-                    onChange = "onFilePathChanged",
-                })
-            )
-        end
-        table.insert(
-            overrideControls,
-            ui.label({ text = noctalia.tr("panel.overrides.model_label"), fontWeight = "medium" })
-        )
-        table.insert(
-            overrideControls,
-            ui.input({
-                key = "override-model",
-                value = modelOverride,
-                placeholder = noctalia.tr("panel.overrides.model_placeholder"),
-                enabled = idle,
-                onChange = "onModelChanged",
-            })
-        )
-        table.insert(
-            overrideControls,
-            ui.label({ text = noctalia.tr("panel.overrides.profile_label"), fontWeight = "medium" })
-        )
-        table.insert(
-            overrideControls,
-            ui.input({
-                key = "override-profile",
-                value = profileOverride,
-                placeholder = noctalia.tr("panel.overrides.profile_placeholder"),
-                enabled = idle,
-                onChange = "onProfileChanged",
-            })
-        )
-        table.insert(
-            overrideControls,
-            ui.label({ text = noctalia.tr("panel.overrides.auto_submit"), fontWeight = "medium" })
-        )
-        table.insert(
-            overrideControls,
-            ui.select({
-                options = triStateOptions(),
-                selectedIndex = autoSubmitIndex,
-                enabled = idle,
-                onChange = "onAutoSubmitChanged",
-            })
-        )
-        table.insert(
-            overrideControls,
-            ui.label({ text = noctalia.tr("panel.overrides.shift_enter"), fontWeight = "medium" })
-        )
-        table.insert(
-            overrideControls,
-            ui.select({
-                options = triStateOptions(),
-                selectedIndex = shiftEnterIndex,
-                enabled = idle,
-                onChange = "onShiftEnterChanged",
-            })
-        )
-        table.insert(
-            overrideControls,
-            ui.label({ text = noctalia.tr("panel.overrides.smart_submit"), fontWeight = "medium" })
-        )
-        table.insert(
-            overrideControls,
-            ui.select({
-                options = triStateOptions(),
-                selectedIndex = smartSubmitIndex,
-                enabled = idle,
-                onChange = "onSmartSubmitChanged",
-            })
-        )
-        table.insert(
-            overrideControls,
-            ui.label({
-                text = noctalia.tr("panel.overrides.clipboard_privacy"),
-                color = "on_surface_variant",
-                maxLines = 5,
-            })
-        )
-        table.insert(body, section(noctalia.tr("panel.overrides.title"), overrideControls))
-    else
-        table.insert(
-            body,
-            section(noctalia.tr("panel.overrides.title"), {
-                ui.label({ text = noctalia.tr("panel.overrides.disabled"), color = "on_surface_variant", maxLines = 3 }),
-            })
-        )
-    end
 
     local diagnosticControls = {}
     for _, line in ipairs(diagnosticsLines(diagnostics)) do
@@ -474,6 +278,16 @@ local function render()
             maxLines = 4,
         })
     )
+    if copyFeedback ~= "" then
+        table.insert(
+            diagnosticControls,
+            ui.label({
+                text = copyFeedback,
+                color = "on_surface_variant",
+                maxLines = 2,
+            })
+        )
+    end
     table.insert(body, section(noctalia.tr("panel.diagnostics.title"), diagnosticControls))
 
     local errorMessage = tostring(current.last_error or "")
@@ -495,75 +309,31 @@ local function render()
 end
 
 function onStart()
-    if cfg("enable_one_shot_overrides") == true then
-        send("start", {
-            output = outputValues[outputIndex + 1],
-            file_path = filePath,
-            model = modelOverride,
-            profile = profileOverride,
-            auto_submit = triStateValues[autoSubmitIndex + 1],
-            shift_enter_newlines = triStateValues[shiftEnterIndex + 1],
-            smart_auto_submit = triStateValues[smartSubmitIndex + 1],
-        })
-    else
-        send("start", nil)
-    end
+    send("start")
 end
 
 function onStop()
-    send("stop", nil)
+    send("stop")
 end
 
 function onCancel()
-    send("cancel", nil)
+    send("cancel")
 end
 
 function onRunDiagnostics()
-    send("diagnose", nil)
+    copyFeedback = ""
+    send("diagnose")
 end
 
 function onCopyDiagnostics()
     local current = if type(status) == "table" then status else {}
     local summary = diagnosticSummary(current, diagnostics)
     if noctalia.copyToClipboard(summary, "text/plain") then
-        noctalia.notify(noctalia.tr("plugin.name"), noctalia.tr("panel.diagnostics.copied"))
+        copyFeedback = noctalia.tr("panel.diagnostics.copied")
     else
-        noctalia.notifyError(noctalia.tr("plugin.name"), noctalia.tr("panel.diagnostics.copy_failed"))
+        copyFeedback = noctalia.tr("panel.diagnostics.copy_failed")
     end
-end
-
-function onOutputChanged(index, _text)
-    outputIndex = math.max(0, math.min(#outputValues - 1, tonumber(index) or 0))
     render()
-end
-
-function onFilePathChanged(value)
-    filePath = tostring(value or "")
-end
-
-function onModelChanged(value)
-    modelOverride = tostring(value or "")
-end
-
-function onProfileChanged(value)
-    profileOverride = tostring(value or "")
-end
-
-function onAutoSubmitChanged(index, _text)
-    autoSubmitIndex = math.max(0, math.min(#triStateValues - 1, tonumber(index) or 0))
-end
-
-function onShiftEnterChanged(index, _text)
-    shiftEnterIndex = math.max(0, math.min(#triStateValues - 1, tonumber(index) or 0))
-end
-
-function onSmartSubmitChanged(index, _text)
-    smartSubmitIndex = math.max(0, math.min(#triStateValues - 1, tonumber(index) or 0))
-end
-
-function onSettings()
-    panel.close()
-    noctalia.openSettings()
 end
 
 function onClose()
