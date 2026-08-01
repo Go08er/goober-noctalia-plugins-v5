@@ -16,8 +16,8 @@ source using one of the methods below.
 | Plugin | Version | Status |
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.3.0` | Beta.7/API 15, VM-validated |
-| `goober/voxtype-suite` | `0.1.0` | Beta.7/API 17 companion MVP |
-| `goober/wallpaper-director` | `0.1.0` | Beta.7/API 17 Hub MVP |
+| `goober/nocvox` | `0.1.0` | Beta.7/API 17 companion MVP |
+| `goober/wall-in-one` | `0.2.0` | Beta.7/API 17 coordination preview |
 
 ## Repository layout
 
@@ -32,7 +32,7 @@ hydra-update-examiner/
   widget.luau
   translations/en.json
   scripts/hydra-channel-progress
-voxtype-suite/
+nocvox/
   plugin.toml
   README.md
   thumbnail.webp
@@ -40,7 +40,7 @@ voxtype-suite/
   panel.luau
   widget.luau
   translations/en.json
-wallpaper-director/
+wall-in-one/
   plugin.toml
   README.md
   thumbnail.webp
@@ -49,6 +49,7 @@ wallpaper-director/
   widget.luau
   shortcut.luau
   translations/en.json
+  scripts/capture-still
 tools/validate.py
 flake.nix
 flake.lock
@@ -74,8 +75,8 @@ Plugin IDs:
 
 ```text
 goober/hydra-update-examiner
-goober/voxtype-suite
-goober/wallpaper-director
+goober/nocvox
+goober/wall-in-one
 ```
 
 ### Settings interface
@@ -84,7 +85,7 @@ goober/wallpaper-director
 2. Choose **Git**, use `goober-v5` as the source name, and enter the repository
    URL above.
 3. Enable whichever plugins you want after the source finishes loading.
-4. Add their widgets from the bar picker. Wallpaper Director also exposes an
+4. Add their widgets from the bar picker. Wall-in-One also exposes an
    optional Control Center shortcut.
 
 The source name is only a local handle. `goober-v5` is used throughout this
@@ -95,15 +96,15 @@ README so the CLI and configuration examples agree.
 ```bash
 noctalia msg plugins source add goober-v5 git https://github.com/Go08er/goober-noctalia-plugins-v5
 noctalia msg plugins enable goober/hydra-update-examiner
-noctalia msg plugins enable goober/voxtype-suite
-noctalia msg plugins enable goober/wallpaper-director
+noctalia msg plugins enable goober/nocvox
+noctalia msg plugins enable goober/wall-in-one
 noctalia msg plugins list
 ```
 
 The available bar entries are `goober/hydra-update-examiner:hydra`,
-`goober/voxtype-suite:voxtype`, and
-`goober/wallpaper-director:wallpapers`. The Director Control Center entry is
-`goober/wallpaper-director:wallpapers-shortcut`. The source is cloned and
+`goober/nocvox:nocvox`, and
+`goober/wall-in-one:wall-in-one`. The Wall-in-One Control Center entry is
+`goober/wall-in-one:wall-in-one-shortcut`. The source is cloned and
 managed by Noctalia; a separate manual checkout is not required.
 
 ### Declarative configuration
@@ -114,8 +115,8 @@ Add the source and plugin ID to the v5 configuration:
 [plugins]
 enabled = [
   "goober/hydra-update-examiner",
-  "goober/voxtype-suite",
-  "goober/wallpaper-director",
+  "goober/nocvox",
+  "goober/wall-in-one",
 ]
 auto_update = true
 
@@ -129,18 +130,18 @@ enabled = true
 type = "goober/hydra-update-examiner:hydra"
 use_shared_glyphs = false
 
-[widget.voxtype]
-type = "goober/voxtype-suite:voxtype"
+[widget.nocvox]
+type = "goober/nocvox:nocvox"
 
-[widget.wallpapers]
-type = "goober/wallpaper-director:wallpapers"
+[widget.wall_in_one]
+type = "goober/wall-in-one:wall-in-one"
 
 [plugin_settings."goober/hydra-update-examiner"]
 shared_display_mode = "on_hover"
 ```
 
 Add the desired widget keys to a bar section using the rest of your normal bar
-configuration. Place the Director shortcut through Noctalia's Control Center
+configuration. Place the Wall-in-One shortcut through Noctalia's Control Center
 editor. When declaring `[[plugins.source]]` entries yourself, retain any other
 plugin sources you still want configured.
 
@@ -158,8 +159,8 @@ automatically. To uninstall the plugin and remove this custom source:
 
 ```bash
 noctalia msg plugins disable goober/hydra-update-examiner
-noctalia msg plugins disable goober/voxtype-suite
-noctalia msg plugins disable goober/wallpaper-director
+noctalia msg plugins disable goober/nocvox
+noctalia msg plugins disable goober/wall-in-one
 noctalia msg plugins source remove goober-v5
 ```
 
@@ -176,8 +177,8 @@ path:
 ```bash
 noctalia msg plugins source add goober-v5-dev path /absolute/path/to/goober-noctalia-plugins-v5
 noctalia msg plugins enable goober/hydra-update-examiner
-noctalia msg plugins enable goober/voxtype-suite
-noctalia msg plugins enable goober/wallpaper-director
+noctalia msg plugins enable goober/nocvox
+noctalia msg plugins enable goober/wall-in-one
 ```
 
 Then add the desired entries from Noctalia's widget and Control Center editors.
@@ -186,9 +187,9 @@ configuration reload. If the Git and path sources are both present, source
 ordering determines which copy supplies a duplicate plugin ID; remove or
 disable the Git source while developing if you want to avoid that ambiguity.
 
-### VoxType Suite boundary
+### NocVox boundary
 
-VoxType Suite listens to one extended `voxtype status --follow` stream and
+NocVox listens to one extended `voxtype status --follow` stream and
 forwards only supported recording start, stop, cancel, and on-demand diagnostic
 commands. It never installs, starts, stops, updates, configures, or supervises
 the VoxType daemon. The default bar gestures remain left toggle and
@@ -198,30 +199,52 @@ default.
 Clipboard, paste, and file are explicit one-recording VoxType destinations.
 The plugin does not read the clipboard or persist transcripts. File output is
 exclusive rather than a simultaneous backup; see
-[`voxtype-suite/README.md`](voxtype-suite/README.md) for the privacy and output
+[`nocvox/README.md`](nocvox/README.md) for the privacy and output
 details.
 
-### Wallpaper Director phase one
+### Wall-in-One coordination and pairing
 
-Wallpaper Director provides one configurable bar/Control Center entry point
-for Noctalia's static wallpaper UI, Wallhaven, and W Engine. It detects optional
-providers, retains saved unavailable actions, and exposes native
-next/previous/random routing. Noctalia still owns static rendering, Wallhaven
-still owns browsing/downloading, and W Engine remains the only
-`linux-wallpaperengine` process owner.
+Wall-in-One provides one configurable bar and Control Center entry point for
+Noctalia's native wallpaper controls and compatible live/background plugins.
+It discovers enabled plugins through Noctalia's public plugin list and routes
+only their documented interfaces: the Wallhaven browser, W Engine's panel and
+`next`/`cycle-stop`/`stop` service messages, and mpvpaper's picker plus
+`pause`/`resume`/`toggle`/`clear` service messages. An advanced full panel ID
+can expose another provider as an open-only adapter. Each provider keeps
+ownership of its renderer, files, and scheduling.
 
-Pairing, generated live-scene stills, static/live reels, and timer conflict
-resolution remain staged until Noctalia has reliable external-wallpaper
-lifecycle cleanup and W Engine has a narrow public adapter. The Hub does not
-fake these features with competing processes or private-state edits. See
-[`wallpaper-director/README.md`](wallpaper-director/README.md).
+For a configured video, Wall-in-One exports a full-resolution frame with FFmpeg
+into the selected capture directory. A configured W Engine Workshop ID can use
+the same path for video projects; scene and web projects safely export the
+Workshop preview. Current upstream W Engine has no public status or capture API,
+so Wall-in-One neither guesses its current project from process arguments nor
+starts a competing renderer. A versioned cooperative handshake is ready for a
+future W Engine adapter to report the active ID and return a same-process
+rendered capture.
 
-All three first-run gestures already have useful provider actions. Open the
-configuration panel directly with
-`noctalia msg panel-toggle goober/wallpaper-director:director`, then assign
-**Open Wallpaper Director** to any gesture if you want a permanent UI route.
-Its bar glyph is a native per-placement searchable selector, as are VoxType
-Suite's idle, active, stopped, and unknown-state glyphs.
+**Capture and pair** applies the exported still with Noctalia's
+`setWallpaper(output, path)` runtime API. The dynamic provider keeps rendering,
+while Noctalia persists a real static wallpaper for color generation, backdrop
+and blur consumers, wallpaper hooks, and a lock screen configured to follow the
+wallpaper. A lock screen with its own explicit image continues to use that
+image; Wall-in-One does not overwrite that setting.
+
+Noctalia has one global palette, not one palette per output. With color sync
+enabled, Wall-in-One selects the configured wallpaper color scheme; on a
+multi-output setup, **Palette output** chooses which paired still is reapplied
+last as the deterministic palette leader. Without a leader, the last paired
+output wins. Disabling Wall-in-One's color-sync command does not freeze an
+existing wallpaper-sourced palette: applying a new wallpaper may still cause
+Noctalia itself to regenerate colors.
+
+Open the hub directly with
+`noctalia msg panel-toggle goober/wall-in-one:hub`, then assign **Open
+Wall-in-One** to a gesture if you want a permanent UI route. The Wall-in-One
+bar glyph and NocVox's idle, active, stopped, and unknown-state glyphs use
+Noctalia's native per-placement searchable selector. Coordinated mixed-provider
+rotation is still refinement work; Wall-in-One does not start a competing
+timer yet. See [`wall-in-one/README.md`](wall-in-one/README.md) for current
+requirements and safety boundaries.
 
 ### Hydra Update Examiner customization
 
@@ -242,25 +265,26 @@ Run the repository checks with:
 
 ```bash
 python3 tools/validate.py
-noctalia plugins lint hydra-update-examiner voxtype-suite wallpaper-director
-python3 voxtype-suite/tests/check.py
-python3 wallpaper-director/tests/test_contract.py
+noctalia plugins lint hydra-update-examiner nocvox wall-in-one
+python3 nocvox/tests/check.py
+python3 wall-in-one/tests/test_contract.py
 ```
 
 Run the native v5 integration test in a disposable NixOS VM with:
 
 ```bash
 nix build -L .#vm-test
-nix build -L .#vm-test-voxtype
-nix build -L .#vm-test-wallpaper
+nix build -L .#vm-test-nocvox
+nix build -L .#vm-test-wall-in-one
 ```
 
 The VM harnesses are pinned to the exact beta.7 host revision. They use
 in-guest sources, headless Sway, software rendering, and deterministic command
 fixtures without touching the host Noctalia session or configuration. The
 original `vm-test` retains Hydra's render and glyph-picker coverage; the two
-isolated checks exercise the new singleton services, failure boundaries, and
-process-ownership rules. See `tests/vm/README.md` for details.
+isolated checks exercise the companion/coordinator services, failure
+boundaries, capture/pairing policy, and process-ownership rules. See
+`tests/vm/README.md` for details.
 
 ## Editor setup
 

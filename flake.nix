@@ -26,12 +26,12 @@
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
       };
-      voxtypeVmTest = import ./tests/vm/voxtype.nix {
+      nocvoxVmTest = import ./tests/vm/nocvox.nix {
         inherit pkgs;
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
       };
-      wallpaperVmTest = import ./tests/vm/wallpaper.nix {
+      wallInOneVmTest = import ./tests/vm/wall-in-one.nix {
         inherit pkgs;
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
@@ -40,17 +40,17 @@
     {
       checks.${system} = {
         noctalia-vm = hydraVmTest;
-        voxtype-vm = voxtypeVmTest;
-        wallpaper-vm = wallpaperVmTest;
+        nocvox-vm = nocvoxVmTest;
+        wall-in-one-vm = wallInOneVmTest;
       };
 
       packages.${system} = {
         vm-test = hydraVmTest;
         vm-test-driver = hydraVmTest.driverInteractive;
-        vm-test-voxtype = voxtypeVmTest;
-        vm-test-voxtype-driver = voxtypeVmTest.driverInteractive;
-        vm-test-wallpaper = wallpaperVmTest;
-        vm-test-wallpaper-driver = wallpaperVmTest.driverInteractive;
+        vm-test-nocvox = nocvoxVmTest;
+        vm-test-nocvox-driver = nocvoxVmTest.driverInteractive;
+        vm-test-wall-in-one = wallInOneVmTest;
+        vm-test-wall-in-one-driver = wallInOneVmTest.driverInteractive;
       };
     };
 }

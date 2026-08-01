@@ -1,5 +1,5 @@
-id = "goober/voxtype-suite"
-name = "VoxType Suite"
+id = "goober/nocvox"
+name = "NocVox"
 version = "0.1.0"
 plugin_api = 17
 author = "goober"
@@ -89,7 +89,7 @@ id = "listener"
 entry = "service.luau"
 
 [[widget]]
-id = "voxtype"
+id = "nocvox"
 entry = "widget.luau"
 
   # Noctalia normally reserves middle click for widget settings. Explicitly

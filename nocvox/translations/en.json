@@ -1,6 +1,6 @@
 {
   "plugin": {
-    "name": "VoxType Suite"
+    "name": "NocVox"
   },
   "settings": {
     "notify_transitions": {
@@ -190,7 +190,7 @@
         "on": "On for this recording",
         "off": "Off for this recording"
       },
-      "clipboard_privacy": "Clipboard and paste are one-shot VoxType output destinations only. VoxType Suite never reads, scrapes, archives, restores, or backs up clipboard or transcript content."
+      "clipboard_privacy": "Clipboard and paste are one-shot VoxType output destinations only. NocVox never reads, scrapes, archives, restores, or backs up clipboard or transcript content."
     },
     "diagnostics": {
       "title": "Diagnostics",

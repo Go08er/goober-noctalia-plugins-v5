@@ -4,7 +4,7 @@
 local STATUS_KEY = "voxtype_status"
 local COMMAND_KEY = "voxtype_command"
 local READY_KEY = "voxtype_service_ready"
-local PANEL_ID = "goober/voxtype-suite:details"
+local PANEL_ID = "goober/nocvox:details"
 
 local RECORDING_STATES = { recording = true, streaming = true }
 local PROCESSING_STATES = { transcribing = true, processing = true }
@@ -362,6 +362,6 @@ function onIpc(event, _payload)
     elseif event == "toggle" or event == "start" or event == "stop" or event == "cancel" then
         send(event)
     else
-        noctalia.log("voxtype-suite widget: unknown command '" .. tostring(event) .. "'")
+        noctalia.log("nocvox widget: unknown command '" .. tostring(event) .. "'")
     end
 end

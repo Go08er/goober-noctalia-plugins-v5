@@ -1,6 +1,6 @@
-# VoxType Suite
+# NocVox
 
-VoxType Suite is a native Noctalia v5 status-and-control companion for an
+NocVox is a native Noctalia v5 status-and-control companion for an
 already installed, configured, and independently managed
 [VoxType](https://github.com/peteonrails/voxtype) daemon. It provides one live
 status listener, a customizable bar widget, and an attached details/diagnostics
@@ -34,9 +34,9 @@ disabled. The plugin has no command that changes daemon lifecycle.
 
 | Entry | ID | Responsibility |
 |---|---|---|
-| Service | `goober/voxtype-suite:listener` | Owns the single status stream, state normalization, safe recording commands, and on-demand diagnostics. |
-| Widget | `goober/voxtype-suite:voxtype` | Renders status and forwards configured gestures to the service. |
-| Panel | `goober/voxtype-suite:details` | Shows supported controls, optional one-shot choices, and privacy-safe diagnostics. |
+| Service | `goober/nocvox:listener` | Owns the single status stream, state normalization, safe recording commands, and on-demand diagnostics. |
+| Widget | `goober/nocvox:nocvox` | Renders status and forwards configured gestures to the service. |
+| Panel | `goober/nocvox:details` | Shows supported controls, optional one-shot choices, and privacy-safe diagnostics. |
 
 Entries exchange plain state through `noctalia.state`; no widget placement owns
 another follower. This follows Noctalia's documented
@@ -64,7 +64,7 @@ To keep all three defaults and still open the panel, either assign one gesture
 to **Open/close details** or run:
 
 ```bash
-noctalia msg panel-toggle goober/voxtype-suite:details
+noctalia msg panel-toggle goober/nocvox:details
 ```
 
 ## Live presentation
@@ -113,7 +113,7 @@ the home prefix is expanded by Noctalia, and the complete `--file=...` argument
 is shell-quoted. The plugin does not delete or back up the selected file.
 
 Clipboard and paste are also one-shot **output destinations**, not history.
-VoxType Suite never calls the clipboard-read API and never scrapes, archives,
+NocVox never calls the clipboard-read API and never scrapes, archives,
 restores, or backs up clipboard/transcript contents. That means the originally
 suggested “keep a backup of output in clipboard” feature is intentionally not
 implemented: ordinary dictation exposes no trustworthy transcript-history API,
@@ -155,8 +155,8 @@ placement in the widget editor.
 From the repository root:
 
 ```bash
-python3 voxtype-suite/tests/check.py
-noctalia plugins lint voxtype-suite
+python3 nocvox/tests/check.py
+noctalia plugins lint nocvox
 ```
 
 The static check asserts the privacy/ownership boundaries and the single-stream

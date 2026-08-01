@@ -8,22 +8,22 @@ let
   inherit (pkgs) lib;
 
   testUser = "vmtester";
-  runtimeRoot = "/run/noctalia-voxtype-vm";
-  stateRoot = "/var/lib/noctalia-voxtype-vm";
-  cacheRoot = "/var/cache/noctalia-voxtype-vm";
+  runtimeRoot = "/run/noctalia-nocvox-vm";
+  stateRoot = "/var/lib/noctalia-nocvox-vm";
+  cacheRoot = "/var/cache/noctalia-nocvox-vm";
   guestSourceRoot = "${stateRoot}/plugin-source";
-  sourceName = "voxtype-vm";
+  sourceName = "nocvox-vm";
   sourceUrl = "file://${guestSourceRoot}";
-  pluginId = "goober/voxtype-suite";
+  pluginId = "goober/nocvox";
   serviceId = "${pluginId}:listener";
-  widgetId = "${pluginId}:voxtype";
+  widgetId = "${pluginId}:nocvox";
   materializedRoot =
-    "${stateRoot}/state/noctalia/plugins/materialized/${sourceName}/voxtype-suite";
+    "${stateRoot}/state/noctalia/plugins/materialized/${sourceName}/nocvox";
 
   manifest = builtins.fromTOML (
-    builtins.readFile (pluginRoot + "/voxtype-suite/plugin.toml")
+    builtins.readFile (pluginRoot + "/nocvox/plugin.toml")
   );
-  catalog = (pkgs.formats.toml { }).generate "voxtype-vm-catalog.toml" {
+  catalog = (pkgs.formats.toml { }).generate "nocvox-vm-catalog.toml" {
     plugin = [
       {
         inherit (manifest)
@@ -44,11 +44,11 @@ let
   };
   rawPluginSource = lib.fileset.toSource {
     root = pluginRoot;
-    fileset = pluginRoot + "/voxtype-suite";
+    fileset = pluginRoot + "/nocvox";
   };
-  stagedSource = pkgs.runCommand "noctalia-voxtype-vm-source" { } ''
+  stagedSource = pkgs.runCommand "noctalia-nocvox-vm-source" { } ''
     mkdir -p "$out"
-    cp -R ${rawPluginSource}/voxtype-suite "$out/voxtype-suite"
+    cp -R ${rawPluginSource}/nocvox "$out/nocvox"
     cp ${catalog} "$out/catalog.toml"
   '';
 
@@ -62,33 +62,33 @@ let
           printf '\t%q' "$argument"
         done
         printf '\n'
-      } >> /tmp/voxtype-vm-calls.log
+      } >> /tmp/nocvox-vm-calls.log
 
       if [[ "$#" -ge 1 && "$1" == "status" ]]; then
-        printf '%s\n' "$$" >> /tmp/voxtype-vm-followers.log
-        touch /tmp/voxtype-vm-status-events
-        tail -n +1 -F /tmp/voxtype-vm-status-events
+        printf '%s\n' "$$" >> /tmp/nocvox-vm-followers.log
+        touch /tmp/nocvox-vm-status-events
+        tail -n +1 -F /tmp/nocvox-vm-status-events
         exit 0
       fi
 
       if [[ "$#" -eq 1 && "$1" == "--version" ]]; then
-        while [[ -e /tmp/voxtype-vm-hold-diagnostics ]]; do
+        while [[ -e /tmp/nocvox-vm-hold-diagnostics ]]; do
           sleep 0.1
         done
-        printf '%s\n' "voxtype 0.7.5-vm-fixture"
+        printf '%s\n' "voxtype 0.7.5-nocvox-vm-fixture"
         exit 0
       fi
 
       if [[ "$#" -eq 3 && "$1" == "info" && "$2" == "variants" && "$3" == "--json" ]]; then
-        while [[ -e /tmp/voxtype-vm-hold-diagnostics ]]; do
+        while [[ -e /tmp/nocvox-vm-hold-diagnostics ]]; do
           sleep 0.1
         done
-        printf '%s\n' '{"install_kind":"vm-fixture","active_variant":"cpu","compiled_features":["wayland"],"cpu":{"avx2":true,"avx512":false},"gpus":{"nvidia":false,"amd":false},"recommendation":{"primary":"cpu","whisper":"cpu","onnx":"cpu"}}'
+        printf '%s\n' '{"install_kind":"nocvox-vm-fixture","active_variant":"cpu","compiled_features":["wayland"],"cpu":{"avx2":true,"avx512":false},"gpus":{"nvidia":false,"amd":false},"recommendation":{"primary":"cpu","whisper":"cpu","onnx":"cpu"}}'
         exit 0
       fi
 
       if [[ "$#" -ge 2 && "$1" == "record" ]]; then
-        if [[ -e "/tmp/voxtype-vm-fail-$2" ]]; then
+        if [[ -e "/tmp/nocvox-vm-fail-$2" ]]; then
           printf 'fixture failure: %s\n' "$2" >&2
           exit 23
         fi
@@ -103,7 +103,7 @@ let
   # This is appended only to the materialized guest copy. It exposes internal
   # state for deterministic assertions and two override-validation probes; the
   # production plugin remains untouched.
-  vmProbe = pkgs.writeText "voxtype-vm-probe.luau" ''
+  nocvoxVmProbe = pkgs.writeText "nocvox-vm-probe.luau" ''
     local vmProductionOnIpc = onIpc
     local vmCommandSequence = 900000
 
@@ -111,7 +111,7 @@ let
         if event == "vm-probe" then
             local vmDiagnostics = noctalia.state.get(DIAGNOSTICS_KEY)
             noctalia.log(
-                "VOXTYPE_VM_PROBE "
+                "NOCVOX_VM_PROBE "
                     .. tostring(payload or "")
                     .. " state="
                     .. tostring(current.state)
@@ -163,7 +163,7 @@ let
   ];
   noctaliaRuntimePackages = pluginRuntimePackages ++ [ pkgs.git ];
 
-  vmConfig = pkgs.writeText "noctalia-voxtype-vm-config.toml" ''
+  nocvoxVmConfig = pkgs.writeText "noctalia-nocvox-vm-config.toml" ''
     [shell]
     offline_mode = true
     telemetry_enabled = false
@@ -189,7 +189,7 @@ let
     unknown_color = "tertiary"
     enable_one_shot_overrides = true
 
-    [widget.voxtype-a]
+    [widget.nocvox-a]
     type = "${widgetId}"
     left_action = "toggle"
     middle_action = "cancel"
@@ -203,7 +203,7 @@ let
     stopped_glyph = "microphone-off"
     unknown_glyph = "help-circle"
 
-    [widget.voxtype-b]
+    [widget.nocvox-b]
     type = "${widgetId}"
     left_action = "toggle"
     middle_action = "cancel"
@@ -217,16 +217,16 @@ let
     stopped_glyph = "microphone-off"
     unknown_glyph = "help-circle"
 
-    [bar.voxtype-test]
-    start = ["voxtype-a"]
-    center = ["voxtype-b"]
+    [bar.nocvox-test]
+    start = ["nocvox-a"]
+    center = ["nocvox-b"]
     end = []
     reserve_space = false
     hover_highlight = false
   '';
 
   runner = pkgs.writeShellApplication {
-    name = "noctalia-voxtype-vm-run";
+    name = "noctalia-nocvox-vm-run";
     runtimeInputs = noctaliaRuntimePackages;
     text = ''
       install -d -m 0755 \
@@ -240,16 +240,16 @@ let
       git -C "${guestSourceRoot}" config user.name "Noctalia VM Test"
       git -C "${guestSourceRoot}" config user.email "noctalia-vm@example.invalid"
       git -C "${guestSourceRoot}" add .
-      git -C "${guestSourceRoot}" commit -m "VoxType VM fixture"
+      git -C "${guestSourceRoot}" commit -m "NocVox VM fixture"
 
-      : > /tmp/voxtype-vm-calls.log
-      : > /tmp/voxtype-vm-followers.log
+      : > /tmp/nocvox-vm-calls.log
+      : > /tmp/nocvox-vm-followers.log
       printf '%s\n' \
         '{"text":"Idle","alt":"idle","class":"idle","tooltip":"fixture","model":"parakeet-tdt-0.6b-v3-int8","device":"default","backend":"cpu"}' \
-        > /tmp/voxtype-vm-status-events
+        > /tmp/nocvox-vm-status-events
       touch "${stateRoot}/state/noctalia/.setup-complete"
 
-      export NOCTALIA_CONFIG_HOME=/etc/noctalia-voxtype-vm
+      export NOCTALIA_CONFIG_HOME=/etc/noctalia-nocvox-vm
       export NOCTALIA_STATE_HOME="${stateRoot}/state"
       export NOCTALIA_DATA_HOME="${stateRoot}/data"
       export XDG_CACHE_HOME="${cacheRoot}"
@@ -259,7 +259,7 @@ let
     '';
   };
 
-  swayConfig = pkgs.writeText "noctalia-voxtype-vm-sway.conf" ''
+  swayConfig = pkgs.writeText "noctalia-nocvox-vm-sway.conf" ''
     xwayland disable
     output HEADLESS-1 mode 1280x720
     exec ${lib.getExe runner}
@@ -269,7 +269,7 @@ in
 pkgs.testers.runNixOSTest (
   { ... }:
   {
-    name = "noctalia-voxtype-suite-vm";
+    name = "noctalia-nocvox-vm";
 
     nodes.machine =
       { pkgs, ... }:
@@ -286,7 +286,7 @@ pkgs.testers.runNixOSTest (
         fonts.packages = [ pkgs.dejavu_fonts ];
 
         environment = {
-          etc."noctalia-voxtype-vm/noctalia/config.toml".source = vmConfig;
+          etc."noctalia-nocvox-vm/noctalia/config.toml".source = nocvoxVmConfig;
           systemPackages = [
             noctaliaPackage
             fakeVoxtype
@@ -294,8 +294,8 @@ pkgs.testers.runNixOSTest (
           ];
         };
 
-        systemd.services.voxtype-daemon-sentinel = {
-          description = "Daemon-lifecycle sentinel for VoxType Suite";
+        systemd.services.nocvox-voxtype-daemon-sentinel = {
+          description = "Daemon-lifecycle sentinel for NocVox";
           wantedBy = [ "multi-user.target" ];
           serviceConfig = {
             ExecStart = "${lib.getExe' pkgs.coreutils "sleep"} infinity";
@@ -303,8 +303,8 @@ pkgs.testers.runNixOSTest (
           };
         };
 
-        systemd.services.noctalia-voxtype-vm-session = {
-          description = "Isolated Noctalia VoxType Suite test session";
+        systemd.services.noctalia-nocvox-vm-session = {
+          description = "Isolated NocVox test session";
           path = [
             pkgs.dbus
             pkgs.bash
@@ -327,10 +327,10 @@ pkgs.testers.runNixOSTest (
           serviceConfig = {
             User = testUser;
             Group = "users";
-            RuntimeDirectory = "noctalia-voxtype-vm";
+            RuntimeDirectory = "noctalia-nocvox-vm";
             RuntimeDirectoryMode = "0700";
-            StateDirectory = "noctalia-voxtype-vm";
-            CacheDirectory = "noctalia-voxtype-vm";
+            StateDirectory = "noctalia-nocvox-vm";
+            CacheDirectory = "noctalia-nocvox-vm";
             ExecStart =
               "${pkgs.dbus}/bin/dbus-run-session -- "
               + "${lib.getExe pkgs.sway} --unsupported-gpu --config ${swayConfig}";
@@ -350,7 +350,7 @@ pkgs.testers.runNixOSTest (
       import pathlib
       import shlex
 
-      journal = "journalctl -u noctalia-voxtype-vm-session.service -b --no-pager"
+      journal = "journalctl -u noctalia-nocvox-vm-session.service -b --no-pager"
 
       def wait_log(text: str):
           machine.wait_until_succeeds(
@@ -361,7 +361,7 @@ pkgs.testers.runNixOSTest (
           line = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
           machine.succeed(
               "runuser -u ${testUser} -- sh -c "
-              + shlex.quote("printf '%s\\n' " + shlex.quote(line) + " >> /tmp/voxtype-vm-status-events")
+              + shlex.quote("printf '%s\\n' " + shlex.quote(line) + " >> /tmp/nocvox-vm-status-events")
           )
 
       def follower_count(expected: int):
@@ -369,13 +369,13 @@ pkgs.testers.runNixOSTest (
               "alive=0; "
               "while read -r pid; do "
               "  if kill -0 \"$pid\" 2>/dev/null; then alive=$((alive + 1)); fi; "
-              "done < /tmp/voxtype-vm-followers.log; "
+              "done < /tmp/nocvox-vm-followers.log; "
               f"test \"$alive\" -eq {expected}"
           )
 
       def calls():
           result = []
-          for line in machine.succeed("cat /tmp/voxtype-vm-calls.log").splitlines():
+          for line in machine.succeed("cat /tmp/nocvox-vm-calls.log").splitlines():
               fields = shlex.split(line)
               result.append(fields[1:])
           return result
@@ -384,7 +384,7 @@ pkgs.testers.runNixOSTest (
       def wait_state(state: str, raw: str | None = None, malformed: int | None = None):
           probe_number[0] += 1
           token = f"probe-{probe_number[0]}"
-          expected = f"VOXTYPE_VM_PROBE {token} state={state}"
+          expected = f"NOCVOX_VM_PROBE {token} state={state}"
           if raw is not None:
               expected += f" raw={raw}"
           if malformed is not None:
@@ -398,7 +398,7 @@ pkgs.testers.runNixOSTest (
       def wait_diagnostics(pending: bool, error: str):
           probe_number[0] += 1
           token = f"diagnostics-{probe_number[0]}"
-          expected_token = f"VOXTYPE_VM_PROBE {token}"
+          expected_token = f"NOCVOX_VM_PROBE {token}"
           expected_diagnostics = (
               f"diagnostics_pending={str(pending).lower()} diagnostics_error={error}"
           )
@@ -411,8 +411,8 @@ pkgs.testers.runNixOSTest (
 
       start_all()
       machine.wait_for_unit("multi-user.target")
-      machine.wait_for_unit("voxtype-daemon-sentinel.service")
-      machine.wait_for_unit("noctalia-voxtype-vm-session.service")
+      machine.wait_for_unit("nocvox-voxtype-daemon-sentinel.service")
+      machine.wait_for_unit("noctalia-nocvox-vm-session.service")
       machine.wait_until_succeeds(
           "find ${runtimeRoot} -maxdepth 1 -type s "
           "-name 'noctalia-wayland-*.sock' | grep -q ."
@@ -449,13 +449,13 @@ pkgs.testers.runNixOSTest (
       machine.succeed(
           "runuser -u ${testUser} -- env -i "
           f"{clean_environment} "
-          "${lib.getExe noctaliaPackage} plugins lint ${guestSourceRoot}/voxtype-suite"
+          "${lib.getExe noctaliaPackage} plugins lint ${guestSourceRoot}/nocvox"
       )
       machine.succeed(
           "runuser -u ${testUser} -- env -i "
           f"{clean_environment} "
           "${lib.getExe noctaliaPackage} config validate "
-          "/etc/noctalia-voxtype-vm/noctalia/config.toml"
+          "/etc/noctalia-nocvox-vm/noctalia/config.toml"
       )
 
       assert noctalia_msg(
@@ -463,13 +463,13 @@ pkgs.testers.runNixOSTest (
       ).strip() == "ok"
       assert noctalia_msg("plugins enable ${pluginId}").strip().startswith("ok")
       wait_log("started service '${serviceId}'")
-      wait_log('creating #0 "voxtype-test"')
+      wait_log('creating #0 "nocvox-test"')
       follower_count(1)
 
       # Install bounded test probes and ensure service hot reload replaces—not
       # duplicates—the sole long-lived status follower.
       machine.succeed(
-          "cat ${materializedRoot}/service.luau ${vmProbe} "
+          "cat ${materializedRoot}/service.luau ${nocvoxVmProbe} "
           "> ${materializedRoot}/service.luau.new; "
           "mv ${materializedRoot}/service.luau.new ${materializedRoot}/service.luau"
       )
@@ -479,17 +479,17 @@ pkgs.testers.runNixOSTest (
 
       # State-aware toggle and cancel behavior.
       assert noctalia_msg("plugin ${serviceId} all toggle").strip() == "ok: dispatched 1"
-      machine.wait_until_succeeds("grep -F $'\\trecord\\tstart' /tmp/voxtype-vm-calls.log")
+      machine.wait_until_succeeds("grep -F $'\\trecord\\tstart' /tmp/nocvox-vm-calls.log")
 
       emit_status({"alt": "recording", "model": "parakeet", "device": "default", "backend": "cpu"})
       wait_state("recording", "recording", 0)
       assert noctalia_msg("plugin ${serviceId} all toggle").strip() == "ok: dispatched 1"
-      machine.wait_until_succeeds("grep -F $'\\trecord\\tstop' /tmp/voxtype-vm-calls.log")
+      machine.wait_until_succeeds("grep -F $'\\trecord\\tstop' /tmp/nocvox-vm-calls.log")
 
       emit_status({"alt": "streaming"})
       wait_state("streaming", "streaming", 0)
       assert noctalia_msg("plugin ${serviceId} all cancel").strip() == "ok: dispatched 1"
-      machine.wait_until_succeeds("grep -F $'\\trecord\\tcancel' /tmp/voxtype-vm-calls.log")
+      machine.wait_until_succeeds("grep -F $'\\trecord\\tcancel' /tmp/nocvox-vm-calls.log")
 
       control_count = len([call for call in calls() if call and call[0] == "record"])
       emit_status({"alt": "transcribing"})
@@ -510,18 +510,18 @@ pkgs.testers.runNixOSTest (
       # Diagnostics are explicit and exactly one pair of subprocesses is issued.
       assert noctalia_msg("plugin ${serviceId} all diagnose").strip() == "ok: dispatched 1"
       machine.wait_until_succeeds(
-          "test $(grep -Fc $'\\t--version' /tmp/voxtype-vm-calls.log) -eq 1 && "
-          "test $(grep -Fc $'\\tinfo\\tvariants\\t--json' /tmp/voxtype-vm-calls.log) -eq 1"
+          "test $(grep -Fc $'\\t--version' /tmp/nocvox-vm-calls.log) -eq 1 && "
+          "test $(grep -Fc $'\\tinfo\\tvariants\\t--json' /tmp/nocvox-vm-calls.log) -eq 1"
       )
       wait_diagnostics(False, "")
 
       # Hot reload cancels in-flight diagnostics and repairs the shared pending
       # state so the panel remains retryable rather than spinning forever.
-      machine.succeed("touch /tmp/voxtype-vm-hold-diagnostics")
+      machine.succeed("touch /tmp/nocvox-vm-hold-diagnostics")
       assert noctalia_msg("plugin ${serviceId} all diagnose").strip() == "ok: dispatched 1"
       machine.wait_until_succeeds(
-          "test $(grep -Fc $'\\t--version' /tmp/voxtype-vm-calls.log) -eq 2 && "
-          "test $(grep -Fc $'\\tinfo\\tvariants\\t--json' /tmp/voxtype-vm-calls.log) -eq 2"
+          "test $(grep -Fc $'\\t--version' /tmp/nocvox-vm-calls.log) -eq 2 && "
+          "test $(grep -Fc $'\\tinfo\\tvariants\\t--json' /tmp/nocvox-vm-calls.log) -eq 2"
       )
       wait_diagnostics(True, "")
       machine.succeed("printf '\\n-- vm diagnostics reload\\n' >> ${materializedRoot}/service.luau")
@@ -531,14 +531,14 @@ pkgs.testers.runNixOSTest (
           + ") -ge 2"
       )
       wait_diagnostics(False, "Diagnostics were interrupted by a plugin reload; run them again.")
-      machine.succeed("rm /tmp/voxtype-vm-hold-diagnostics")
+      machine.succeed("rm /tmp/nocvox-vm-hold-diagnostics")
       follower_count(1)
 
       # Shell quoting must preserve the optional --file argument as one token.
       assert noctalia_msg("plugin ${serviceId} all vm-file-override").strip() == "ok: dispatched 1"
       machine.wait_until_succeeds(
           "grep -F -- \"--file=/tmp/voice\\ notes/o\\'clock.txt\" "
-          "/tmp/voxtype-vm-calls.log"
+          "/tmp/nocvox-vm-calls.log"
       )
       file_calls = [
           call for call in calls()
@@ -559,7 +559,7 @@ pkgs.testers.runNixOSTest (
       machine.fail("test -e /tmp/touch-pwned")
 
       # A command failure is surfaced without losing the follower.
-      machine.succeed("touch /tmp/voxtype-vm-fail-start")
+      machine.succeed("touch /tmp/nocvox-vm-fail-start")
       noctalia_msg("plugin ${serviceId} all start")
       wait_log("fixture failure: start")
       follower_count(1)
@@ -568,7 +568,7 @@ pkgs.testers.runNixOSTest (
       assert noctalia_msg("panel-toggle ${pluginId}:details").strip().startswith("ok")
       wait_log("panel.luau")
       machine.sleep(1)
-      screenshot = "/tmp/noctalia-voxtype-suite-vm.png"
+      screenshot = "/tmp/noctalia-nocvox-vm.png"
       machine.succeed(
           "runuser -u ${testUser} -- env -i "
           f"{ipc_environment} ${lib.getExe pkgs.grim} -o HEADLESS-1 {screenshot}"
@@ -590,9 +590,9 @@ pkgs.testers.runNixOSTest (
       # externally owned daemon sentinel.
       assert noctalia_msg("plugins disable ${pluginId}").strip().startswith("ok")
       follower_count(0)
-      machine.succeed("systemctl is-active --quiet voxtype-daemon-sentinel.service")
+      machine.succeed("systemctl is-active --quiet nocvox-voxtype-daemon-sentinel.service")
 
-      machine.succeed("systemctl stop noctalia-voxtype-vm-session.service")
+      machine.succeed("systemctl stop noctalia-nocvox-vm-session.service")
       machine.wait_until_fails("pgrep -x noctalia")
     '';
   }

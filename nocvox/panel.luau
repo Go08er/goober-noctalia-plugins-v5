@@ -197,7 +197,7 @@ end
 
 local function diagnosticSummary(current, value)
     local lines = {
-        "VoxType Suite diagnostic summary",
+        "NocVox diagnostic summary",
         "State: " .. stateLabel(tostring(current.state or "unknown")),
         "Executable available: " .. tostring(current.available == true),
         "Follower active: " .. tostring(current.follower_active == true),
@@ -590,7 +590,7 @@ function onIpc(event, _payload)
     elseif event == "diagnose" then
         onRunDiagnostics()
     else
-        noctalia.log("voxtype-suite details panel: unknown command '" .. tostring(event) .. "'")
+        noctalia.log("nocvox details panel: unknown command '" .. tostring(event) .. "'")
     end
 end
 

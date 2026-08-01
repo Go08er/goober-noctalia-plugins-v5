@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static contract checks for the conservative VoxType Suite MVP."""
+"""Static contract checks for the conservative NocVox MVP."""
 
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ def check_translation_tree(value: object, location: str = "") -> None:
         check_translation_tree(child, f"{location}{key}.")
 
 
-assert MANIFEST["id"] == "goober/voxtype-suite"
-assert MANIFEST["name"] == "VoxType Suite"
+assert MANIFEST["id"] == "goober/nocvox"
+assert MANIFEST["name"] == "NocVox"
 assert MANIFEST["plugin_api"] == 17
 assert len(MANIFEST.get("service", [])) == 1
 assert MANIFEST["service"][0] == {"id": "listener", "entry": "service.luau"}
@@ -40,11 +40,14 @@ assert len(MANIFEST.get("widget", [])) == 1
 assert len(MANIFEST.get("panel", [])) == 1
 
 widget = MANIFEST["widget"][0]
+assert widget["id"] == "nocvox"
 widget_settings = {setting["key"]: setting for setting in widget["setting"]}
 assert widget["actions"]["middle"] == "none"
 assert widget_settings["left_action"]["default"] == "toggle"
 assert widget_settings["middle_action"]["default"] == "cancel"
 assert widget_settings["right_action"]["default"] == "cancel"
+for glyph_key in ("idle_glyph", "active_glyph", "stopped_glyph", "unknown_glyph"):
+    assert widget_settings[glyph_key]["type"] == "glyph"
 
 root_settings = {setting["key"]: setting for setting in MANIFEST.get("setting", [])}
 assert root_settings["enable_one_shot_overrides"]["default"] is False
@@ -93,4 +96,4 @@ assert LUAU["panel.luau"].count("noctalia.copyToClipboard(") == 1
 assert "Clipboard and paste are one-shot VoxType output destinations only" in json.dumps(TRANSLATIONS)
 assert "absolute path is validated and shell-quoted" in json.dumps(TRANSLATIONS)
 
-print("VoxType Suite static contract checks passed")
+print("NocVox static contract checks passed")

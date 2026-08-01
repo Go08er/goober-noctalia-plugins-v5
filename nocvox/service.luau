@@ -1,5 +1,5 @@
 --!nonstrict
--- VoxType Suite's singleton listener/control service.
+-- NocVox's singleton listener/control service.
 --
 -- This entry is a companion to an independently managed VoxType daemon. It
 -- owns one read-only status follower and launches only `voxtype record ...`
@@ -107,7 +107,7 @@ local function setFailure(message, shouldNotify)
         detail = noctalia.tr("errors.action_failed")
     end
     current.last_error = detail
-    noctalia.log("voxtype-suite: " .. detail)
+    noctalia.log("nocvox: " .. detail)
     publish()
     if shouldNotify then
         notifyFailure(detail)
@@ -647,7 +647,7 @@ function onIpc(event, _payload)
         return
     end
     if event ~= "toggle" and event ~= "start" and event ~= "stop" and event ~= "cancel" and event ~= "diagnose" then
-        noctalia.log("voxtype-suite service: unknown command '" .. tostring(event) .. "'")
+        noctalia.log("nocvox service: unknown command '" .. tostring(event) .. "'")
         return
     end
     -- Direct plugin IPC is not a producer on the shared state channel. Keep it

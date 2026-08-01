@@ -2,21 +2,30 @@
 
 All notable staging changes will be recorded here.
 
-## Wallpaper Director 0.1.0 - Hub MVP
+## Wall-in-One 0.2.0 - Live/static coordination preview
 
-- Add an API 17 singleton routing service, three-button bar widget, attached
-  configuration/diagnostics panel, and left/right Control Center shortcut.
-- Detect enabled Wallhaven and W Engine providers asynchronously while keeping
-  native wallpaper selection and fixed next/previous/random IPC available.
-- Persist schema-versioned gesture mappings atomically, retain saved unavailable
-  actions, and fail disabled instead of replacing corrupt user data.
-- Preserve ownership boundaries: this phase never launches
-  `linux-wallpaperengine`, reads W Engine private state, suppresses Noctalia's
-  wallpaper surface, or starts a competing scheduler.
-- Stage pairing, generated stills, curated reels, and mixed live/static policy
-  behind future Noctalia lifecycle and W Engine adapter work.
+- Rename the early wallpaper hub and its plugin, widget, panel, service, and
+  Control Center IDs to `goober/wall-in-one`.
+- Discover Wallhaven, W Engine, mpvpaper, and an optional open-only provider,
+  while retaining Noctalia's native selector and next/previous/random routes.
+- Route only documented provider panels and service commands; providers retain
+  ownership of their renderers, files, and scheduling.
+- Export full-resolution stills from a configured video or a configured W Engine
+  Workshop project into a selected directory. Video projects use FFmpeg;
+  scene/web projects use their preview until a cooperative capture adapter is
+  present.
+- Pair an exported still through `setWallpaper` so Noctalia persists a real
+  image for its backdrop, hooks, lock-screen fallback, and wallpaper-derived
+  colors while the dynamic provider remains active.
+- Add selectable color-scheme synchronization and an optional palette-output
+  leader for Noctalia's single global palette. Preserve explicit lock-screen
+  wallpaper overrides instead of rewriting them.
+- Define a versioned, opt-in W Engine status/capture handshake for rendered
+  stills while keeping current upstream W Engine on safe video/preview fallback.
+  Do not inspect process arguments or provider-private state, start a second
+  renderer, or start a competing rotation scheduler.
 
-## VoxType Suite 0.1.0 - Companion MVP
+## NocVox 0.1.0 - Companion MVP
 
 - Add an API 17 singleton listener for the extended VoxType status stream with
   live idle, recording, streaming, transcribing, stopped, and unknown states.

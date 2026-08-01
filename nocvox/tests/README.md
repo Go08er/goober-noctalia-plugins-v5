@@ -1,10 +1,10 @@
-# VoxType Suite test record
+# NocVox test record
 
 The automated check is intentionally local and non-mutating:
 
 ```bash
-python3 voxtype-suite/tests/check.py
-noctalia plugins lint voxtype-suite
+python3 nocvox/tests/check.py
+noctalia plugins lint nocvox
 ```
 
 It verifies the entry IDs, API level, default `toggle / cancel / cancel`

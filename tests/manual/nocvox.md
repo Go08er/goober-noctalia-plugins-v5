@@ -1,4 +1,4 @@
-# VoxType Suite manual test
+# NocVox manual test
 
 Target: Noctalia 5.0.0-beta.7 or newer and VoxType 0.7.5. VoxType must already
 be configured and its daemon must remain owned by the user's normal service or
@@ -7,7 +7,7 @@ session configuration.
 ## Safety setup
 
 1. Record the daemon PID and service state before enabling the plugin.
-2. Add two `goober/voxtype-suite:voxtype` placements with visibly different
+2. Add two `goober/nocvox:nocvox` placements with visibly different
    labels, glyphs, colors, and gesture mappings.
 3. Keep transition notifications off for the first pass.
 
@@ -62,5 +62,5 @@ poll the clipboard, scrape notifications, or retain unrelated clipboard data.
    original daemon PID and service state remain unchanged.
 
 The deterministic headless equivalent is
-[`tests/vm/voxtype.nix`](../vm/voxtype.nix). Once exported by the flake, run it
-as `nix build -L .#vm-test-voxtype`.
+[`tests/vm/nocvox.nix`](../vm/nocvox.nix). Once exported by the flake, run it
+as `nix build -L .#vm-test-nocvox`.

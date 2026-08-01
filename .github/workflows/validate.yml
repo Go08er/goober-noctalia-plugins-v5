@@ -33,5 +33,5 @@ jobs:
       - name: Validate source
         run: |
           python3 tools/validate.py --require-shellcheck
-          python3 voxtype-suite/tests/check.py
-          python3 wallpaper-director/tests/test_contract.py
+          python3 nocvox/tests/check.py
+          python3 wall-in-one/tests/test_contract.py
