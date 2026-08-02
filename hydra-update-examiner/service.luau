@@ -1,9 +1,9 @@
 --!nonstrict
 -- Singleton Hydra polling service for Noctalia v5.
 --
--- The proven v4 shell helper remains the backend for this first port. This
--- service owns process lifecycle, settings, cooldowns, stale-result handling,
--- and the state channel consumed by every widget placement.
+-- The request-budgeted shell helper remains the network backend. This service
+-- owns process lifecycle, settings, cooldowns, stale-result handling, and the
+-- state channel consumed by every widget placement.
 
 local STATUS_KEY = "hydra_status"
 local COMMAND_KEY = "hydra_command"
@@ -20,15 +20,20 @@ local REQUIRED_COMMANDS = {
     "sed",
     "head",
     "tr",
-    "cut",
     "date",
     "cat",
+    "flock",
+    "mkdir",
+    "mv",
+    "rm",
     "timeout",
 }
 local SUCCESS_STATES = { running = true, close = true, stalled = true, launched = true }
 
 local inFlight = false
+local activeForceNetwork = false
 local pendingRefresh = false
+local pendingForceNetwork = false
 local configGeneration = 0
 local lastStartedAt = 0
 local sequence = 0
@@ -71,6 +76,9 @@ local function copyStatus(source)
         stale = source.stale,
         error = source.error,
         updated_at = source.updated_at,
+        poll_state = source.poll_state,
+        observed_at = source.observed_at,
+        stale_age_seconds = source.stale_age_seconds,
         last_good_state = source.last_good_state,
         last_good_tooltip = source.last_good_tooltip,
     }
@@ -98,6 +106,9 @@ local function initialStatus()
         stale = false,
         error = "",
         updated_at = "",
+        poll_state = "idle",
+        observed_at = 0,
+        stale_age_seconds = 0,
         last_good_state = "",
         last_good_tooltip = "",
     }
@@ -120,10 +131,19 @@ local function publishError(message)
         status.loading = false
         status.stale = true
         status.error = detail
+        status.poll_state = "stale"
+        local observedAt = tonumber(status.observed_at) or 0
+        local now = nowSeconds()
+        if observedAt > 0 and now >= observedAt then
+            status.stale_age_seconds = now - observedAt
+        end
+        local ageMinutes = math.floor((tonumber(status.stale_age_seconds) or 0) / 60)
         status.last_good_state = tostring(lastGoodStatus.state or "")
         status.last_good_tooltip = tostring(lastGoodStatus.tooltip or "")
         status.tooltip = tostring(lastGoodStatus.tooltip or noctalia.tr("widget.unavailable"))
             .. "\n\n"
+            .. noctalia.tr("widget.last_known_age", { minutes = ageMinutes })
+            .. "\n"
             .. noctalia.tr("widget.refresh_failed")
             .. "\n"
             .. detail
@@ -141,6 +161,9 @@ local function publishError(message)
         stale = false,
         error = detail,
         updated_at = "",
+        poll_state = "error",
+        observed_at = 0,
+        stale_age_seconds = 0,
         last_good_state = "",
         last_good_tooltip = "",
     })
@@ -184,6 +207,13 @@ local function missingCommand()
 end
 
 local function inferState(data)
+    -- The helper exposes polling lifecycle separately from presentation. A
+    -- paused result still renders with the same v4-compatible visual state.
+    local presentation = tostring(data.presentationState or data.presentation_state or "")
+    if SUCCESS_STATES[presentation] or presentation == "error" then
+        return presentation
+    end
+
     local declared = tostring(data.state or "")
     if
         declared == "running"
@@ -193,6 +223,12 @@ local function inferState(data)
         or declared == "error"
     then
         return declared
+    end
+    if declared == "published-paused" then
+        return "launched"
+    end
+    if declared == "stale" then
+        return "stale"
     end
 
     local text = tostring(data.text or "")
@@ -219,18 +255,39 @@ end
 local function normalizeResult(data)
     local text = tostring(data.text or "HYD")
     local tooltip = tostring(data.tooltip or noctalia.tr("widget.unavailable"))
+    local rawState = tostring(data.pollState or data.poll_state or data.state or "")
+    local state = inferState(data)
+    local stale = data.stale == true or tostring(data.state or "") == "stale"
+    if stale then
+        state = "stale"
+    end
+    local presentationState = tostring(
+        data.presentationState
+            or data.presentation_state
+            or data.lastGoodState
+            or data.last_good_state
+            or ""
+    )
+    if not SUCCESS_STATES[presentationState] then
+        presentationState = if SUCCESS_STATES[state] then state else ""
+    end
     return {
-        state = inferState(data),
+        state = state,
         text = text,
         tooltip = tooltip,
         url = tostring(data.url or ""),
         channel = tostring(data.channel or selectedChannel() or ""),
         loading = false,
-        stale = false,
-        error = "",
-        updated_at = noctalia.formatTime("%H:%M:%S"),
-        last_good_state = "",
-        last_good_tooltip = "",
+        stale = stale,
+        error = tostring(data.error or ""),
+        -- A stale helper payload already carries a precise age in its tooltip.
+        -- Do not label the failed refresh itself as the update time.
+        updated_at = if stale then "" else noctalia.formatTime("%H:%M:%S"),
+        poll_state = rawState,
+        observed_at = tonumber(data.observedAt or data.observed_at) or 0,
+        stale_age_seconds = math.max(0, tonumber(data.staleAgeSeconds or data.stale_age_seconds) or 0),
+        last_good_state = if stale then presentationState else "",
+        last_good_tooltip = if stale then tostring(data.lastGoodTooltip or data.last_good_tooltip or tooltip) else "",
     }
 end
 
@@ -238,14 +295,24 @@ local function runPendingRefresh()
     if not pendingRefresh then
         return
     end
+    local forceNetwork = pendingForceNetwork
     pendingRefresh = false
-    refresh(true)
+    pendingForceNetwork = false
+    refresh(true, forceNetwork)
 end
 
-refresh = function(force)
+refresh = function(force, forceNetwork)
     if inFlight then
         if force then
+            -- Duplicate widget placements can emit the same IPC command in a
+            -- burst. One already-forced fetch satisfies all of them.
+            if forceNetwork and activeForceNetwork then
+                return
+            end
             pendingRefresh = true
+            if forceNetwork then
+                pendingForceNetwork = true
+            end
         end
         return
     end
@@ -280,7 +347,7 @@ refresh = function(force)
     end
 
     local threshold = closeThreshold()
-    local shellCommand = table.concat({
+    local commandParts = {
         "timeout",
         "55s",
         "bash",
@@ -289,9 +356,14 @@ refresh = function(force)
         shellQuote(channel),
         "--close-threshold",
         shellQuote(tostring(threshold)),
-    }, " ")
+    }
+    if forceNetwork then
+        table.insert(commandParts, "--force-refresh")
+    end
+    local shellCommand = table.concat(commandParts, " ")
 
     inFlight = true
+    activeForceNetwork = forceNetwork == true
     lastStartedAt = now
     local generation = configGeneration
     publishLoading()
@@ -300,10 +372,12 @@ refresh = function(force)
     -- Keep the inner 55s GNU timeout as the backend's deterministic deadline.
     local launched = noctalia.runAsync(shellCommand, function(result)
         inFlight = false
+        activeForceNetwork = false
 
         if generation ~= configGeneration then
             pendingRefresh = false
-            refresh(true)
+            pendingForceNetwork = false
+            refresh(true, false)
             return
         end
 
@@ -346,8 +420,24 @@ refresh = function(force)
             publishError(status.tooltip)
         else
             publishStatus(status)
-            if status.state ~= "error" then
+            if SUCCESS_STATES[status.state] then
                 lastGoodStatus = copyStatus(status)
+            elseif
+                status.state == "stale"
+                and lastGoodStatus == nil
+                and SUCCESS_STATES[status.last_good_state]
+            then
+                -- A fresh service process can receive a stale disk-cache
+                -- result before it has an in-memory success. Reconstruct the
+                -- underlying good status so a later service-level error does
+                -- not blank the widget.
+                lastGoodStatus = copyStatus(status)
+                lastGoodStatus.state = status.last_good_state
+                lastGoodStatus.tooltip = status.last_good_tooltip or status.tooltip
+                lastGoodStatus.stale = false
+                lastGoodStatus.error = ""
+                lastGoodStatus.poll_state = "restored"
+                lastGoodStatus.stale_age_seconds = 0
             end
         end
         runPendingRefresh()
@@ -355,6 +445,7 @@ refresh = function(force)
 
     if not launched then
         inFlight = false
+        activeForceNetwork = false
         publishError(noctalia.tr("widget.command_failed"))
     end
 end
@@ -384,7 +475,7 @@ local function openHydra()
 end
 
 function update()
-    refresh(false)
+    refresh(false, false)
 end
 
 function onConfigChanged()
@@ -400,15 +491,16 @@ function onConfigChanged()
     if inFlight then
         pendingRefresh = true
     else
-        refresh(true)
+        refresh(true, false)
     end
 end
 
 function onIpc(event, _payload)
     if event == "refresh" then
-        refresh(false)
+        -- A user refresh keeps the click cooldown but bypasses helper TTLs.
+        refresh(false, true)
     elseif event == "force-refresh" then
-        refresh(true)
+        refresh(true, true)
     elseif event == "open" then
         openHydra()
     elseif event == "status" and lastStatus ~= nil then
@@ -436,13 +528,18 @@ if type(existing) == "table" and existing.protocol == STATUS_PROTOCOL and existi
     elseif
         existing.state == "stale"
         and SUCCESS_STATES[existing.last_good_state]
-        and tostring(existing.updated_at or "") ~= ""
+        and (
+            tostring(existing.updated_at or "") ~= ""
+            or (tonumber(existing.observed_at) or 0) > 0
+        )
     then
         lastGoodStatus = copyStatus(existing)
         lastGoodStatus.state = existing.last_good_state
         lastGoodStatus.tooltip = existing.last_good_tooltip or existing.tooltip
         lastGoodStatus.stale = false
         lastGoodStatus.error = ""
+        lastGoodStatus.poll_state = "restored"
+        lastGoodStatus.stale_age_seconds = 0
     end
 else
     publishStatus(initialStatus())
@@ -456,4 +553,4 @@ noctalia.state.watch(COMMAND_KEY, function(command)
 end)
 noctalia.state.set(READY_KEY, true)
 
-refresh(true)
+refresh(true, false)

@@ -63,6 +63,7 @@
     "documentation_failed": "Could not open the plugin documentation.",
     "empty_custom_channel": "Choose an exact channel or select a channel preset.",
     "invalid_json": "Hydra status command returned invalid JSON.",
+    "last_known_age": "Last known status: {minutes} minute(s) old.",
     "loading": "Refreshing Hydra channel status...",
     "missing_backend": "The Hydra helper is missing from this plugin.",
     "missing_dependency": "Missing required command: {command}",

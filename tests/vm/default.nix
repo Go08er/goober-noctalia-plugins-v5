@@ -48,7 +48,11 @@ let
           printf '%s\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           ;;
         "https://hydra.nixos.org/jobset/nixos/unstable/evals")
-          printf '%s\n' '<a href="/eval/4242">evaluation 4242</a>'
+          if [[ "$accept_json" -eq 1 ]]; then
+            printf '%s\n' '{"evals":[{"id":4242,"jobsetevalinputs":{"nixpkgs":{"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}]}'
+          else
+            printf '%s\n' '<a href="/eval/4242">evaluation 4242</a>'
+          fi
           ;;
         "https://hydra.nixos.org/eval/4242")
           if [[ "$accept_json" -eq 1 ]]; then
@@ -102,6 +106,7 @@ let
     pkgs.gawk
     pkgs.gnused
     pkgs.coreutils
+    pkgs.util-linux
   ];
   noctaliaRuntimePackages = pluginRuntimePackages ++ [ pkgs.git ];
   pluginRuntimePath = lib.makeBinPath pluginRuntimePackages;
@@ -399,7 +404,7 @@ pkgs.testers.runNixOSTest (
       ).strip() == "ok: dispatched 2"
 
       machine.wait_until_succeeds(
-          "grep -Fx 'https://hydra.nixos.org/build/9001/constituents' "
+          "grep -Fx 'https://hydra.nixos.org/eval/4242' "
           "/tmp/noctalia-vm-curl.log"
       )
       machine.wait_until_succeeds(
@@ -414,7 +419,8 @@ pkgs.testers.runNixOSTest (
           "bash ${materializedPluginRoot}/scripts/hydra-channel-progress "
           "--channel nixos-unstable | "
           "${lib.getExe pkgs.jq} -e "
-          "'.state == \"launched\" and .text == \"Launched\"'"
+          "'.state == \"published-paused\" and "
+          ".presentationState == \"launched\" and .text == \"Launched\"'"
       )
 
       # The headless Sway backend has no physical pointer. Exercise the exact
@@ -499,8 +505,12 @@ pkgs.testers.runNixOSTest (
       ).strip() == "ok: dispatched 2"
       machine.wait_until_succeeds(
           "test $(grep -Fc "
-          "'https://hydra.nixos.org/build/9001/constituents' "
+          "'https://hydra.nixos.org/jobset/nixos/unstable/evals' "
           "/tmp/noctalia-vm-curl.log) -ge 2"
+      )
+      machine.fail(
+          "grep -F 'https://hydra.nixos.org/build/9001/constituents' "
+          "/tmp/noctalia-vm-curl.log"
       )
 
       screenshot = "/tmp/noctalia-hydra-vm.png"
