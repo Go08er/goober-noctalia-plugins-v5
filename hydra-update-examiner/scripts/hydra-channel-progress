@@ -214,6 +214,10 @@ age_is_due() {
   (( timestamp <= 0 || now < timestamp || now - timestamp >= ttl ))
 }
 
+# No conditional-request validators are sent.  The candidate list, eval HTML,
+# gate JSON, and constituent JSON were probed and none return ETag or
+# Last-Modified, so there is nothing to echo back with If-None-Match and no 304
+# path to adopt.  Request volume is controlled by the cache TTLs instead.
 fetch_url() {
   local timeout_seconds="$1"
   local accept="$2"
@@ -902,6 +906,8 @@ refresh_gate() {
   starttime="$(jq -r '.starttime // 0' <<< "$json" 2>/dev/null || true)"
   nixname="$(jq -r '.nixname // empty' <<< "$json" 2>/dev/null || true)"
   [[ "$build_id" =~ ^[0-9]+$ ]] || build_id=0
+  # Hydra's OpenAPI contract types `finished` as a boolean, but the live gate
+  # endpoint returns the numeric form.  Accept both rather than trusting either.
   case "$build_finished" in
     1|true) build_finished=1 ;;
     0|false) build_finished=0 ;;
