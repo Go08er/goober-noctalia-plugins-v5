@@ -19,8 +19,16 @@ local MAX_QUERY_BYTES = 80
 local MAX_QUEUE = 8
 local MAX_CACHE_SEARCHES = 8
 local MAX_CACHE_DETAILS = 48
+local MAX_CACHE_BYTES = 2 * 1024 * 1024
+local MAX_HTML_RESPONSE_BYTES = 1024 * 1024
+local MAX_PROVIDER_SIDECAR_BYTES = 64 * 1024
 local REQUEST_DELAY_MS = 1000
 local DOWNLOAD_TIMEOUT_SECONDS = 45
+local MANAGED_DOWNLOAD_SUFFIX = "/Wall-in-One/MotionBGS"
+local MANAGED_DIRECTORY_MARKER = ".wall-in-one-motionbgs-managed.json"
+local MANAGED_DIRECTORY_MARKER_CONTENT =
+    '{"schema":1,"owner":"goober/wall-in-one","provider":"MotionBGS","deletion_authority":"adjacent .motionbgs.json sidecar required"}\n'
+local MAX_MANAGED_MARKER_BYTES = #MANAGED_DIRECTORY_MARKER_CONTENT
 
 local sequence = 0
 local operationSequence = 0
@@ -130,11 +138,25 @@ local function validAbsolutePath(value)
         and not value:match("/%.%.$")
 end
 
-local function configuredDownloadDirectory()
-    local configured = settingString("motionbgs_download_directory", "")
-    if configured == "" then
-        configured = settingString("video_directory", "")
+local function readBoundedRegularFile(path, maximumBytes)
+    maximumBytes = math.floor(tonumber(maximumBytes) or 0)
+    if not validAbsolutePath(path) or maximumBytes < 1 then
+        return nil
     end
+    local info = noctalia.fileInfo(path)
+    local expectedBytes = type(info) == "table" and math.floor(tonumber(info.size) or 0) or 0
+    if type(info) ~= "table" or info.isDir == true or expectedBytes < 1 or expectedBytes > maximumBytes then
+        return nil
+    end
+    local raw = noctalia.readFile(path)
+    if type(raw) ~= "string" or #raw ~= expectedBytes or #raw > maximumBytes then
+        return nil
+    end
+    return raw
+end
+
+local function configuredDirectory(key)
+    local configured = settingString(key, "")
     if configured == "" then
         return ""
     end
@@ -143,6 +165,20 @@ local function configuredDownloadDirectory()
         return ""
     end
     return directory:gsub("/+$", "")
+end
+
+local function configuredDownloadDirectory()
+    if settingString("motionbgs_download_directory", "") ~= "" then
+        -- An invalid explicit override fails closed; it must never silently
+        -- redirect a download into the managed default.
+        return configuredDirectory("motionbgs_download_directory")
+    end
+    local videoRoot = configuredDirectory("video_directory")
+    return if videoRoot == "" then "" else videoRoot .. MANAGED_DOWNLOAD_SUFFIX
+end
+
+local function usesManagedDownloadDirectory()
+    return settingString("motionbgs_download_directory", "") == ""
 end
 
 local function cacheTtlSeconds()
@@ -167,6 +203,58 @@ local function providerAvailable()
         and status.curl_available
         and status.helper_available
         and cacheDirectory ~= ""
+end
+
+local function writeManagedDirectoryMarker(directory)
+    local marker = directory .. "/" .. MANAGED_DIRECTORY_MARKER
+    if noctalia.fileExists(marker) then
+        local current = readBoundedRegularFile(marker, MAX_MANAGED_MARKER_BYTES)
+        if current ~= MANAGED_DIRECTORY_MARKER_CONTENT then
+            return false, "the managed MotionBGS directory marker is invalid"
+        end
+        return true, nil
+    end
+
+    local temporary = marker .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, MANAGED_DIRECTORY_MARKER_CONTENT)
+    if wrote ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(writeError or "could not write the managed MotionBGS directory marker")
+    end
+    local installed, installError = noctalia.renameFile(temporary, marker)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or "could not install the managed MotionBGS directory marker")
+    end
+    return true, nil
+end
+
+local function prepareDownloadDirectory()
+    local directory = configuredDownloadDirectory()
+    if directory == "" then
+        return "", "Select a Wall-in-One video directory or an explicit MotionBGS download directory first"
+    end
+    if not usesManagedDownloadDirectory() then
+        return directory, nil
+    end
+    if not providerAvailable() then
+        return "", "MotionBGS integration is disabled or its local scraper requirements are unavailable"
+    end
+
+    local videoRoot = configuredDirectory("video_directory")
+    local rootInfo = videoRoot ~= "" and noctalia.fileInfo(videoRoot) or nil
+    if type(rootInfo) ~= "table" or rootInfo.isDir ~= true then
+        return "", "The selected Wall-in-One video directory does not exist"
+    end
+    local made, makeError = noctalia.mkdirAll(directory)
+    if made ~= true then
+        return "", tostring(makeError or "could not create the managed MotionBGS download directory")
+    end
+    local marked, markerError = writeManagedDirectoryMarker(directory)
+    if marked ~= true then
+        return "", markerError
+    end
+    return directory, nil
 end
 
 local function publishStatus()
@@ -662,7 +750,7 @@ local function saveCache()
         return false
     end
     local encoded, encodeError = noctalia.json.encode(cache, true)
-    if type(encoded) ~= "string" or #encoded > 2 * 1024 * 1024 then
+    if type(encoded) ~= "string" or #encoded > MAX_CACHE_BYTES then
         status.last_error_kind = "cache"
         status.last_error = bounded(encodeError or "MotionBGS cache exceeded its safe size", 320)
         return false
@@ -689,8 +777,8 @@ local function loadCache()
     if cachePath == "" or not noctalia.fileExists(cachePath) then
         return
     end
-    local raw = noctalia.readFile(cachePath)
-    if type(raw) ~= "string" or #raw > 2 * 1024 * 1024 then
+    local raw = readBoundedRegularFile(cachePath, MAX_CACHE_BYTES)
+    if type(raw) ~= "string" or #raw > MAX_CACHE_BYTES then
         return
     end
     local decoded = noctalia.json.decode(raw)
@@ -836,10 +924,10 @@ local function finishNetworkOperation(operation)
 end
 
 local function performSearch(operation, transport)
-    local raw, readError = noctalia.readFile(transport.path)
+    local raw = readBoundedRegularFile(transport.path, MAX_HTML_RESPONSE_BYTES)
     noctalia.removeFile(transport.path)
-    if type(raw) ~= "string" or #raw > 1024 * 1024 then
-        failNonce(operation.nonce, "search", "local-io", readError or "search response could not be read safely")
+    if type(raw) ~= "string" then
+        failNonce(operation.nonce, "search", "local-io", "search response could not be read safely")
         return
     end
     local items, kind, parseError = parseSearchHtml(raw, operation.limit)
@@ -895,14 +983,14 @@ local function enqueueDownload(operation, detail)
 end
 
 local function performDetails(operation, transport)
-    local raw, readError = noctalia.readFile(transport.path)
+    local raw = readBoundedRegularFile(transport.path, MAX_HTML_RESPONSE_BYTES)
     noctalia.removeFile(transport.path)
-    if type(raw) ~= "string" or #raw > 1024 * 1024 then
+    if type(raw) ~= "string" then
         failNonce(
             operation.nonce,
             operation.after_download and "download" or "details",
             "local-io",
-            readError or "detail response could not be read safely"
+            "detail response could not be read safely"
         )
         return
     end
@@ -946,8 +1034,11 @@ local function validatedDownloadPath(operation, transport)
         or (suffix ~= nil and #suffix <= 4 and tonumber(suffix) ~= nil and tonumber(suffix) <= 9999)
     local info = validAbsolutePath(path) and noctalia.fileInfo(path) or nil
     local sidecarPath = path .. ".motionbgs.json"
-    local sidecarRaw = noctalia.fileExists(sidecarPath) and noctalia.readFile(sidecarPath) or nil
-    local sidecar = type(sidecarRaw) == "string" and #sidecarRaw <= 64 * 1024 and noctalia.json.decode(sidecarRaw)
+    local sidecarRaw = validAbsolutePath(path) and readBoundedRegularFile(sidecarPath, MAX_PROVIDER_SIDECAR_BYTES)
+        or nil
+    local sidecar = type(sidecarRaw) == "string"
+            and #sidecarRaw <= MAX_PROVIDER_SIDECAR_BYTES
+            and noctalia.json.decode(sidecarRaw)
         or nil
     local bytes = tonumber(transport.bytes) or 0
     local maximumBytes = (tonumber(operation.download_limit_mb) or 0) * 1024 * 1024
@@ -967,7 +1058,9 @@ local function validatedDownloadPath(operation, transport)
         or (tonumber(transport.status) or 0) >= 300
         or type(sidecar) ~= "table"
         or tonumber(sidecar.schema) ~= 1
+        or sidecar.plugin ~= "goober/wall-in-one"
         or sidecar.provider ~= "MotionBGS"
+        or sidecar.path ~= path
         or sidecar.source_page ~= BASE_URL .. "/" .. tostring(operation.slug or "")
         or sidecar.download_url ~= transport.effective_url
         or sidecar.quality ~= operation.quality
@@ -1027,13 +1120,13 @@ local function launchOperation(operation)
             .. " "
             .. shellQuote(operation.response_path)
     elseif operation.kind == "download" then
-        local directory = configuredDownloadDirectory()
+        local directory, directoryError = prepareDownloadDirectory()
         if directory == "" then
             failNonce(
                 operation.nonce,
                 "download",
                 "configuration",
-                "Select a MotionBGS download directory (or Wall-in-One video directory) first"
+                directoryError
             )
             return false
         end
@@ -1292,6 +1385,13 @@ local function initializeStorage()
     end
     cachePath = cacheDirectory .. "/cache-v1.json"
     loadCache()
+    if usesManagedDownloadDirectory() then
+        -- This is deliberately separate from pluginDataDir()/motionbgs, which
+        -- stores only bounded HTML metadata. Do not create a media directory
+        -- until the integration is enabled, curl/helper storage is ready, and
+        -- the user-selected video root exists.
+        prepareDownloadDirectory()
+    end
 end
 
 function update()
@@ -1300,6 +1400,10 @@ end
 
 function onConfigChanged()
     status.curl_available = noctalia.commandExists("curl")
+    status.helper_available = helperPath ~= "" and noctalia.fileExists(helperPath)
+    if usesManagedDownloadDirectory() then
+        prepareDownloadDirectory()
+    end
     if not providerAvailable() then
         local invalidated = invalidateOperations("MotionBGS integration was disabled or became unavailable", false)
         if not invalidated then

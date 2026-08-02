@@ -4,36 +4,70 @@
 -- External provider processes remain provider-owned. Wall-in-One may also own
 -- an explicitly selected internal renderer through renderer.luau. The
 -- coordinator keeps Noctalia's static wallpaper surface enabled, pairs every
--- live item with a real still, and owns the one mixed static/live schedule.
+-- live item with a real still, and coordinates named playlists plus
+-- independent per-output schedules.
 
-local CONFIG_SCHEMA = 2
-local RUNTIME_SCHEMA = 3
+local CONFIG_SCHEMA = 4
+local RUNTIME_SCHEMA = 6
 local UPDATE_INTERVAL_MS = 2000
 local PROVIDER_PROBE_SECONDS = 30
 local NOTIFY_COOLDOWN_SECONDS = 10
 local ADAPTER_PROBE_GRACE_MS = 10000
 local MAX_PROJECT_JSON_BYTES = 256 * 1024
 local MAX_STORAGE_BYTES = 8 * 1024 * 1024
-local MAX_REEL_ENTRIES = 512
+local MAX_MANAGED_MARKER_BYTES = 16 * 1024
+local MAX_MANAGED_SIDECAR_BYTES = 64 * 1024
+local MAX_PLAYLISTS = 128
+local MAX_PAIRINGS = 1024
+local MAX_PLAYLIST_ENTRIES = 512
+local MAX_TOTAL_PLAYLIST_ENTRIES = 4096
+local MAX_SCHEDULES_PER_OUTPUT = 32
+local MAX_TOTAL_SCHEDULES = 512
+local MAX_PLAYLIST_RUNS = 4096
+local MAX_HISTORY_ENTRIES = 64
 local MAX_LIBRARY_CANDIDATES = 1024
 local LIBRARY_SCAN_BATCH = 4
 local MAX_RUNTIME_OUTPUTS = 64
 local MAX_PAIR_REGISTRY_ENTRIES = 1024
 local MAX_PERSISTED_PATH_BYTES = 4096
+local MAX_PERSISTED_NAME_BYTES = 160
+local MAX_WORKSHOP_ID_BYTES = 24
+local MAX_ADAPTER_PAYLOAD_BYTES = 512
+local ADAPTER_FIELD_COUNT = 3
 local MIN_CYCLE_SECONDS = 60
 local MAX_CYCLE_SECONDS = 30 * 24 * 60 * 60
+local RENDERER_CRASH_BACKOFF_SECONDS = { 10, 20, 40, 80, 160, 300 }
+local RENDERER_CRASH_STABLE_SECONDS = MIN_CYCLE_SECONDS
+local MANAGED_PARENT_DIRECTORY = "Wall-in-One"
+local MANAGED_WALLHAVEN_DIRECTORY = "Wallhaven"
+local MANAGED_AUTOMATIC_STILLS_DIRECTORY = "Automatic Stills"
+local MANAGED_MOTIONBGS_DIRECTORY = "MotionBGS"
+local MANAGED_MARKER_NAME = ".managed-by-wall-in-one-v1.json"
+local MANAGED_SIDECAR_SUFFIX = ".wall-in-one.json"
+local STORAGE_TRANSACTION_NAME = ".schema-3-6-transaction.json"
+local WALLPAPER_ENGINE_APP_ID = "431960"
+local WALLPAPER_ENGINE_WORKSHOP_URL = "https://steamcommunity.com/app/431960/workshop/"
 
-local SERVICE_NONCE = (tostring(noctalia.nowMs()) .. "-" .. tostring({})):gsub("[^%w%-]", "")
+local SERVICE_NONCE = (tostring(noctalia.nowMs()) .. "-" .. tostring({})):gsub("[^%w%-]", ""):sub(1, 40)
 
 local STATUS_KEY = "wall_in_one_status"
 local COMMAND_KEY = "wall_in_one_command"
 local COMMAND_ACK_KEY = "wall_in_one_command_ack"
+local CONFIG_STATE_KEY = "wall_in_one_config_state_v1"
+local RUNTIME_STATE_KEY = "wall_in_one_runtime_state_v1"
+local LIBRARY_STATE_KEY = "wall_in_one_library_state_v1"
 local RENDERER_COMMAND_KEY = "wall_in_one_renderer_command_v1"
 local RENDERER_STATUS_KEY = "wall_in_one_renderer_status_v1"
 local MOTIONBGS_COMMAND_KEY = "wall_in_one_motionbgs_command_v1"
 local MOTIONBGS_STATUS_KEY = "wall_in_one_motionbgs_status_v1"
 local MOTIONBGS_RESULTS_KEY = "wall_in_one_motionbgs_results_v1"
+local PALETTES_COMMAND_KEY = "wall_in_one_palettes_command_v1"
+local PALETTES_STATUS_KEY = "wall_in_one_palettes_status_v1"
+local WALLHAVEN_COMMAND_KEY = "wall_in_one_wallhaven_command_v1"
+local WALLHAVEN_STATUS_KEY = "wall_in_one_wallhaven_status_v1"
+local WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"
 local MOTIONBGS_URL = "https://motionbgs.com/"
+local WALLHAVEN_URL = "https://wallhaven.cc/"
 
 local WALLHAVEN_ID = "noctalia/wallhaven"
 local W_ENGINE_ID = "tadomika_ari/w-engine"
@@ -82,16 +116,48 @@ local VALID_COLOR_SCHEMES = {
     muted = true,
 }
 
+local BUILTIN_PALETTES = {
+    Ayu = true,
+    Catppuccin = true,
+    Dracula = true,
+    Eldritch = true,
+    Gruvbox = true,
+    Kanagawa = true,
+    Noctalia = true,
+    Nord = true,
+    ["Rosé Pine"] = true,
+    ["Tokyo-Night"] = true,
+}
+
+local VALID_THEME_MODES = {
+    dark = true,
+    light = true,
+    auto = true,
+    inherit = true,
+}
+
+local VALID_PALETTE_SOURCES = {
+    wallpaper = true,
+    builtin = true,
+    community = true,
+    custom = true,
+    inherit = true,
+}
+
 local VALID_BACKENDS = {
     auto = true,
     external = true,
     internal = true,
 }
 
-local VALID_CYCLE_ORDERS = {
-    sequential = true,
+local VALID_INTERNAL_LAYERS = {
+    background = true,
+    bottom = true,
+}
+
+local VALID_PLAYLIST_ORDERS = {
+    rotate = true,
     shuffle = true,
-    random = true,
 }
 
 local VALID_ENTRY_KINDS = {
@@ -100,12 +166,32 @@ local VALID_ENTRY_KINDS = {
     workshop = true,
 }
 
+local SUPPORTED_IMAGE_EXTENSIONS = {
+    [".png"] = true,
+    [".jpg"] = true,
+    [".jpeg"] = true,
+    [".webp"] = true,
+    [".avif"] = true,
+    [".gif"] = true,
+}
+
+local SUPPORTED_VIDEO_EXTENSIONS = {
+    [".mp4"] = true,
+    [".mkv"] = true,
+    [".webm"] = true,
+    [".mov"] = true,
+    [".avi"] = true,
+    [".m4v"] = true,
+    [".gif"] = true,
+}
+
 local VALID_ACTIONS = {
     native_open = true,
     native_next = true,
     native_previous = true,
     native_random = true,
     wallhaven_open = true,
+    wallhaven_site = true,
     motionbgs_open = true,
     w_engine_open = true,
     w_engine_next = true,
@@ -140,7 +226,30 @@ local VALID_ACTIONS = {
     extra_provider_open = true,
     hub_open = true,
     no_action = true,
+    playback_pause = true,
+    playback_resume = true,
+    playback_toggle = true,
+    playback_stop = true,
+    playback_stop_all = true,
+    audio_mute = true,
+    audio_unmute = true,
+    audio_toggle = true,
+    audio_volume_down = true,
+    audio_volume_up = true,
+    audio_set_volume = true,
+    steam_launch = true,
+    steam_workshop = true,
 }
+
+-- Parameterized IPC actions are intentionally kept out of gesture settings.
+-- A click has no place to carry the requested volume, while the explicit
+-- `audio-volume <0..100> [output]` IPC route does.
+local VALID_GESTURE_ACTIONS = {}
+for action in pairs(VALID_ACTIONS) do
+    if action ~= "audio_set_volume" then
+        VALID_GESTURE_ACTIONS[action] = true
+    end
+end
 
 local WORKSHOP_PATHS = {
     "~/.steam/steam/steamapps/workshop/content/431960/",
@@ -153,11 +262,13 @@ local WORKSHOP_PATHS = {
 local config = {
     schema_version = CONFIG_SCHEMA,
     gestures = {
-        left = "native_open",
-        middle = "wallhaven_open",
-        right = "w_engine_open",
+        left = "hub_open",
+        middle = "native_open",
+        right = "native_next",
     },
-    reels = {},
+    pairings = {},
+    playlists = {},
+    outputs = {},
 }
 
 local runtime = {
@@ -165,8 +276,16 @@ local runtime = {
     providers = {},
     pairs = {},
     pair_registry = {},
-    cycles = {},
+    runs = {},
+    output_states = {},
+    current_workshops = {},
     last_capture = {},
+    palette = {
+        authority_output = "",
+        requested = {},
+        applied = {},
+        last_error = "",
+    },
     observed_at = "",
     last_error = "",
 }
@@ -178,7 +297,14 @@ local providers = {
     probed_at = "",
     noctalia_cli = noctalia.commandExists("noctalia"),
     native = { available = true },
-    wallhaven = { allowed = true, plugin_enabled = false, available = false, version = "" },
+    wallhaven = {
+        allowed = true,
+        plugin_enabled = false,
+        available = false,
+        site_available = noctalia.commandExists("xdg-open"),
+        site_url = WALLHAVEN_URL,
+        version = "",
+    },
     w_engine = {
         allowed = true,
         plugin_enabled = false,
@@ -196,11 +322,16 @@ local providers = {
         adapter_seen_ms = 0,
         adapter_probe_ms = 0,
         current = {},
+        internal_current = {},
+        steam_available = noctalia.commandExists("steam") or noctalia.commandExists("xdg-open"),
+        steam_workshop_available = noctalia.commandExists("xdg-open"),
+        steam_app_id = WALLPAPER_ENGINE_APP_ID,
+        steam_workshop_url = WALLPAPER_ENGINE_WORKSHOP_URL,
     },
     mpvpaper = {
         allowed = true,
         plugin_enabled = false,
-        command_available = noctalia.commandExists("mpvpaper") and noctalia.commandExists("mpv"),
+        command_available = noctalia.commandExists("mpvpaper"),
         internal_available = false,
         effective_backend = "none",
         apply_available = false,
@@ -233,12 +364,26 @@ local providers = {
 
 local colors = {
     probing = false,
+    mode = "",
     source = "",
     scheme = "",
     error = "",
 }
 
+local palettesStatus = {
+    ready = false,
+    busy = false,
+    builtin = {},
+    wallpaper = {},
+    community = {},
+    custom = {},
+    last_error = "",
+}
+local wallhavenStatus = { ready = false, busy = false, last_error = "" }
+local wallhavenResults = { items = {}, selected = {} }
+
 local library = {
+    stills = {},
     videos = {},
     workshops = {},
     scanned_at = "",
@@ -246,6 +391,9 @@ local library = {
     scanning = false,
 }
 local libraryScan = nil
+local managedDirectoryError = ""
+local libraryRefreshPending = false
+local libraryRootsSignature = ""
 
 local configValid = true
 local runtimeValid = true
@@ -254,7 +402,13 @@ local runtimeError = ""
 local lastActionError = ""
 local lastActionAt = ""
 local statusSequence = 0
+local domainPublications = {
+    config = { key = CONFIG_STATE_KEY, revision = 0, dirty = true },
+    runtime = { key = RUNTIME_STATE_KEY, revision = 0, dirty = true },
+    library = { key = LIBRARY_STATE_KEY, revision = 0, dirty = true },
+}
 local providerProbeInFlight = false
+local providerProbePending = false
 local colorProbeInFlight = false
 local providerSignature = ""
 local lastProviderProbeAt = 0
@@ -264,37 +418,64 @@ local captureInFlight = {}
 local activeCaptureRequests = {}
 local captureQueued = {}
 local adapterCaptureQueued = {}
+local internalCaptureQueued = {}
+local internalCaptureIntent = {}
 local captureSequence = 0
 local pendingAdapterCaptures = {}
+local pendingInternalCaptures = {}
 local rendererStatus = { ready = false, outputs = {}, last_error = "" }
+local rendererStatusInstance = ""
+local rendererStatusRevision = -1
+local rendererLegacySignature = ""
 local motionBgsStatus = { available = false, busy = false, last_error = "" }
 local motionBgsResults = { items = {}, selected = {} }
 local rendererCommandSequence = 0
 local motionBgsCommandSequence = 0
+local palettesCommandSequence = 0
+local wallhavenCommandSequence = 0
 local cycleApplying = {}
 local cycleGeneration = {}
 local applyGeneration = {}
+local scheduleClockSignature = ""
+local paletteAuthorityOutput = ""
+local paletteAuthorityGeneration = 0
+local lastStatusSignature = ""
 local rendererPending = {}
 local rendererStopping = {}
-local lastMotionDownloadPath = ""
+local rendererExitState = {}
+local lastMotionDownloadFingerprint = ""
+local lastWallhavenDownloadFingerprint = ""
+local postApplyQueue = {}
+local wallpaperApplyInFlight = nil
+local wallpaperApplyQueued = {}
+local scheduledBatchActive = false
+local startupRestoreQueue = {}
 local backendGeneration = { w_engine = 0, mpvpaper = 0 }
 local backendPolicySignature = { w_engine = "", mpvpaper = "" }
+local wallInOne = {}
 
-local runCapture
-local requestRenderedCapture
-local refreshLibrary
-local reconcileRendererOwnership
-local invalidateCycleIntent
+-- Core settings, paths, and bounded value helpers ---------------------------
+
 
 -- Clear readiness before installing the command watch. Clients retain a
 -- gesture while a service hot reload is in progress.
-noctalia.state.set(STATUS_KEY, { ready = false })
+noctalia.state.set(STATUS_KEY, {
+    protocol = 4,
+    instance_id = SERVICE_NONCE,
+    sequence = 0,
+    ready = false,
+    domains = {
+        config = { key = CONFIG_STATE_KEY, revision = 0 },
+        runtime = { key = RUNTIME_STATE_KEY, revision = 0 },
+        library = { key = LIBRARY_STATE_KEY, revision = 0 },
+    },
+})
 
-local function nowSeconds()
+function wallInOne.nowSeconds()
     return tonumber(noctalia.formatTime("%s")) or 0
 end
 
-local function commandFailureDetail(result)
+function wallInOne.commandFailureDetail(result)
     if type(result) ~= "table" then
         return ""
     end
@@ -309,7 +490,7 @@ local function commandFailureDetail(result)
     return detail
 end
 
-local function boundedDetail(value)
+function wallInOne.boundedDetail(value)
     local detail = noctalia.string.trim(tostring(value or "")):gsub("[%c]", " ")
     if #detail > 320 then
         detail = detail:sub(1, 320)
@@ -317,11 +498,48 @@ local function boundedDetail(value)
     return detail
 end
 
-local function shellQuote(value)
+function wallInOne.completedDownloadFingerprint(providerStatus)
+    if
+        type(providerStatus) ~= "table"
+        or providerStatus.busy == true
+        or tostring(providerStatus.last_action or "") ~= "download"
+        or tostring(providerStatus.last_error or "") ~= ""
+    then
+        return "", ""
+    end
+    local download = providerStatus.last_download
+    local path = type(download) == "table" and tostring(download.path or "") or ""
+    local nonce = tonumber(providerStatus.last_completed_nonce)
+    if path == "" or nonce == nil or nonce < 1 or nonce ~= math.floor(nonce) then
+        return "", path
+    end
+    -- Completion nonce distinguishes a fresh download from the same path being
+    -- reported again after its previous managed copy was deleted.
+    return tostring(math.floor(nonce)) .. ":" .. tostring(#path) .. ":" .. path, path
+end
+
+function wallInOne.readBoundedRegularFile(path, maximumBytes)
+    maximumBytes = math.floor(tonumber(maximumBytes) or 0)
+    if type(path) ~= "string" or path == "" or maximumBytes < 1 then
+        return nil
+    end
+    local info = noctalia.fileInfo(path)
+    local expectedBytes = type(info) == "table" and math.floor(tonumber(info.size) or 0) or 0
+    if type(info) ~= "table" or info.isDir == true or expectedBytes < 1 or expectedBytes > maximumBytes then
+        return nil
+    end
+    local raw = noctalia.readFile(path)
+    if type(raw) ~= "string" or #raw ~= expectedBytes or #raw > maximumBytes then
+        return nil
+    end
+    return raw
+end
+
+function wallInOne.shellQuote(value)
     return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
 end
 
-local function knownOutputName(candidate)
+function wallInOne.knownOutputName(candidate)
     if type(candidate) ~= "string" or candidate == "" then
         return nil
     end
@@ -333,14 +551,14 @@ local function knownOutputName(candidate)
     return nil
 end
 
-local function targetOutput(candidate)
+function wallInOne.targetOutput(candidate)
     if candidate ~= nil and tostring(candidate) ~= "" then
-        return knownOutputName(candidate)
+        return wallInOne.knownOutputName(candidate)
     end
-    return knownOutputName(noctalia.focusedOutputName())
+    return wallInOne.knownOutputName(noctalia.focusedOutputName())
 end
 
-local function settingString(key, fallback)
+function wallInOne.settingString(key, fallback)
     local value = noctalia.getConfig(key)
     if type(value) ~= "string" or value:find("%S") == nil then
         return fallback
@@ -348,7 +566,7 @@ local function settingString(key, fallback)
     return value
 end
 
-local function settingBool(key, fallback)
+function wallInOne.settingBool(key, fallback)
     local value = noctalia.getConfig(key)
     if type(value) == "boolean" then
         return value
@@ -356,34 +574,42 @@ local function settingBool(key, fallback)
     return fallback
 end
 
-local function settingInt(key, fallback, minimum, maximum)
+function wallInOne.settingInt(key, fallback, minimum, maximum)
     local value = math.floor(tonumber(noctalia.getConfig(key)) or fallback)
     return math.max(minimum, math.min(maximum, value))
 end
 
-local function configuredColorScheme()
-    local scheme = settingString("color_scheme", "m3-content")
+function wallInOne.configuredColorScheme()
+    local scheme = wallInOne.settingString("color_scheme", "m3-content")
     if not VALID_COLOR_SCHEMES[scheme] then
         return "m3-content"
     end
     return scheme
 end
 
-local function configuredBackend(key)
-    local value = settingString(key, "auto")
+function wallInOne.configuredBackend(key)
+    local value = wallInOne.settingString(key, "auto")
     return if VALID_BACKENDS[value] then value else "auto"
 end
 
-local function configuredCycleOrder()
-    local value = settingString("cycle_order", "sequential")
-    return if VALID_CYCLE_ORDERS[value] then value else "sequential"
+function wallInOne.configuredInternalLayer()
+    local value = wallInOne.settingString("internal_renderer_layer", "bottom")
+    return if VALID_INTERNAL_LAYERS[value] then value else "bottom"
 end
 
-local function configuredCycleSeconds()
-    return settingInt("cycle_interval_minutes", 15, 1, 43200) * 60
+function wallInOne.configuredPlaylistOrder()
+    local value = wallInOne.settingString("cycle_order", "sequential")
+    if value == "shuffle" then
+        return "shuffle"
+    end
+    return "rotate"
 end
 
-local function normalizedDirectory(value)
+function wallInOne.configuredCycleSeconds()
+    return wallInOne.settingInt("cycle_interval_minutes", 15, 1, 43200) * 60
+end
+
+function wallInOne.normalizedDirectory(value)
     if
         type(value) ~= "string"
         or value == ""
@@ -400,11 +626,11 @@ local function normalizedDirectory(value)
     return value:gsub("/+$", "")
 end
 
-local function captureDirectory()
-    local configured = settingString("capture_directory", "")
+function wallInOne.captureDirectory()
+    local configured = wallInOne.settingString("capture_directory", "")
     local directory = ""
     if configured == "" then
-        local wallpaperDirectory = normalizedDirectory(noctalia.wallpaperDirectory())
+        local wallpaperDirectory = wallInOne.normalizedDirectory(noctalia.wallpaperDirectory())
         if wallpaperDirectory ~= nil then
             directory = wallpaperDirectory
         else
@@ -417,90 +643,186 @@ local function captureDirectory()
         directory = noctalia.expandPath(configured)
     end
 
-    return normalizedDirectory(directory) or ""
+    return wallInOne.normalizedDirectory(directory) or ""
 end
 
-local function videoDirectory()
-    local configured = settingString("video_directory", "")
-    local directory = if configured == "" then captureDirectory() else noctalia.expandPath(configured)
-    return normalizedDirectory(directory) or ""
+function wallInOne.videoDirectory()
+    local configured = wallInOne.settingString("video_directory", "")
+    local directory = if configured == "" then wallInOne.captureDirectory() else noctalia.expandPath(configured)
+    return wallInOne.normalizedDirectory(directory) or ""
 end
 
-local function configuredVideoSource()
-    local value = settingString("video_source", "")
+function wallInOne.managedChildDirectory(root, child)
+    root = wallInOne.normalizedDirectory(root)
+    if root == nil then
+        return ""
+    end
+    return root .. "/" .. MANAGED_PARENT_DIRECTORY .. "/" .. child
+end
+
+function wallInOne.wallhavenManagedDirectory()
+    return wallInOne.managedChildDirectory(wallInOne.captureDirectory(), MANAGED_WALLHAVEN_DIRECTORY)
+end
+
+function wallInOne.automaticStillDirectory()
+    return wallInOne.managedChildDirectory(wallInOne.captureDirectory(), MANAGED_AUTOMATIC_STILLS_DIRECTORY)
+end
+
+function wallInOne.motionBgsManagedDirectory()
+    local reported = type(motionBgsStatus) == "table" and tostring(motionBgsStatus.download_directory or "") or ""
+    local normalized = wallInOne.normalizedDirectory(reported)
+    if normalized ~= nil then
+        return normalized
+    end
+    return wallInOne.managedChildDirectory(wallInOne.videoDirectory(), MANAGED_MOTIONBGS_DIRECTORY)
+end
+
+function wallInOne.ensureManagedDirectory(directory, kind)
+    directory = wallInOne.normalizedDirectory(directory)
+    if directory == nil then
+        return false, noctalia.tr("errors.managed_directory")
+    end
+    local made, makeError = noctalia.mkdirAll(directory)
+    if made ~= true then
+        return false, tostring(makeError or noctalia.tr("errors.managed_directory"))
+    end
+
+    local markerPath = directory .. "/" .. MANAGED_MARKER_NAME
+    if noctalia.fileExists(markerPath) then
+        local raw = wallInOne.readBoundedRegularFile(markerPath, MAX_MANAGED_MARKER_BYTES)
+        local marker = type(raw) == "string" and #raw <= MAX_MANAGED_MARKER_BYTES and noctalia.json.decode(raw) or nil
+        if
+            type(marker) ~= "table"
+            or tonumber(marker.schema) ~= 1
+            or marker.plugin ~= "goober/wall-in-one"
+            or marker.kind ~= kind
+        then
+            return false, noctalia.tr("errors.managed_marker")
+        end
+        return true, nil
+    end
+
+    local marker = {
+        schema = 1,
+        plugin = "goober/wall-in-one",
+        kind = kind,
+        ownership = "managed",
+    }
+    local encoded, encodeError = noctalia.json.encode(marker, true)
+    if type(encoded) ~= "string" then
+        return false, tostring(encodeError or noctalia.tr("errors.encode"))
+    end
+    local temporary = markerPath .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, encoded .. "\n")
+    if wrote ~= true then
+        return false, tostring(writeError or noctalia.tr("errors.write"))
+    end
+    local installed, installError = noctalia.renameFile(temporary, markerPath)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or noctalia.tr("errors.install"))
+    end
+    return true, nil
+end
+
+function wallInOne.ensureImageManagedDirectories()
+    local errors = {}
+    for _, entry in ipairs({
+        { path = wallInOne.wallhavenManagedDirectory(), kind = "wallhaven" },
+        { path = wallInOne.automaticStillDirectory(), kind = "automatic-stills" },
+    }) do
+        local ok, errorMessage = wallInOne.ensureManagedDirectory(entry.path, entry.kind)
+        if not ok then
+            table.insert(errors, tostring(errorMessage or entry.path))
+        end
+    end
+    return #errors == 0, table.concat(errors, "; ")
+end
+
+function wallInOne.configuredVideoSource()
+    local value = wallInOne.settingString("video_source", "")
     return if value == "" then "" else noctalia.expandPath(value)
 end
 
-local function configuredManualPair()
-    local value = settingString("manual_pair_file", "")
+function wallInOne.configuredManualPair()
+    local value = wallInOne.settingString("manual_pair_file", "")
     return if value == "" then "" else noctalia.expandPath(value)
 end
 
-local function configuredWorkshopId()
-    local value = settingString("workshop_id", "")
-    return if value:match("^%d+$") ~= nil then value else ""
+function wallInOne.validWorkshopId(value)
+    local id = tostring(value or "")
+    return id:match("^%d+$") ~= nil and #id <= MAX_WORKSHOP_ID_BYTES
 end
 
-local function normalizedExtraPanel()
-    local panelId = settingString("extra_provider_panel", "")
+function wallInOne.configuredWorkshopId()
+    local value = wallInOne.settingString("workshop_id", "")
+    return if wallInOne.validWorkshopId(value) then value else ""
+end
+
+function wallInOne.normalizedExtraPanel()
+    local panelId = wallInOne.settingString("extra_provider_panel", "")
     if panelId == "" or panelId:match("^[%w_.-]+/[%w_.-]+:[%w_.-]+$") == nil then
         return "", ""
     end
     return panelId, panelId:match("^([^:]+):") or ""
 end
 
-local function settingsSnapshot()
+function wallInOne.settingsSnapshot()
     return {
-        use_wallhaven = settingBool("use_wallhaven", true),
-        use_w_engine = settingBool("use_w_engine", true),
-        use_mpvpaper = settingBool("use_mpvpaper", true),
-        use_motionbgs = settingBool("use_motionbgs", true),
-        use_extra_provider = settingBool("use_extra_provider", true),
-        w_engine_backend = configuredBackend("w_engine_backend"),
-        mpvpaper_backend = configuredBackend("mpvpaper_backend"),
-        capture_directory = captureDirectory(),
-        video_directory = videoDirectory(),
-        motionbgs_download_directory = settingString("motionbgs_download_directory", ""),
-        motionbgs_result_limit = settingInt("motionbgs_result_limit", 24, 1, 24),
-        motionbgs_cache_minutes = settingInt("motionbgs_cache_minutes", 30, 5, 1440),
-        motionbgs_max_download_mb = settingInt("motionbgs_max_download_mb", 256, 16, 512),
-        motionbgs_quality = if settingString("motionbgs_quality", "hd") == "4k" then "4k" else "hd",
-        auto_capture = settingBool("auto_capture", false),
-        pair_static = settingBool("pair_static", true),
-        sync_colors = settingBool("sync_colors", false),
-        color_scheme = configuredColorScheme(),
-        palette_output = settingString("palette_output", ""),
-        video_source = configuredVideoSource(),
-        manual_pair_file = configuredManualPair(),
-        workshop_id = configuredWorkshopId(),
-        workshop_directory = settingString("workshop_directory", ""),
-        video_frame_second = settingInt("video_frame_second", 1, 0, 3600),
-        scene_screenshot_delay = settingInt("scene_screenshot_delay", 15, 1, 120),
-        w_engine_scaling = settingString("w_engine_scaling", "fill"),
-        w_engine_fps = settingInt("w_engine_fps", 30, 1, 240),
-        w_engine_volume = settingInt("w_engine_volume", 0, 0, 100),
-        w_engine_silent = settingBool("w_engine_silent", true),
-        w_engine_clamp = settingString("w_engine_clamp", "border"),
-        w_engine_noautomute = settingBool("w_engine_noautomute", false),
-        w_engine_no_audio_processing = settingBool("w_engine_no_audio_processing", false),
-        w_engine_disable_particles = settingBool("w_engine_disable_particles", false),
-        w_engine_disable_mouse = settingBool("w_engine_disable_mouse", false),
-        w_engine_disable_parallax = settingBool("w_engine_disable_parallax", false),
-        w_engine_no_fullscreen_pause = settingBool("w_engine_no_fullscreen_pause", false),
-        w_engine_fullscreen_pause_only_active = settingBool("w_engine_fullscreen_pause_only_active", false),
-        mpv_mute = settingBool("mpv_mute", true),
-        mpv_hardware_decode = settingBool("mpv_hardware_decode", true),
-        mpv_auto_pause = settingBool("mpv_auto_pause", true),
-        mpv_auto_pause_mode = settingString("mpv_auto_pause_mode", "FULL"),
-        mpv_options = settingString("mpv_options", ""),
-        cycle_interval_minutes = settingInt("cycle_interval_minutes", 15, 1, 43200),
-        cycle_order = configuredCycleOrder(),
-        cycle_start_on_load = settingBool("cycle_start_on_load", false),
+        use_wallhaven = wallInOne.settingBool("use_wallhaven", true),
+        use_w_engine = wallInOne.settingBool("use_w_engine", true),
+        use_mpvpaper = wallInOne.settingBool("use_mpvpaper", true),
+        use_motionbgs = wallInOne.settingBool("use_motionbgs", true),
+        use_extra_provider = wallInOne.settingBool("use_extra_provider", true),
+        w_engine_backend = wallInOne.configuredBackend("w_engine_backend"),
+        mpvpaper_backend = wallInOne.configuredBackend("mpvpaper_backend"),
+        internal_renderer_layer = wallInOne.configuredInternalLayer(),
+        capture_directory = wallInOne.captureDirectory(),
+        video_directory = wallInOne.videoDirectory(),
+        motionbgs_download_directory = wallInOne.settingString("motionbgs_download_directory", ""),
+        motionbgs_result_limit = wallInOne.settingInt("motionbgs_result_limit", 24, 1, 24),
+        motionbgs_cache_minutes = wallInOne.settingInt("motionbgs_cache_minutes", 30, 5, 1440),
+        motionbgs_max_download_mb = wallInOne.settingInt("motionbgs_max_download_mb", 256, 16, 512),
+        motionbgs_quality = if wallInOne.settingString("motionbgs_quality", "hd") == "4k" then "4k" else "hd",
+        image_directory = wallInOne.captureDirectory(),
+        wallhaven_managed_directory = wallInOne.wallhavenManagedDirectory(),
+        automatic_stills_directory = wallInOne.automaticStillDirectory(),
+        motionbgs_managed_directory = wallInOne.motionBgsManagedDirectory(),
+        auto_capture = wallInOne.settingBool("auto_capture", true),
+        sync_colors = wallInOne.settingBool("sync_colors", false),
+        color_scheme = wallInOne.configuredColorScheme(),
+        palette_output = wallInOne.settingString("palette_output", ""),
+        video_source = wallInOne.configuredVideoSource(),
+        manual_pair_file = wallInOne.configuredManualPair(),
+        workshop_id = wallInOne.configuredWorkshopId(),
+        workshop_directory = wallInOne.settingString("workshop_directory", ""),
+        video_frame_second = wallInOne.settingInt("video_frame_second", 1, 0, 3600),
+        scene_screenshot_delay = wallInOne.settingInt("scene_screenshot_delay", 15, 1, 120),
+        w_engine_scaling = wallInOne.settingString("w_engine_scaling", "fill"),
+        w_engine_fps = wallInOne.settingInt("w_engine_fps", 30, 1, 240),
+        w_engine_volume = wallInOne.settingInt("w_engine_volume", 0, 0, 100),
+        w_engine_silent = wallInOne.settingBool("w_engine_silent", true),
+        w_engine_clamp = wallInOne.settingString("w_engine_clamp", "border"),
+        w_engine_noautomute = wallInOne.settingBool("w_engine_noautomute", false),
+        w_engine_no_audio_processing = wallInOne.settingBool("w_engine_no_audio_processing", false),
+        w_engine_disable_particles = wallInOne.settingBool("w_engine_disable_particles", false),
+        w_engine_disable_mouse = wallInOne.settingBool("w_engine_disable_mouse", false),
+        w_engine_disable_parallax = wallInOne.settingBool("w_engine_disable_parallax", false),
+        w_engine_no_fullscreen_pause = wallInOne.settingBool("w_engine_no_fullscreen_pause", false),
+        w_engine_fullscreen_pause_only_active = wallInOne.settingBool("w_engine_fullscreen_pause_only_active", false),
+        mpv_mute = wallInOne.settingBool("mpv_mute", true),
+        mpv_hardware_decode = wallInOne.settingBool("mpv_hardware_decode", true),
+        mpv_auto_pause = wallInOne.settingBool("mpv_auto_pause", true),
+        mpv_auto_pause_mode = wallInOne.settingString("mpv_auto_pause_mode", "FULL"),
+        mpv_options = wallInOne.settingString("mpv_options", ""),
+        cycle_interval_minutes = wallInOne.settingInt("cycle_interval_minutes", 15, 1, 43200),
+        cycle_order = wallInOne.configuredPlaylistOrder(),
+        cycle_start_on_load = wallInOne.settingBool("cycle_start_on_load", false),
         extra_provider_panel = providers.extra.panel,
     }
 end
 
-local function storagePath(name)
+function wallInOne.storagePath(name)
     local directory, errorMessage = noctalia.pluginDataDir()
     if type(directory) ~= "string" or directory == "" then
         return nil, tostring(errorMessage or noctalia.tr("errors.data_directory"))
@@ -508,7 +830,7 @@ local function storagePath(name)
     return directory .. "/" .. name, nil
 end
 
-local function cloneGestures(source)
+function wallInOne.cloneGestures(source)
     local gestures = type(source) == "table" and source or {}
     return {
         left = tostring(gestures.left or ""),
@@ -517,11 +839,56 @@ local function cloneGestures(source)
     }
 end
 
-local function validPersistedKey(value)
-    return type(value) == "string" and value ~= "" and #value <= 160 and value:find("[%c]") == nil
+function wallInOne.validPersistedKey(value)
+    return type(value) == "string"
+        and value ~= ""
+        and #value <= MAX_PERSISTED_NAME_BYTES
+        and value:find("[%c]") == nil
 end
 
-local function normalizedEntry(candidate)
+function wallInOne.validAbsolutePath(value)
+    return type(value) == "string"
+        and value:sub(1, 1) == "/"
+        and #value <= MAX_PERSISTED_PATH_BYTES
+        and value:find("[%c]") == nil
+end
+
+function wallInOne.stableIdentifier(prefix, seed, ordinal)
+    local raw = tostring(seed or "")
+    local slug = raw:lower():gsub("[^%w]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
+    if slug == "" then
+        slug = "item"
+    end
+    slug = slug:sub(1, 48)
+    local hash = 2166136261
+    for index = 1, #raw do
+        hash = (hash * 16777619 + raw:byte(index)) % 2147483647
+    end
+    return table.concat({ prefix, slug, tostring(math.floor(tonumber(ordinal) or 0)), tostring(hash) }, "-"):sub(
+        1,
+        MAX_PERSISTED_NAME_BYTES
+    )
+end
+
+-- Persisted playlist/runtime schemas and migration --------------------------
+
+function wallInOne.uniqueIdentifier(used, preferred)
+    local base = tostring(preferred or ""):sub(1, MAX_PERSISTED_NAME_BYTES)
+    if not wallInOne.validPersistedKey(base) then
+        return nil
+    end
+    local candidate = base
+    local suffix = 2
+    while used[candidate] == true do
+        local tail = "-" .. tostring(suffix)
+        candidate = base:sub(1, MAX_PERSISTED_NAME_BYTES - #tail) .. tail
+        suffix += 1
+    end
+    used[candidate] = true
+    return candidate
+end
+
+function wallInOne.normalizedLegacyEntry(candidate)
     if type(candidate) ~= "table" then
         return nil
     end
@@ -531,7 +898,7 @@ local function normalizedEntry(candidate)
         return nil
     end
     if kind == "workshop" then
-        if source:match("^%d+$") == nil then
+        if not wallInOne.validWorkshopId(source) then
             return nil
         end
     elseif source:sub(1, 1) ~= "/" then
@@ -544,68 +911,543 @@ local function normalizedEntry(candidate)
     then
         return nil
     end
-    local label = boundedDetail(candidate.label or "")
+    local label = wallInOne.boundedDetail(candidate.label or "")
     return {
         kind = kind,
         source = source,
         still_path = stillPath,
         label = label,
-        added_at = boundedDetail(candidate.added_at or ""),
+        added_at = wallInOne.boundedDetail(candidate.added_at or ""),
     }
 end
 
-local function normalizedReels(candidate)
+function wallInOne.legacyThemePolicy()
+    if wallInOne.settingBool("sync_colors", false) then
+        return { mode = "auto", source = "wallpaper", selection = wallInOne.configuredColorScheme() }
+    end
+    return { mode = "inherit", source = "inherit", selection = "" }
+end
+
+function wallInOne.normalizedTheme(candidate)
     if type(candidate) ~= "table" then
         return nil
     end
-    local reels = {}
-    local outputCount = 0
-    for output, value in pairs(candidate) do
-        outputCount += 1
-        if not validPersistedKey(output) or type(value) ~= "table" or type(value.entries) ~= "table" then
-            return nil
-        end
-        if outputCount > MAX_RUNTIME_OUTPUTS then
-            return nil
-        end
-        local entries = {}
-        if #value.entries > MAX_REEL_ENTRIES then
-            return nil
-        end
-        for _, rawEntry in ipairs(value.entries) do
-            local entry = normalizedEntry(rawEntry)
-            if entry == nil then
-                return nil
-            end
-            table.insert(entries, entry)
-        end
-        local interval = math.floor(tonumber(value.interval_seconds) or configuredCycleSeconds())
-        interval = math.max(MIN_CYCLE_SECONDS, math.min(MAX_CYCLE_SECONDS, interval))
-        local order = tostring(value.order or configuredCycleOrder())
-        reels[output] = {
-            interval_seconds = interval,
-            order = if VALID_CYCLE_ORDERS[order] then order else configuredCycleOrder(),
-            entries = entries,
-        }
+    local mode = tostring(candidate.mode or "")
+    local source = tostring(candidate.source or "")
+    local selection = tostring(candidate.selection or "")
+    if not VALID_THEME_MODES[mode] or not VALID_PALETTE_SOURCES[source] then
+        return nil
     end
-    return reels
+    if mode == "inherit" or source == "inherit" then
+        if mode ~= "inherit" or source ~= "inherit" then
+            return nil
+        end
+        return { mode = "inherit", source = "inherit", selection = "" }
+    end
+    if not wallInOne.validPersistedKey(selection) then
+        return nil
+    end
+    if source == "wallpaper" and not VALID_COLOR_SCHEMES[selection] then
+        return nil
+    elseif source == "builtin" and not BUILTIN_PALETTES[selection] then
+        return nil
+    end
+    return { mode = mode, source = source, selection = selection }
 end
 
-local function validateConfig(candidate)
+function wallInOne.normalizedMedia(candidate)
+    if candidate == nil then
+        return nil, true
+    end
+    if type(candidate) ~= "table" then
+        return nil, false
+    end
+    local kind = tostring(candidate.kind or "")
+    local source = tostring(candidate.source or "")
+    if kind == "video" and wallInOne.validAbsolutePath(source) then
+        return { kind = "video", source = source }, true
+    elseif kind == "workshop" and wallInOne.validWorkshopId(source) then
+        return { kind = "workshop", source = source }, true
+    end
+    return nil, false
+end
+
+function wallInOne.normalizedStill(candidate, hasDynamicMedia)
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local mode = tostring(candidate.mode or "")
+    if mode == "automatic" and hasDynamicMedia then
+        return { mode = "automatic" }
+    elseif mode == "selected" and wallInOne.validAbsolutePath(tostring(candidate.path or "")) then
+        return { mode = "selected", path = tostring(candidate.path) }
+    end
+    return nil
+end
+
+function wallInOne.normalizedEntryBundle(candidate)
+    if type(candidate) ~= "table" or not wallInOne.validPersistedKey(candidate.id) then
+        return nil
+    end
+    local label = noctalia.string.trim(tostring(candidate.label or ""))
+    if not wallInOne.validPersistedKey(label) then
+        return nil
+    end
+    local media, mediaValid = wallInOne.normalizedMedia(candidate.media)
+    if not mediaValid then
+        return nil
+    end
+    local still = wallInOne.normalizedStill(candidate.still, media ~= nil)
+    local theme = wallInOne.normalizedTheme(candidate.theme)
+    if still == nil or theme == nil then
+        return nil
+    end
+    local normalized = {
+        id = tostring(candidate.id),
+        label = label,
+        media = media,
+        still = still,
+        theme = theme,
+        added_at = wallInOne.boundedDetail(candidate.added_at or ""),
+    }
+    if candidate.pairing_id ~= nil and tostring(candidate.pairing_id or "") ~= "" then
+        if not wallInOne.validPersistedKey(candidate.pairing_id) then
+            return nil
+        end
+        normalized.pairing_id = tostring(candidate.pairing_id)
+    end
+    return normalized
+end
+
+function wallInOne.bundleSignature(candidate)
+    local media = type(candidate.media) == "table" and candidate.media or {}
+    local still = type(candidate.still) == "table" and candidate.still or {}
+    local theme = type(candidate.theme) == "table" and candidate.theme or {}
+    local function field(value)
+        local text = tostring(value or "")
+        return tostring(#text) .. ":" .. text
+    end
+    return table.concat({
+        field(candidate.label),
+        field(media.kind),
+        field(media.source),
+        field(still.mode),
+        field(still.path),
+        field(theme.mode),
+        field(theme.source),
+        field(theme.selection),
+    }, "|")
+end
+
+function wallInOne.pairingFromEntry(entry, pairingId)
+    return {
+        id = pairingId,
+        label = entry.label,
+        media = type(entry.media) == "table" and {
+            kind = entry.media.kind,
+            source = entry.media.source,
+        } or nil,
+        still = if entry.still.mode == "selected"
+            then { mode = "selected", path = entry.still.path }
+            else { mode = "automatic" },
+        theme = {
+            mode = entry.theme.mode,
+            source = entry.theme.source,
+            selection = entry.theme.selection,
+        },
+        added_at = entry.added_at,
+    }
+end
+
+function wallInOne.normalizedPairings(candidate)
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local pairings = {}
+    local count = 0
+    for id, rawPairing in pairs(candidate) do
+        count += 1
+        local pairing = wallInOne.normalizedEntryBundle(rawPairing)
+        if
+            count > MAX_PAIRINGS
+            or not wallInOne.validPersistedKey(id)
+            or pairing == nil
+            or pairing.id ~= id
+        then
+            return nil
+        end
+        pairing.pairing_id = nil
+        pairings[id] = pairing
+    end
+    return pairings
+end
+
+function wallInOne.reconcilePlaylistPairings(playlists, pairings, createMissing)
+    local usedIds = {}
+    local signatureIds = {}
+    local pairingIds = {}
+    for id in pairs(pairings) do
+        usedIds[id] = true
+        table.insert(pairingIds, id)
+    end
+    table.sort(pairingIds)
+    for _, id in ipairs(pairingIds) do
+        local signature = wallInOne.bundleSignature(pairings[id])
+        if signatureIds[signature] == nil then
+            signatureIds[signature] = id
+        end
+    end
+
+    local playlistIds = {}
+    for id in pairs(playlists) do
+        table.insert(playlistIds, id)
+    end
+    table.sort(playlistIds)
+    local pairingCount = wallInOne.countMap(pairings)
+    local ordinal = pairingCount
+    for _, playlistId in ipairs(playlistIds) do
+        local playlist = playlists[playlistId]
+        for _, entry in ipairs(playlist.entries) do
+            local pairingId = tostring(entry.pairing_id or "")
+            if pairingId ~= "" and pairings[pairingId] == nil then
+                entry.pairing_id = nil
+                pairingId = ""
+            end
+            if pairingId == "" and createMissing == true then
+                local signature = wallInOne.bundleSignature(entry)
+                pairingId = tostring(signatureIds[signature] or "")
+                if pairingId == "" and pairingCount < MAX_PAIRINGS then
+                    ordinal += 1
+                    pairingId = wallInOne.uniqueIdentifier(
+                        usedIds,
+                        wallInOne.stableIdentifier("pairing", signature, ordinal)
+                    ) or ""
+                    if pairingId ~= "" then
+                        pairings[pairingId] = wallInOne.pairingFromEntry(entry, pairingId)
+                        signatureIds[signature] = pairingId
+                        pairingCount += 1
+                    end
+                end
+                if pairingId ~= "" then
+                    entry.pairing_id = pairingId
+                end
+            end
+        end
+    end
+    return pairings
+end
+
+function wallInOne.legacyEntryBundle(candidate, output, index, usedIds)
+    local legacy = wallInOne.normalizedLegacyEntry(candidate)
+    if legacy == nil then
+        return nil
+    end
+    local id = wallInOne.uniqueIdentifier(usedIds, wallInOne.stableIdentifier("entry", output .. ":" .. legacy.kind .. ":" .. legacy.source, index))
+    if id == nil then
+        return nil
+    end
+    local media = nil
+    local still = nil
+    if legacy.kind == "static" then
+        still = { mode = "selected", path = legacy.source }
+    else
+        media = { kind = legacy.kind, source = legacy.source }
+        still = if legacy.still_path == ""
+            then { mode = "automatic" }
+            else { mode = "selected", path = legacy.still_path }
+    end
+    return {
+        id = id,
+        label = if wallInOne.validPersistedKey(legacy.label) then legacy.label else legacy.source:match("([^/]+)$") or legacy.source,
+        media = media,
+        still = still,
+        theme = wallInOne.legacyThemePolicy(),
+        added_at = legacy.added_at,
+    }
+end
+
+function wallInOne.normalizedPlaylist(candidate)
+    if type(candidate) ~= "table" or type(candidate.entries) ~= "table" then
+        return nil
+    end
+    local name = noctalia.string.trim(tostring(candidate.name or ""))
+    if not wallInOne.validPersistedKey(name) or #candidate.entries > MAX_PLAYLIST_ENTRIES then
+        return nil
+    end
+    local entries = {}
+    local usedIds = {}
+    for _, rawEntry in ipairs(candidate.entries) do
+        local entry = wallInOne.normalizedEntryBundle(rawEntry)
+        if entry == nil or usedIds[entry.id] == true then
+            return nil
+        end
+        usedIds[entry.id] = true
+        table.insert(entries, entry)
+    end
+    local interval = math.floor(tonumber(candidate.interval_seconds) or wallInOne.configuredCycleSeconds())
+    interval = math.max(MIN_CYCLE_SECONDS, math.min(MAX_CYCLE_SECONDS, interval))
+    local order = tostring(candidate.order or wallInOne.configuredPlaylistOrder())
+    return {
+        name = name,
+        order = if VALID_PLAYLIST_ORDERS[order] then order else wallInOne.configuredPlaylistOrder(),
+        interval_seconds = interval,
+        entries = entries,
+        quick_choice = candidate.quick_choice == true,
+    }
+end
+
+function wallInOne.normalizedPlaylists(candidate)
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local playlists = {}
+    local playlistCount = 0
+    local totalEntries = 0
+    for id, value in pairs(candidate) do
+        playlistCount += 1
+        local playlist = wallInOne.normalizedPlaylist(value)
+        if not wallInOne.validPersistedKey(id) or playlist == nil then
+            return nil
+        end
+        if playlistCount > MAX_PLAYLISTS then
+            return nil
+        end
+        totalEntries += #playlist.entries
+        if totalEntries > MAX_TOTAL_PLAYLIST_ENTRIES then
+            return nil
+        end
+        playlists[id] = playlist
+    end
+    return playlists
+end
+
+function wallInOne.normalizedWeekdays(candidate)
+    if type(candidate) ~= "table" or #candidate < 1 or #candidate > 7 then
+        return nil
+    end
+    local seen = {}
+    local weekdays = {}
+    for _, rawDay in ipairs(candidate) do
+        local day = tonumber(rawDay)
+        if day == nil or day % 1 ~= 0 or day < 0 or day > 6 or seen[day] then
+            return nil
+        end
+        seen[day] = true
+        table.insert(weekdays, day)
+    end
+    table.sort(weekdays)
+    return weekdays
+end
+
+function wallInOne.allMonths()
+    return { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }
+end
+
+function wallInOne.normalizedMonths(candidate)
+    if type(candidate) ~= "table" or #candidate < 1 or #candidate > 12 then
+        return nil
+    end
+    local seen = {}
+    local months = {}
+    for _, rawMonth in ipairs(candidate) do
+        local month = tonumber(rawMonth)
+        if month == nil or month % 1 ~= 0 or month < 1 or month > 12 or seen[month] then
+            return nil
+        end
+        seen[month] = true
+        table.insert(months, month)
+    end
+    table.sort(months)
+    return months
+end
+
+function wallInOne.normalizedSchedule(candidate, playlists, allowMissingMonths)
+    if type(candidate) ~= "table" or not wallInOne.validPersistedKey(candidate.id) then
+        return nil
+    end
+    local name = noctalia.string.trim(tostring(candidate.name or ""))
+    local playlist = tostring(candidate.playlist or "")
+    local weekdays = wallInOne.normalizedWeekdays(candidate.weekdays)
+    local rawMonths = candidate.months
+    if rawMonths == nil and allowMissingMonths == true then
+        rawMonths = wallInOne.allMonths()
+    end
+    local months = wallInOne.normalizedMonths(rawMonths)
+    local startMinute = tonumber(candidate.start_minute)
+    local endMinute = tonumber(candidate.end_minute)
+    if
+        not wallInOne.validPersistedKey(name)
+        or playlists[playlist] == nil
+        or weekdays == nil
+        or months == nil
+        or startMinute == nil
+        or startMinute % 1 ~= 0
+        or startMinute < 0
+        or startMinute > 1439
+        or endMinute == nil
+        or endMinute % 1 ~= 0
+        or endMinute < 0
+        or endMinute > 1439
+        or (startMinute == endMinute and candidate.all_day ~= true)
+    then
+        return nil
+    end
+    return {
+        id = tostring(candidate.id),
+        name = name,
+        playlist = playlist,
+        enabled = candidate.enabled ~= false,
+        weekdays = weekdays,
+        months = months,
+        start_minute = math.floor(startMinute),
+        end_minute = math.floor(endMinute),
+        all_day = candidate.all_day == true,
+    }
+end
+
+function wallInOne.normalizedOutputs(candidate, playlists, allowMissingScheduleMonths)
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local outputs = {}
+    local outputCount = 0
+    local scheduleCount = 0
+    for output, rawOutput in pairs(candidate) do
+        outputCount += 1
+        if not wallInOne.validPersistedKey(output) or type(rawOutput) ~= "table" or outputCount > MAX_RUNTIME_OUTPUTS then
+            return nil
+        end
+        local fallback = tostring(rawOutput.fallback_playlist or "")
+        local quickChoice = tostring(rawOutput.quick_choice_playlist or "")
+        if (fallback ~= "" and playlists[fallback] == nil) or (quickChoice ~= "" and playlists[quickChoice] == nil) then
+            return nil
+        end
+        local outputOrder = nil
+        if rawOutput.order ~= nil then
+            outputOrder = tostring(rawOutput.order)
+            if not VALID_PLAYLIST_ORDERS[outputOrder] then
+                return nil
+            end
+        end
+        local outputInterval = nil
+        if rawOutput.interval_seconds ~= nil then
+            outputInterval = tonumber(rawOutput.interval_seconds)
+            if
+                outputInterval == nil
+                or outputInterval % 1 ~= 0
+                or outputInterval < MIN_CYCLE_SECONDS
+                or outputInterval > MAX_CYCLE_SECONDS
+            then
+                return nil
+            end
+            outputInterval = math.floor(outputInterval)
+        end
+        local rawSchedules = type(rawOutput.schedules) == "table" and rawOutput.schedules or nil
+        if rawSchedules == nil or #rawSchedules > MAX_SCHEDULES_PER_OUTPUT then
+            return nil
+        end
+        local schedules = {}
+        local scheduleIds = {}
+        for _, rawSchedule in ipairs(rawSchedules) do
+            local schedule = wallInOne.normalizedSchedule(rawSchedule, playlists, allowMissingScheduleMonths == true)
+            if schedule == nil or scheduleIds[schedule.id] then
+                return nil
+            end
+            scheduleIds[schedule.id] = true
+            table.insert(schedules, schedule)
+            scheduleCount += 1
+            if scheduleCount > MAX_TOTAL_SCHEDULES then
+                return nil
+            end
+        end
+        local normalizedOutput = {
+            fallback_playlist = fallback,
+            quick_choice_playlist = quickChoice,
+            schedules = schedules,
+        }
+        if outputOrder ~= nil then
+            normalizedOutput.order = outputOrder
+        end
+        if outputInterval ~= nil then
+            normalizedOutput.interval_seconds = outputInterval
+        end
+        outputs[output] = normalizedOutput
+    end
+    return outputs
+end
+
+function wallInOne.migrateLegacyReels(candidate)
+    if type(candidate) ~= "table" then
+        return nil, nil
+    end
+    local playlists = {}
+    local outputs = {}
+    local usedPlaylistIds = {}
+    local outputCount = 0
+    local totalEntries = 0
+    for output, rawReel in pairs(candidate) do
+        outputCount += 1
+        if
+            not wallInOne.validPersistedKey(output)
+            or type(rawReel) ~= "table"
+            or type(rawReel.entries) ~= "table"
+            or outputCount > MAX_RUNTIME_OUTPUTS
+            or #rawReel.entries > MAX_PLAYLIST_ENTRIES
+        then
+            return nil, nil
+        end
+        local playlistId = wallInOne.uniqueIdentifier(usedPlaylistIds, wallInOne.stableIdentifier("migrated", output, outputCount))
+        if playlistId == nil then
+            return nil, nil
+        end
+        local entries = {}
+        local usedEntryIds = {}
+        for index, rawEntry in ipairs(rawReel.entries) do
+            local entry = wallInOne.legacyEntryBundle(rawEntry, output, index, usedEntryIds)
+            if entry == nil then
+                return nil, nil
+            end
+            table.insert(entries, entry)
+            totalEntries += 1
+            if totalEntries > MAX_TOTAL_PLAYLIST_ENTRIES then
+                return nil, nil
+            end
+        end
+        local legacyOrder = tostring(rawReel.order or wallInOne.configuredPlaylistOrder())
+        playlists[playlistId] = {
+            name = "Migrated · " .. output,
+            order = if legacyOrder == "shuffle" or legacyOrder == "random" then "shuffle" else "rotate",
+            interval_seconds = math.max(
+                MIN_CYCLE_SECONDS,
+                math.min(MAX_CYCLE_SECONDS, math.floor(tonumber(rawReel.interval_seconds) or wallInOne.configuredCycleSeconds()))
+            ),
+            entries = entries,
+            quick_choice = false,
+        }
+        outputs[output] = {
+            fallback_playlist = playlistId,
+            quick_choice_playlist = "",
+            schedules = {},
+        }
+    end
+    return playlists, outputs
+end
+
+function wallInOne.validateConfig(candidate)
     if type(candidate) ~= "table" then
         return nil, noctalia.tr("errors.config_not_object")
     end
     local schema = tonumber(candidate.schema_version)
-    if schema ~= 1 and schema ~= CONFIG_SCHEMA then
+    if schema ~= 1 and schema ~= 2 and schema ~= 3 and schema ~= CONFIG_SCHEMA then
         return nil, noctalia.tr("errors.config_schema", { version = tostring(candidate.schema_version or "?") })
     end
     if type(candidate.gestures) ~= "table" then
         return nil, noctalia.tr("errors.config_gestures")
     end
 
-    local gestures = cloneGestures(candidate.gestures)
+    local gestures = wallInOne.cloneGestures(candidate.gestures)
     for _, button in ipairs({ "left", "middle", "right" }) do
-        if not VALID_ACTIONS[gestures[button]] then
+        if not VALID_GESTURE_ACTIONS[gestures[button]] then
             return nil,
                 noctalia.tr("errors.config_action", {
                     button = button,
@@ -614,18 +1456,46 @@ local function validateConfig(candidate)
         end
     end
 
-    local reels = if schema == 1 then {} else normalizedReels(candidate.reels)
-    if reels == nil then
-        return nil, noctalia.tr("errors.config_reels")
+    local pairings
+    local playlists
+    local outputs
+    local migratedPairings = false
+    if schema == CONFIG_SCHEMA then
+        playlists = wallInOne.normalizedPlaylists(candidate.playlists)
+        pairings = wallInOne.normalizedPairings(candidate.pairings or {})
+        outputs = playlists ~= nil and wallInOne.normalizedOutputs(candidate.outputs, playlists) or nil
+        migratedPairings = candidate.pairings == nil
+    elseif schema == 3 then
+        -- Schema 3 already has the named playlist/output model. Preserve it
+        -- exactly while making every old schedule valid in all calendar months;
+        -- explicit numeric priority is intentionally retired in schema 4.
+        playlists = wallInOne.normalizedPlaylists(candidate.playlists)
+        pairings = {}
+        outputs = playlists ~= nil and wallInOne.normalizedOutputs(candidate.outputs, playlists, true) or nil
+    elseif schema == 2 then
+        playlists, outputs = wallInOne.migrateLegacyReels(candidate.reels)
+        pairings = {}
+    else
+        pairings, playlists, outputs = {}, {}, {}
     end
-    return { schema_version = CONFIG_SCHEMA, gestures = gestures, reels = reels }, nil, schema == 1
+    if pairings == nil or playlists == nil or outputs == nil then
+        return nil, noctalia.tr("errors.config_playlists")
+    end
+    wallInOne.reconcilePlaylistPairings(playlists, pairings, schema ~= CONFIG_SCHEMA or migratedPairings)
+    return {
+        schema_version = CONFIG_SCHEMA,
+        gestures = gestures,
+        pairings = pairings,
+        playlists = playlists,
+        outputs = outputs,
+    }, nil, if schema == CONFIG_SCHEMA and not migratedPairings then nil else { source_schema = schema }
 end
 
-local function validRuntimeKey(value, maximum)
+function wallInOne.validRuntimeKey(value, maximum)
     return type(value) == "string" and value ~= "" and #value <= maximum and value:find("[%c]") == nil
 end
 
-local function normalizedPair(candidate)
+function wallInOne.normalizedPair(candidate)
     if type(candidate) ~= "table" then
         return nil
     end
@@ -633,12 +1503,16 @@ local function normalizedPair(candidate)
     local dynamicId = tostring(candidate.dynamic_id or "")
     local stillPath = tostring(candidate.still_path or "")
     local captureMethod = tostring(candidate.capture_method or "")
+    local stillOrigin = tostring(candidate.still_origin or (candidate.still_managed == true and "managed-auto" or "user"))
+    local sidecarPath = tostring(candidate.sidecar_path or "")
     if
-        not validRuntimeKey(provider, 80)
-        or not validRuntimeKey(dynamicId, MAX_PERSISTED_PATH_BYTES)
-        or not validRuntimeKey(captureMethod, 160)
-        or not validRuntimeKey(stillPath, MAX_PERSISTED_PATH_BYTES)
+        not wallInOne.validRuntimeKey(provider, 80)
+        or not wallInOne.validRuntimeKey(dynamicId, MAX_PERSISTED_PATH_BYTES)
+        or not wallInOne.validRuntimeKey(captureMethod, 160)
+        or not wallInOne.validRuntimeKey(stillPath, MAX_PERSISTED_PATH_BYTES)
         or stillPath:sub(1, 1) ~= "/"
+        or (sidecarPath ~= "" and (sidecarPath:sub(1, 1) ~= "/" or #sidecarPath > MAX_PERSISTED_PATH_BYTES or sidecarPath:find("[%c]")))
+        or (stillOrigin ~= "user" and stillOrigin ~= "managed-auto" and stillOrigin ~= "managed-wallhaven")
     then
         return nil
     end
@@ -647,16 +1521,21 @@ local function normalizedPair(candidate)
         dynamic_id = dynamicId,
         still_path = stillPath,
         capture_method = captureMethod,
-        paired_at = boundedDetail(candidate.paired_at or ""),
-        color_source_before = boundedDetail(candidate.color_source_before or ""),
-        color_scheme_before = boundedDetail(candidate.color_scheme_before or ""),
-        color_scheme = boundedDetail(candidate.color_scheme or ""),
+        paired_at = wallInOne.boundedDetail(candidate.paired_at or ""),
+        color_source_before = wallInOne.boundedDetail(candidate.color_source_before or ""),
+        color_scheme_before = wallInOne.boundedDetail(candidate.color_scheme_before or ""),
+        color_scheme = wallInOne.boundedDetail(candidate.color_scheme or ""),
         still_size = math.max(0, math.floor(tonumber(candidate.still_size) or 0)),
         still_mtime = math.max(0, math.floor(tonumber(candidate.still_mtime) or 0)),
+        source_size = math.max(0, math.floor(tonumber(candidate.source_size) or 0)),
+        source_mtime = math.max(0, math.floor(tonumber(candidate.source_mtime) or 0)),
+        still_managed = candidate.still_managed == true,
+        still_origin = stillOrigin,
+        sidecar_path = sidecarPath,
     }
 end
 
-local function normalizedPairMap(candidate, maximumEntries, registry)
+function wallInOne.normalizedPairMap(candidate, maximumEntries, registry)
     if type(candidate) ~= "table" then
         return nil
     end
@@ -664,8 +1543,8 @@ local function normalizedPairMap(candidate, maximumEntries, registry)
     local count = 0
     for key, rawPair in pairs(candidate) do
         count += 1
-        local keyValid = if registry then validRuntimeKey(key, MAX_PERSISTED_PATH_BYTES) else validPersistedKey(key)
-        local pair = normalizedPair(rawPair)
+        local keyValid = if registry then wallInOne.validRuntimeKey(key, MAX_PERSISTED_PATH_BYTES) else wallInOne.validPersistedKey(key)
+        local pair = wallInOne.normalizedPair(rawPair)
         if not keyValid or pair == nil or count > maximumEntries then
             return nil
         end
@@ -674,7 +1553,41 @@ local function normalizedPairMap(candidate, maximumEntries, registry)
     return result
 end
 
-local function normalizedIndexList(candidate, maximumEntries)
+function wallInOne.normalizedCurrentWorkshops(candidate)
+    if candidate == nil then
+        return {}
+    end
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local result = {}
+    local count = 0
+    for output, rawId in pairs(candidate) do
+        count += 1
+        local id = tostring(rawId or "")
+        if
+            count > MAX_RUNTIME_OUTPUTS
+            or not wallInOne.validPersistedKey(output)
+            or not wallInOne.validWorkshopId(id)
+        then
+            return nil
+        end
+        result[output] = id
+    end
+    return result
+end
+
+function wallInOne.playlistEntryIds(playlist)
+    local ids = {}
+    if type(playlist) == "table" and type(playlist.entries) == "table" then
+        for _, entry in ipairs(playlist.entries) do
+            ids[tostring(entry.id or "")] = true
+        end
+    end
+    return ids
+end
+
+function wallInOne.normalizedIdList(candidate, maximumEntries, validIds)
     if candidate == nil then
         return {}
     end
@@ -693,8 +1606,8 @@ local function normalizedIndexList(candidate, maximumEntries)
     end
     local result = {}
     for index = 1, count do
-        local value = tonumber(candidate[index])
-        if value == nil or value % 1 ~= 0 or value < 1 or value > MAX_REEL_ENTRIES then
+        local value = tostring(candidate[index] or "")
+        if not wallInOne.validPersistedKey(value) or validIds[value] ~= true then
             return nil
         end
         result[index] = value
@@ -702,7 +1615,134 @@ local function normalizedIndexList(candidate, maximumEntries)
     return result
 end
 
-local function normalizedCycles(candidate)
+function wallInOne.normalizedRun(candidate, playlist)
+    if type(candidate) ~= "table" or type(playlist) ~= "table" then
+        return nil
+    end
+    local validIds = wallInOne.playlistEntryIds(playlist)
+    local history = wallInOne.normalizedIdList(candidate.history, MAX_HISTORY_ENTRIES, validIds)
+    local bag = wallInOne.normalizedIdList(candidate.bag, MAX_PLAYLIST_ENTRIES, validIds)
+    if history == nil or bag == nil then
+        return nil
+    end
+    local currentEntry = tostring(candidate.current_entry or candidate.last_entry_id or "")
+    if currentEntry ~= "" and validIds[currentEntry] ~= true then
+        return nil
+    end
+    return {
+        running = candidate.running == true,
+        paused = candidate.paused == true,
+        parked = candidate.parked == true,
+        current_entry = currentEntry,
+        next_due = math.max(0, math.floor(tonumber(candidate.next_due) or 0)),
+        history = history,
+        bag = bag,
+        last_applied_at = wallInOne.boundedDetail(candidate.last_applied_at or ""),
+        last_error = wallInOne.boundedDetail(candidate.last_error or ""),
+    }
+end
+
+function wallInOne.normalizedRuns(candidate)
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local result = {}
+    local outputCount = 0
+    local runCount = 0
+    for output, rawRuns in pairs(candidate) do
+        outputCount += 1
+        if not wallInOne.validPersistedKey(output) or type(rawRuns) ~= "table" or outputCount > MAX_RUNTIME_OUTPUTS then
+            return nil
+        end
+        local outputRuns = {}
+        for playlistId, rawRun in pairs(rawRuns) do
+            runCount += 1
+            local playlist = config.playlists[playlistId]
+            local run = wallInOne.normalizedRun(rawRun, playlist)
+            if not wallInOne.validPersistedKey(playlistId) or run == nil or runCount > MAX_PLAYLIST_RUNS then
+                return nil
+            end
+            outputRuns[playlistId] = run
+        end
+        result[output] = outputRuns
+    end
+    return result
+end
+
+function wallInOne.legacyIndexToEntryId(playlist, rawIndex)
+    local index = tonumber(rawIndex)
+    if index == nil or index % 1 ~= 0 or index < 1 or type(playlist) ~= "table" then
+        return nil
+    end
+    local entry = type(playlist.entries) == "table" and playlist.entries[index] or nil
+    return type(entry) == "table" and tostring(entry.id or "") or nil
+end
+
+function wallInOne.migrateLegacyCycles(candidate)
+    if type(candidate) ~= "table" then
+        return nil, nil
+    end
+    local runs = {}
+    local outputStates = {}
+    local count = 0
+    for output, rawState in pairs(candidate) do
+        count += 1
+        local outputConfig = config.outputs[output]
+        local playlistId = type(outputConfig) == "table" and tostring(outputConfig.fallback_playlist or "") or ""
+        local playlist = config.playlists[playlistId]
+        if not wallInOne.validPersistedKey(output) or type(rawState) ~= "table" or playlist == nil or count > MAX_RUNTIME_OUTPUTS then
+            return nil, nil
+        end
+        local history = {}
+        local rawHistory = type(rawState.history) == "table" and rawState.history or {}
+        if #rawHistory > MAX_HISTORY_ENTRIES then
+            return nil, nil
+        end
+        for _, rawIndex in ipairs(rawHistory) do
+            local id = wallInOne.legacyIndexToEntryId(playlist, rawIndex)
+            if id == nil then
+                return nil, nil
+            end
+            table.insert(history, id)
+        end
+        local bag = {}
+        local rawBag = type(rawState.bag) == "table" and rawState.bag or {}
+        if #rawBag > MAX_PLAYLIST_ENTRIES then
+            return nil, nil
+        end
+        for _, rawIndex in ipairs(rawBag) do
+            local id = wallInOne.legacyIndexToEntryId(playlist, rawIndex)
+            if id == nil then
+                return nil, nil
+            end
+            table.insert(bag, id)
+        end
+        local currentEntry = wallInOne.legacyIndexToEntryId(playlist, rawState.cursor) or ""
+        local parked = #playlist.entries == 1 and currentEntry ~= ""
+        runs[output] = {
+            [playlistId] = {
+                running = rawState.running == true and not parked,
+                paused = rawState.paused == true and not parked,
+                parked = parked,
+                current_entry = currentEntry,
+                next_due = if parked then 0 else math.max(0, math.floor(tonumber(rawState.next_due) or 0)),
+                history = history,
+                bag = bag,
+                last_applied_at = wallInOne.boundedDetail(rawState.last_applied_at or ""),
+                last_error = wallInOne.boundedDetail(rawState.last_error or ""),
+            },
+        }
+        outputStates[output] = {
+            active_playlist = playlistId,
+            manual_pin = false,
+            active_schedule = "",
+            last_transition_at = wallInOne.boundedDetail(rawState.last_applied_at or ""),
+        }
+    end
+    return runs, outputStates
+end
+
+function wallInOne.normalizedOutputStates(candidate)
     if type(candidate) ~= "table" then
         return nil
     end
@@ -710,37 +1750,81 @@ local function normalizedCycles(candidate)
     local count = 0
     for output, rawState in pairs(candidate) do
         count += 1
-        if not validPersistedKey(output) or type(rawState) ~= "table" or count > MAX_RUNTIME_OUTPUTS then
+        local activePlaylist = type(rawState) == "table" and tostring(rawState.active_playlist or "") or ""
+        local activeSchedule = type(rawState) == "table" and tostring(rawState.active_schedule or "") or ""
+        if
+            not wallInOne.validPersistedKey(output)
+            or type(rawState) ~= "table"
+            or count > MAX_RUNTIME_OUTPUTS
+            or (activePlaylist ~= "" and config.playlists[activePlaylist] == nil)
+            or (activeSchedule ~= "" and not wallInOne.validPersistedKey(activeSchedule))
+        then
             return nil
-        end
-        local history = normalizedIndexList(rawState.history, 64)
-        local bag = normalizedIndexList(rawState.bag, MAX_REEL_ENTRIES)
-        if history == nil or bag == nil then
-            return nil
-        end
-        local lastEntry = nil
-        if rawState.last_entry ~= nil then
-            lastEntry = normalizedEntry(rawState.last_entry)
-            if lastEntry == nil then
-                return nil
-            end
         end
         result[output] = {
-            running = rawState.running == true,
-            paused = rawState.paused == true,
-            cursor = math.max(0, math.min(MAX_REEL_ENTRIES, math.floor(tonumber(rawState.cursor) or 0))),
-            next_due = math.max(0, math.floor(tonumber(rawState.next_due) or 0)),
-            history = history,
-            bag = bag,
-            last_entry = lastEntry,
-            last_applied_at = boundedDetail(rawState.last_applied_at or ""),
-            last_error = boundedDetail(rawState.last_error or ""),
+            active_playlist = activePlaylist,
+            manual_pin = rawState.manual_pin == true,
+            active_schedule = activeSchedule,
+            last_transition_at = wallInOne.boundedDetail(rawState.last_transition_at or ""),
         }
     end
     return result
 end
 
-local function normalizedLastCapture(candidate)
+function wallInOne.normalizedPaletteRuntime(candidate)
+    if candidate == nil then
+        return { authority_output = "", requested = {}, applied = {}, last_error = "" }
+    end
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local authority = tostring(candidate.authority_output or "")
+    if authority ~= "" and not wallInOne.validPersistedKey(authority) then
+        return nil
+    end
+    local function normalizedTuple(value)
+        if type(value) ~= "table" or next(value) == nil then
+            return {}
+        end
+        local mode = tostring(value.mode or "")
+        local source = tostring(value.source or "")
+        local selection = tostring(value.selection or "")
+        if not VALID_THEME_MODES[mode] or not VALID_PALETTE_SOURCES[source] then
+            return nil
+        end
+        if source ~= "inherit" and not wallInOne.validPersistedKey(selection) then
+            return nil
+        end
+        return {
+            mode = mode,
+            source = source,
+            selection = if source == "inherit" then "" else selection,
+            output = wallInOne.boundedDetail(value.output or ""),
+            playlist = wallInOne.boundedDetail(value.playlist or ""),
+            entry = wallInOne.boundedDetail(value.entry or ""),
+            fallback = value.fallback == true,
+            resolution = if tostring(value.resolution or "") == "degraded"
+                then "degraded"
+                elseif tostring(value.resolution or "") == "assumed" then "assumed"
+                elseif tostring(value.resolution or "") == "pending" then "pending"
+                else "requested",
+            applied_at = wallInOne.boundedDetail(value.applied_at or ""),
+        }
+    end
+    local requested = normalizedTuple(candidate.requested)
+    local applied = normalizedTuple(candidate.applied)
+    if requested == nil or applied == nil then
+        return nil
+    end
+    return {
+        authority_output = authority,
+        requested = requested,
+        applied = applied,
+        last_error = wallInOne.boundedDetail(candidate.last_error or ""),
+    }
+end
+
+function wallInOne.normalizedLastCapture(candidate)
     if type(candidate) ~= "table" then
         return nil
     end
@@ -753,12 +1837,12 @@ local function normalizedLastCapture(candidate)
     local path = tostring(candidate.path or "")
     local method = tostring(candidate.method or "")
     if
-        not validRuntimeKey(provider, 80)
-        or not validRuntimeKey(dynamicId, MAX_PERSISTED_PATH_BYTES)
-        or not validRuntimeKey(output, 160)
-        or not validRuntimeKey(path, MAX_PERSISTED_PATH_BYTES)
+        not wallInOne.validRuntimeKey(provider, 80)
+        or not wallInOne.validRuntimeKey(dynamicId, MAX_PERSISTED_PATH_BYTES)
+        or not wallInOne.validRuntimeKey(output, 160)
+        or not wallInOne.validRuntimeKey(path, MAX_PERSISTED_PATH_BYTES)
         or path:sub(1, 1) ~= "/"
-        or not validRuntimeKey(method, 160)
+        or not wallInOne.validRuntimeKey(method, 160)
     then
         return nil
     end
@@ -768,31 +1852,48 @@ local function normalizedLastCapture(candidate)
         output = output,
         path = path,
         method = method,
-        captured_at = boundedDetail(candidate.captured_at or ""),
+        captured_at = wallInOne.boundedDetail(candidate.captured_at or ""),
     }
 end
 
-local function validateRuntime(candidate)
+function wallInOne.validateRuntime(candidate)
     if type(candidate) ~= "table" then
         return nil, noctalia.tr("errors.runtime_not_object")
     end
     local schema = tonumber(candidate.schema_version)
-    if schema ~= 1 and schema ~= 2 and schema ~= RUNTIME_SCHEMA then
+    if schema ~= 1 and schema ~= 2 and schema ~= 3 and schema ~= 4 and schema ~= 5 and schema ~= RUNTIME_SCHEMA then
         return nil, noctalia.tr("errors.runtime_schema", { version = tostring(candidate.schema_version or "?") })
     end
     if type(candidate.providers) ~= "table" or (schema >= 2 and type(candidate.pairs) ~= "table") then
         return nil, noctalia.tr("errors.runtime_providers")
     end
     local pairsState =
-        normalizedPairMap(type(candidate.pairs) == "table" and candidate.pairs or {}, MAX_RUNTIME_OUTPUTS, false)
-    local pairRegistry = normalizedPairMap(
+        wallInOne.normalizedPairMap(type(candidate.pairs) == "table" and candidate.pairs or {}, MAX_RUNTIME_OUTPUTS, false)
+    local pairRegistry = wallInOne.normalizedPairMap(
         type(candidate.pair_registry) == "table" and candidate.pair_registry or {},
         MAX_PAIR_REGISTRY_ENTRIES,
         true
     )
-    local cycles = normalizedCycles(type(candidate.cycles) == "table" and candidate.cycles or {})
-    local lastCapture = normalizedLastCapture(type(candidate.last_capture) == "table" and candidate.last_capture or {})
-    if pairsState == nil or pairRegistry == nil or cycles == nil or lastCapture == nil then
+    local runs
+    local outputStates
+    if schema == RUNTIME_SCHEMA then
+        runs = wallInOne.normalizedRuns(candidate.runs)
+        outputStates = wallInOne.normalizedOutputStates(candidate.output_states)
+    else
+        runs, outputStates = wallInOne.migrateLegacyCycles(type(candidate.cycles) == "table" and candidate.cycles or {})
+    end
+    local currentWorkshops = wallInOne.normalizedCurrentWorkshops(candidate.current_workshops)
+    local lastCapture = wallInOne.normalizedLastCapture(type(candidate.last_capture) == "table" and candidate.last_capture or {})
+    local palette = wallInOne.normalizedPaletteRuntime(candidate.palette)
+    if
+        pairsState == nil
+        or pairRegistry == nil
+        or runs == nil
+        or outputStates == nil
+        or currentWorkshops == nil
+        or lastCapture == nil
+        or palette == nil
+    then
         return nil, noctalia.tr("errors.runtime_nested")
     end
     return {
@@ -802,17 +1903,22 @@ local function validateRuntime(candidate)
         providers = {},
         pairs = pairsState,
         pair_registry = pairRegistry,
-        cycles = cycles,
+        runs = runs,
+        output_states = outputStates,
+        current_workshops = currentWorkshops,
         last_capture = lastCapture,
-        observed_at = boundedDetail(candidate.observed_at or ""),
-        last_error = boundedDetail(candidate.last_error or ""),
+        palette = palette,
+        observed_at = wallInOne.boundedDetail(candidate.observed_at or ""),
+        last_error = wallInOne.boundedDetail(candidate.last_error or ""),
     },
         nil,
-        schema ~= RUNTIME_SCHEMA
+        if schema == RUNTIME_SCHEMA then nil else { source_schema = schema }
 end
 
-local function atomicWrite(name, value)
-    local path, pathError = storagePath(name)
+-- Atomic storage and crash recovery ----------------------------------------
+
+function wallInOne.atomicWrite(name, value)
+    local path, pathError = wallInOne.storagePath(name)
     if path == nil then
         return false, pathError
     end
@@ -838,10 +1944,10 @@ local function atomicWrite(name, value)
     end
 
     if noctalia.fileExists(path) then
-        local previous, readError = noctalia.readFile(path)
+        local previous = wallInOne.readBoundedRegularFile(path, MAX_STORAGE_BYTES)
         if type(previous) ~= "string" then
             noctalia.removeFile(temporary)
-            return false, tostring(readError or noctalia.tr("errors.backup"))
+            return false, noctalia.tr("errors.backup")
         end
         local backupWritten, backupWriteError = noctalia.writeFile(backupTemporary, previous)
         if backupWritten ~= true then
@@ -865,17 +1971,151 @@ local function atomicWrite(name, value)
     return false, tostring(installError or noctalia.tr("errors.install"))
 end
 
-local function loadJsonFile(name, validator, defaults)
-    local path, pathError = storagePath(name)
+function wallInOne.stageDocument(name, value)
+    local path, pathError = wallInOne.storagePath(name)
+    if path == nil then
+        return false, pathError
+    end
+    local encoded, encodeError = noctalia.json.encode(value, true)
+    if type(encoded) ~= "string" then
+        return false, tostring(encodeError or noctalia.tr("errors.encode"))
+    end
+    if #encoded + 1 > MAX_STORAGE_BYTES then
+        return false,
+            noctalia.tr("errors.storage_size", {
+                name = name,
+                limit = tostring(math.floor(MAX_STORAGE_BYTES / 1024)),
+            })
+    end
+    local staged = path .. ".next"
+    local temporary = staged .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, encoded .. "\n")
+    if wrote ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(writeError or noctalia.tr("errors.write"))
+    end
+    local installed, installError = noctalia.renameFile(temporary, staged)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or noctalia.tr("errors.install"))
+    end
+    return true, nil
+end
+
+function wallInOne.backupDocument(name)
+    local path, pathError = wallInOne.storagePath(name)
+    if path == nil then
+        return false, pathError
+    end
+    if not noctalia.fileExists(path) then
+        return true, nil
+    end
+    local raw = wallInOne.readBoundedRegularFile(path, MAX_STORAGE_BYTES)
+    if type(raw) ~= "string" then
+        return false, noctalia.tr("errors.backup")
+    end
+    local backup = path .. ".bak"
+    local temporary = backup .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, raw)
+    if wrote ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(writeError or noctalia.tr("errors.backup"))
+    end
+    local installed, installError = noctalia.renameFile(temporary, backup)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or noctalia.tr("errors.backup"))
+    end
+    return true, nil
+end
+
+function wallInOne.recoverDocumentTransaction()
+    local marker, markerError = wallInOne.storagePath(STORAGE_TRANSACTION_NAME)
+    if marker == nil then
+        return false, markerError
+    end
+    if not noctalia.fileExists(marker) then
+        for _, name in ipairs({ "config.json", "runtime.json" }) do
+            local path = wallInOne.storagePath(name)
+            if path ~= nil then
+                noctalia.removeFile(path .. ".next.tmp")
+            end
+        end
+        return true, nil
+    end
+
+    for _, name in ipairs({ "config.json", "runtime.json" }) do
+        local path, pathError = wallInOne.storagePath(name)
+        if path == nil then
+            return false, pathError
+        end
+        local staged = path .. ".next"
+        if noctalia.fileExists(staged) then
+            local installed, installError = noctalia.renameFile(staged, path)
+            if installed ~= true then
+                return false, tostring(installError or noctalia.tr("errors.transaction_recovery"))
+            end
+        elseif not noctalia.fileExists(path) then
+            local backup = path .. ".bak"
+            local previous = if noctalia.fileExists(backup)
+                then wallInOne.readBoundedRegularFile(backup, MAX_STORAGE_BYTES)
+                else nil
+            if type(previous) ~= "string" then
+                return false, noctalia.tr("errors.transaction_recovery")
+            end
+            local restored, restoreError = noctalia.writeFile(path .. ".tmp", previous)
+            if restored ~= true then
+                return false, tostring(restoreError or noctalia.tr("errors.transaction_recovery"))
+            end
+            local promoted, promoteError = noctalia.renameFile(path .. ".tmp", path)
+            if promoted ~= true then
+                return false, tostring(promoteError or noctalia.tr("errors.transaction_recovery"))
+            end
+        end
+    end
+    local removed, removeError = noctalia.removeFile(marker)
+    if removed ~= true and noctalia.fileExists(marker) then
+        return false, tostring(removeError or noctalia.tr("errors.transaction_recovery"))
+    end
+    return true, nil
+end
+
+function wallInOne.installDocumentPair(nextConfig, nextRuntime)
+    local configStaged, configStageError = wallInOne.stageDocument("config.json", nextConfig)
+    if not configStaged then
+        return false, configStageError
+    end
+    local runtimeStaged, runtimeStageError = wallInOne.stageDocument("runtime.json", nextRuntime)
+    if not runtimeStaged then
+        return false, runtimeStageError
+    end
+    local configBackedUp, configBackupError = wallInOne.backupDocument("config.json")
+    if not configBackedUp then
+        return false, configBackupError
+    end
+    local runtimeBackedUp, runtimeBackupError = wallInOne.backupDocument("runtime.json")
+    if not runtimeBackedUp then
+        return false, runtimeBackupError
+    end
+    local markerWritten, markerError = wallInOne.atomicWrite(STORAGE_TRANSACTION_NAME, {
+        schema_version = 1,
+        config_schema = CONFIG_SCHEMA,
+        runtime_schema = RUNTIME_SCHEMA,
+        created_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S %z"),
+    })
+    if not markerWritten then
+        return false, markerError
+    end
+    return wallInOne.recoverDocumentTransaction()
+end
+
+function wallInOne.loadJsonFile(name, validator, defaults)
+    local path, pathError = wallInOne.storagePath(name)
     if path == nil then
         return nil, pathError
     end
     if not noctalia.fileExists(path) then
-        local saved, saveError = atomicWrite(name, defaults)
-        if saved then
-            return defaults, nil
-        end
-        return nil, saveError
+        return defaults, nil, { created = true }
     end
     local info = noctalia.fileInfo(path)
     if
@@ -890,9 +2130,9 @@ local function loadJsonFile(name, validator, defaults)
                 limit = tostring(math.floor(MAX_STORAGE_BYTES / 1024)),
             })
     end
-    local raw, readError = noctalia.readFile(path)
+    local raw = wallInOne.readBoundedRegularFile(path, MAX_STORAGE_BYTES)
     if type(raw) ~= "string" then
-        return nil, tostring(readError or noctalia.tr("errors.read"))
+        return nil, noctalia.tr("errors.read")
     end
     local decoded, decodeError = noctalia.json.decode(raw)
     if decoded == nil then
@@ -901,47 +2141,267 @@ local function loadJsonFile(name, validator, defaults)
     return validator(decoded)
 end
 
-local function loadStorage()
-    local loadedConfig, loadedConfigError, migratedConfig = loadJsonFile("config.json", validateConfig, config)
-    if loadedConfig == nil then
-        configValid = false
-        configError = tostring(loadedConfigError or noctalia.tr("errors.config_invalid"))
-    else
-        config = loadedConfig
-        if migratedConfig then
-            local migrated, migrationError = atomicWrite("config.json", config)
-            if not migrated then
-                configValid = false
-                configError = tostring(migrationError or noctalia.tr("errors.config_save"))
+function wallInOne.countMap(candidate)
+    local count = 0
+    for _ in pairs(type(candidate) == "table" and candidate or {}) do
+        count += 1
+    end
+    return count
+end
+
+function wallInOne.refineLegacyEntryPairing()
+    local changedPairings = {}
+    for _output, outputConfig in pairs(config.outputs) do
+        local playlistId = type(outputConfig) == "table" and tostring(outputConfig.fallback_playlist or "") or ""
+        local playlist = config.playlists[playlistId]
+        if type(playlist) == "table" then
+            for _, entry in ipairs(playlist.entries) do
+                local media = type(entry.media) == "table" and entry.media or nil
+                local still = type(entry.still) == "table" and entry.still or nil
+                if media ~= nil and type(still) == "table" and still.mode == "selected" then
+                    local dynamicId = if media.kind == "video" then "video:" .. media.source else media.source
+                    local pair = runtime.pair_registry[dynamicId]
+                    if
+                        type(pair) == "table"
+                        and pair.still_managed == true
+                        and tostring(pair.still_path or "") == tostring(still.path or "")
+                        and type(wallInOne.readManagedStillSidecar) == "function"
+                        and wallInOne.readManagedStillSidecar(still.path) ~= nil
+                    then
+                        entry.still = { mode = "automatic" }
+                        local pairingId = tostring(entry.pairing_id or "")
+                        if pairingId ~= "" and type(config.pairings[pairingId]) == "table" then
+                            config.pairings[pairingId] = wallInOne.pairingFromEntry(entry, pairingId)
+                            changedPairings[pairingId] = true
+                        end
+                    end
+                end
             end
         end
     end
+    for pairingId in pairs(changedPairings) do
+        wallInOne.syncPairingSnapshots(config, pairingId)
+    end
+end
 
-    local loadedRuntime, loadedRuntimeError, migratedRuntime = loadJsonFile("runtime.json", validateRuntime, runtime)
-    if loadedRuntime == nil then
-        runtimeValid = false
-        runtimeError = tostring(loadedRuntimeError or noctalia.tr("errors.runtime_invalid"))
-    else
-        runtime = loadedRuntime
-        if migratedRuntime then
-            local migrated, migrationError = atomicWrite("runtime.json", runtime)
-            if not migrated then
-                runtimeValid = false
-                runtimeError = tostring(migrationError or noctalia.tr("errors.runtime_save"))
+function wallInOne.legacyPairEntry(pair, output, usedIds)
+    if type(pair) ~= "table" or not wallInOne.validAbsolutePath(tostring(pair.still_path or "")) then
+        return nil
+    end
+    local dynamicId = tostring(pair.dynamic_id or "")
+    local media = nil
+    if dynamicId:sub(1, 6) == "video:" and wallInOne.validAbsolutePath(dynamicId:sub(7)) then
+        media = { kind = "video", source = dynamicId:sub(7) }
+    elseif wallInOne.validWorkshopId(dynamicId) then
+        media = { kind = "workshop", source = dynamicId }
+    end
+    local still = if media ~= nil and pair.still_managed == true
+        then { mode = "automatic" }
+        else { mode = "selected", path = tostring(pair.still_path) }
+    local id = wallInOne.uniqueIdentifier(usedIds, wallInOne.stableIdentifier("entry", output .. ":" .. dynamicId, 1))
+    if id == nil then
+        return nil
+    end
+    return {
+        id = id,
+        label = if media == nil then "Migrated wallpaper" else "Migrated " .. tostring(media.kind),
+        media = media,
+        still = still,
+        theme = wallInOne.legacyThemePolicy(),
+        added_at = wallInOne.boundedDetail(pair.paired_at or ""),
+    }
+end
+
+function wallInOne.preserveLegacyCurrentPairs()
+    local candidates = {}
+    for output, pair in pairs(runtime.pairs) do
+        if output ~= "all" then
+            candidates[output] = pair
+        end
+    end
+    local allPair = runtime.pairs.all
+    if type(allPair) == "table" then
+        local outputNames = {}
+        for _, output in ipairs(noctalia.outputs()) do
+            local name = type(output) == "table" and tostring(output.name or output.connector or "") or ""
+            if wallInOne.validPersistedKey(name) and candidates[name] == nil then
+                table.insert(outputNames, name)
+            end
+        end
+        table.sort(outputNames)
+        for _, output in ipairs(outputNames) do
+            candidates[output] = allPair
+        end
+    end
+
+    local usedPlaylistIds = {}
+    for id in pairs(config.playlists) do
+        usedPlaylistIds[id] = true
+    end
+    local ordinal = wallInOne.countMap(config.playlists)
+    local outputNames = {}
+    for output in pairs(candidates) do
+        table.insert(outputNames, output)
+    end
+    table.sort(outputNames)
+    for _, output in ipairs(outputNames) do
+        local outputConfig = config.outputs[output]
+        local hasFallback = type(outputConfig) == "table"
+            and tostring(outputConfig.fallback_playlist or "") ~= ""
+            and config.playlists[tostring(outputConfig.fallback_playlist)] ~= nil
+        if not hasFallback and wallInOne.countMap(config.playlists) < MAX_PLAYLISTS then
+            ordinal += 1
+            local playlistId = wallInOne.uniqueIdentifier(usedPlaylistIds, wallInOne.stableIdentifier("migrated-current", output, ordinal))
+            local entry = wallInOne.legacyPairEntry(candidates[output], output, {})
+            if playlistId ~= nil and entry ~= nil then
+                config.playlists[playlistId] = {
+                    name = "Migrated current · " .. output,
+                    order = "rotate",
+                    interval_seconds = wallInOne.configuredCycleSeconds(),
+                    entries = { entry },
+                    quick_choice = false,
+                }
+                config.outputs[output] = {
+                    fallback_playlist = playlistId,
+                    quick_choice_playlist = "",
+                    schedules = {},
+                }
+                runtime.runs[output] = runtime.runs[output] or {}
+                runtime.runs[output][playlistId] = {
+                    running = false,
+                    paused = false,
+                    parked = true,
+                    current_entry = entry.id,
+                    next_due = 0,
+                    history = { entry.id },
+                    bag = {},
+                    last_applied_at = wallInOne.boundedDetail(candidates[output].paired_at or ""),
+                    last_error = "",
+                }
+                runtime.output_states[output] = {
+                    active_playlist = playlistId,
+                    manual_pin = false,
+                    active_schedule = "",
+                    last_transition_at = wallInOne.boundedDetail(candidates[output].paired_at or ""),
+                }
             end
         end
     end
 end
 
-local function statusSnapshot()
-    statusSequence += 1
+function wallInOne.loadStorage()
+    local recovered, recoveryError = wallInOne.recoverDocumentTransaction()
+    if not recovered then
+        configValid = false
+        runtimeValid = false
+        configError = tostring(recoveryError or noctalia.tr("errors.transaction_recovery"))
+        runtimeError = configError
+        return
+    end
+    local loadedConfig, loadedConfigError, migratedConfig = wallInOne.loadJsonFile("config.json", wallInOne.validateConfig, config)
+    if loadedConfig == nil then
+        configValid = false
+        configError = tostring(loadedConfigError or noctalia.tr("errors.config_invalid"))
+    else
+        config = loadedConfig
+    end
+
+    local loadedRuntime, loadedRuntimeError, migratedRuntime = wallInOne.loadJsonFile("runtime.json", wallInOne.validateRuntime, runtime)
+    if loadedRuntime == nil then
+        runtimeValid = false
+        runtimeError = tostring(loadedRuntimeError or noctalia.tr("errors.runtime_invalid"))
+    else
+        runtime = loadedRuntime
+    end
+
+    if configValid and runtimeValid and (migratedConfig ~= nil or migratedRuntime ~= nil) then
+        local sourceConfigSchema = type(migratedConfig) == "table" and tonumber(migratedConfig.source_schema) or nil
+        -- Pair/reel refinement belongs only to the pre-playlist schemas. A
+        -- schema-3 document already contains authoritative named playlists and
+        -- outputs, so its schema-4 migration must not synthesize or rewrite them.
+        if sourceConfigSchema ~= nil and sourceConfigSchema <= 2 then
+            wallInOne.refineLegacyEntryPairing()
+            wallInOne.preserveLegacyCurrentPairs()
+            wallInOne.reconcilePlaylistPairings(config.playlists, config.pairings, true)
+        end
+        local normalizedConfig, normalizedConfigError = wallInOne.validateConfig(config)
+        local normalizedRuntime, normalizedRuntimeError = wallInOne.validateRuntime(runtime)
+        if normalizedConfig == nil or normalizedRuntime == nil then
+            configValid = false
+            runtimeValid = false
+            configError = tostring(normalizedConfigError or noctalia.tr("errors.config_invalid"))
+            runtimeError = tostring(normalizedRuntimeError or noctalia.tr("errors.runtime_invalid"))
+            return
+        end
+        config = normalizedConfig
+        runtime = normalizedRuntime
+        local migrated, migrationError = wallInOne.installDocumentPair(config, runtime)
+        if not migrated then
+            configValid = false
+            runtimeValid = false
+            configError = tostring(migrationError or noctalia.tr("errors.transaction_install"))
+            runtimeError = configError
+        end
+    end
+end
+
+-- Public status, provider discovery, and integration policy ----------------
+
+function wallInOne.activeCapturesSnapshot()
     local activeCaptures = {}
     for output, capture in pairs(captureInFlight) do
         activeCaptures[output] = capture
     end
+    return activeCaptures
+end
+
+function wallInOne.configDomainSnapshot()
     return {
-        protocol = 2,
-        sequence = statusSequence,
+        config = {
+            schema_version = CONFIG_SCHEMA,
+            gestures = wallInOne.cloneGestures(config.gestures),
+            -- `config` is replaced only with a fully normalized document. State
+            -- transport serializes immediately, so a second deep normalize here
+            -- only burns the host's bounded callback budget.
+            pairings = config.pairings,
+            playlists = config.playlists,
+            outputs = config.outputs,
+        },
+    }
+end
+
+function wallInOne.runtimeDomainSnapshot()
+    return {
+        schema_version = RUNTIME_SCHEMA,
+        runtime = {
+            colors = colors,
+            pairs = runtime.pairs,
+            runs = runtime.runs,
+            output_states = runtime.output_states,
+            palette = runtime.palette,
+            current_workshops = runtime.current_workshops,
+            last_capture = runtime.last_capture,
+        },
+    }
+end
+
+function wallInOne.libraryDomainSnapshot()
+    return { library = library }
+end
+
+function wallInOne.widgetSettingsSnapshot()
+    return {
+        video_source = wallInOne.configuredVideoSource(),
+        manual_pair_file = wallInOne.configuredManualPair(),
+        workshop_id = wallInOne.configuredWorkshopId(),
+    }
+end
+
+function wallInOne.statusSnapshot()
+    return {
+        protocol = 4,
+        instance_id = SERVICE_NONCE,
+        sequence = 0,
         ready = true,
         storage_valid = configValid and runtimeValid,
         config_valid = configValid,
@@ -949,35 +2409,85 @@ local function statusSnapshot()
         config_error = configError,
         runtime_error = runtimeError,
         config = {
-            schema_version = CONFIG_SCHEMA,
-            gestures = cloneGestures(config.gestures),
-            reels = normalizedReels(config.reels) or {},
+            gestures = wallInOne.cloneGestures(config.gestures),
         },
-        settings = settingsSnapshot(),
+        -- Settings are bounded and change independently from the persisted
+        -- pairing/playlist document. Keeping them on the lifecycle object
+        -- avoids serializing the heavy config domain for every settings edit.
+        settings = wallInOne.settingsSnapshot(),
         providers = providers,
-        renderer = rendererStatus,
-        motionbgs = {
-            status = motionBgsStatus,
-            results = motionBgsResults,
+        domains = {
+            config = { key = CONFIG_STATE_KEY, revision = domainPublications.config.revision },
+            runtime = { key = RUNTIME_STATE_KEY, revision = domainPublications.runtime.revision },
+            library = { key = LIBRARY_STATE_KEY, revision = domainPublications.library.revision },
         },
-        library = library,
-        colors = colors,
-        pairs = runtime.pairs,
-        pair_registry = runtime.pair_registry,
-        cycles = runtime.cycles,
-        last_capture = runtime.last_capture,
-        captures = activeCaptures,
+        captures = wallInOne.activeCapturesSnapshot(),
         last_action_error = lastActionError,
         last_action_at = lastActionAt,
     }
 end
 
-local function publishStatus()
-    noctalia.state.set(STATUS_KEY, statusSnapshot())
+function wallInOne.markStateDomain(name)
+    local publication = domainPublications[name]
+    if type(publication) == "table" then
+        publication.dirty = true
+    end
 end
 
-local function notifyBounded(key, message)
-    local now = nowSeconds()
+function wallInOne.publishStateDomain(name, payload)
+    local publication = domainPublications[name]
+    if type(publication) ~= "table" or publication.dirty ~= true or type(payload) ~= "table" then
+        return false
+    end
+
+    -- Mutation sites are the authority for heavy-domain dirtiness. Rewalking a
+    -- bounded-but-large playlist/library document merely to rediscover that it
+    -- changed duplicates the JSON traversal performed by state.set().
+    publication.revision += 1
+
+    local snapshot = {
+        protocol = 1,
+        instance_id = SERVICE_NONCE,
+        revision = publication.revision,
+    }
+    for key, value in pairs(payload) do
+        snapshot[key] = value
+    end
+    noctalia.state.set(publication.key, snapshot)
+    publication.dirty = false
+    return true
+end
+
+function wallInOne.flushStateDomains()
+    if domainPublications.config.dirty == true then
+        wallInOne.publishStateDomain("config", wallInOne.configDomainSnapshot())
+    end
+    if domainPublications.runtime.dirty == true then
+        wallInOne.publishStateDomain("runtime", wallInOne.runtimeDomainSnapshot())
+    end
+    if domainPublications.library.dirty == true then
+        wallInOne.publishStateDomain("library", wallInOne.libraryDomainSnapshot())
+    end
+end
+
+function wallInOne.publishStatus()
+    wallInOne.flushStateDomains()
+    local snapshot = wallInOne.statusSnapshot()
+    -- The lifecycle object is deliberately small. Native JSON encoding matches
+    -- the state bus's own semantics and avoids a second recursive Luau walk.
+    local signature = noctalia.json.encode(snapshot)
+    if signature == lastStatusSignature then
+        return false
+    end
+    lastStatusSignature = signature
+    statusSequence += 1
+    snapshot.sequence = statusSequence
+    noctalia.state.set(STATUS_KEY, snapshot)
+    return true
+end
+
+function wallInOne.notifyBounded(key, message)
+    local now = wallInOne.nowSeconds()
     local previous = tonumber(lastNotificationAt[key]) or 0
     if now == 0 or previous == 0 or now - previous >= NOTIFY_COOLDOWN_SECONDS then
         lastNotificationAt[key] = now
@@ -985,25 +2495,70 @@ local function notifyBounded(key, message)
     end
 end
 
-local function setActionError(message, notifyKey)
+function wallInOne.setActionError(message, notifyKey)
     lastActionError = tostring(message or "")
     lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    publishStatus()
+    wallInOne.publishStatus()
     if notifyKey ~= nil and lastActionError ~= "" then
-        notifyBounded(notifyKey, lastActionError)
+        wallInOne.notifyBounded(notifyKey, lastActionError)
     end
 end
 
-local function providerCurrentSignature()
+function wallInOne.deferUntilNextUpdate(callback)
+    if type(callback) ~= "function" or #postApplyQueue >= MAX_RUNTIME_OUTPUTS then
+        return false
+    end
+    table.insert(postApplyQueue, callback)
+    return true
+end
+
+function wallInOne.drainPostApplyQueue()
+    local queued = postApplyQueue
+    postApplyQueue = {}
+    for _, callback in ipairs(queued) do
+        local ok, errorMessage = pcall(callback)
+        if not ok then
+            wallInOne.setActionError(noctalia.tr("errors.apply_callback", { detail = wallInOne.boundedDetail(errorMessage) }), nil)
+        end
+    end
+end
+
+function wallInOne.synchronizeInternalWorkshops(nextRendererStatus)
+    local current = {}
+    local outputs = type(nextRendererStatus) == "table"
+            and type(nextRendererStatus.outputs) == "table"
+            and nextRendererStatus.outputs
+        or {}
+    for output, owned in pairs(outputs) do
+        local id = type(owned) == "table" and tostring(owned.workshop_id or "") or ""
+        local state = type(owned) == "table" and tostring(owned.state or "") or ""
+        if
+            wallInOne.validPersistedKey(output)
+            and type(owned) == "table"
+            and owned.backend == "w-engine"
+            and (state == "running" or state == "paused")
+            and wallInOne.validWorkshopId(id)
+        then
+            current[output] = id
+        end
+    end
+    providers.w_engine.internal_current = current
+    runtime.current_workshops = current
+end
+
+function wallInOne.providerCurrentSignature()
     local current = {}
     for output, id in pairs(providers.w_engine.current or {}) do
         table.insert(current, tostring(output) .. "=" .. tostring(id))
+    end
+    for output, id in pairs(providers.w_engine.internal_current or {}) do
+        table.insert(current, "internal:" .. tostring(output) .. "=" .. tostring(id))
     end
     table.sort(current)
     return table.concat(current, ",")
 end
 
-local function currentProviderSignature()
+function wallInOne.currentProviderSignature()
     return table.concat({
         tostring(providers.probe_ok),
         tostring(providers.probe_error),
@@ -1023,7 +2578,7 @@ local function currentProviderSignature()
         tostring(providers.w_engine.effective_backend),
         tostring(providers.w_engine.apply_available),
         tostring(providers.w_engine.conflict),
-        providerCurrentSignature(),
+        wallInOne.providerCurrentSignature(),
         tostring(providers.mpvpaper.allowed),
         tostring(providers.mpvpaper.plugin_enabled),
         tostring(providers.mpvpaper.available),
@@ -1050,14 +2605,15 @@ local function currentProviderSignature()
     }, "|")
 end
 
-local function persistRuntimeIfChanged(force)
+function wallInOne.persistRuntimeIfChanged(force)
     if not runtimeValid then
-        return
+        return false
     end
-    local signature = currentProviderSignature()
+    local signature = wallInOne.currentProviderSignature()
     if not force and signature == providerSignature then
-        return
+        return true
     end
+    wallInOne.markStateDomain("runtime")
     providerSignature = signature
     runtime.providers = {
         wallhaven = {
@@ -1080,6 +2636,7 @@ local function persistRuntimeIfChanged(force)
             apply_available = providers.w_engine.apply_available,
             conflict = providers.w_engine.conflict,
             current = providers.w_engine.current,
+            internal_current = providers.w_engine.internal_current,
         },
         mpvpaper = {
             allowed = providers.mpvpaper.allowed,
@@ -1104,14 +2661,16 @@ local function persistRuntimeIfChanged(force)
     }
     runtime.observed_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
     runtime.last_error = tostring(providers.probe_error or "")
-    local saved, saveError = atomicWrite("runtime.json", runtime)
+    local saved, saveError = wallInOne.atomicWrite("runtime.json", runtime)
     if not saved then
         runtimeValid = false
         runtimeError = tostring(saveError or noctalia.tr("errors.runtime_save"))
+        return false
     end
+    return true
 end
 
-local function parseEnabledPlugins(output)
+function wallInOne.parseEnabledPlugins(output)
     local enabled = {}
     for line in tostring(output or ""):gmatch("[^\r\n]+") do
         local id, source, version = line:match("^(%S+)%s+%[([^%]]+)%]%s+(%S+)")
@@ -1123,10 +2682,17 @@ local function parseEnabledPlugins(output)
     return enabled
 end
 
-local function refreshExtraProvider(enabled)
-    local panelId, pluginId = normalizedExtraPanel()
+function wallInOne.refreshExtraProvider(enabled)
+    local panelId, pluginId = wallInOne.normalizedExtraPanel()
     local entry = type(enabled) == "table" and enabled[pluginId] or nil
-    local allowed = settingBool("use_extra_provider", true)
+    if
+        type(enabled) ~= "table"
+        and providers.extra.plugin_id == pluginId
+        and providers.extra.plugin_enabled == true
+    then
+        entry = { version = providers.extra.version }
+    end
+    local allowed = wallInOne.settingBool("use_extra_provider", true)
     providers.extra = {
         allowed = allowed,
         configured = panelId ~= "",
@@ -1138,7 +2704,7 @@ local function refreshExtraProvider(enabled)
     }
 end
 
-local function clearAdapterState()
+function wallInOne.clearAdapterState()
     providers.w_engine.adapter_version = ""
     providers.w_engine.adapter_capture = false
     providers.w_engine.adapter_status = false
@@ -1148,7 +2714,7 @@ local function clearAdapterState()
     providers.w_engine.current = {}
 end
 
-local function refreshBackendPolicy()
+function wallInOne.refreshBackendPolicy()
     local rendererReady = type(rendererStatus) == "table" and rendererStatus.ready == true
     local previousWEngine = backendPolicySignature.w_engine
     local previousMpvpaper = backendPolicySignature.mpvpaper
@@ -1181,18 +2747,18 @@ local function refreshBackendPolicy()
     providers.w_engine.effective_backend, providers.w_engine.internal_available, providers.w_engine.apply_available, providers.w_engine.conflict =
         resolve(
             providers.w_engine.allowed,
-            configuredBackend("w_engine_backend"),
+            wallInOne.configuredBackend("w_engine_backend"),
             providers.w_engine.plugin_enabled,
             providers.w_engine.renderer_available
         )
     providers.mpvpaper.effective_backend, providers.mpvpaper.internal_available, providers.mpvpaper.apply_available, providers.mpvpaper.conflict =
         resolve(
             providers.mpvpaper.allowed,
-            configuredBackend("mpvpaper_backend"),
+            wallInOne.configuredBackend("mpvpaper_backend"),
             providers.mpvpaper.plugin_enabled,
-            noctalia.commandExists("mpvpaper")
+            providers.mpvpaper.command_available
         )
-    providers.motionbgs.allowed = settingBool("use_motionbgs", true)
+    providers.motionbgs.allowed = wallInOne.settingBool("use_motionbgs", true)
     providers.motionbgs.browser_available = noctalia.commandExists("xdg-open")
     providers.motionbgs.integration_available = providers.motionbgs.allowed
         and type(motionBgsStatus) == "table"
@@ -1223,31 +2789,33 @@ local function refreshBackendPolicy()
     end
 end
 
-local function applyIntegrationPolicy()
-    providers.wallhaven.allowed = settingBool("use_wallhaven", true)
+function wallInOne.applyIntegrationPolicy()
+    providers.wallhaven.allowed = wallInOne.settingBool("use_wallhaven", true)
+    providers.wallhaven.site_available = noctalia.commandExists("xdg-open")
+    providers.wallhaven.site_url = WALLHAVEN_URL
     providers.wallhaven.available = providers.probe_ok
         and providers.wallhaven.plugin_enabled
         and providers.wallhaven.allowed
 
-    providers.w_engine.allowed = settingBool("use_w_engine", true)
+    providers.w_engine.allowed = wallInOne.settingBool("use_w_engine", true)
     providers.w_engine.available = providers.probe_ok
         and providers.w_engine.plugin_enabled
         and providers.w_engine.allowed
     if not providers.w_engine.allowed then
-        clearAdapterState()
+        wallInOne.clearAdapterState()
     end
 
-    providers.mpvpaper.allowed = settingBool("use_mpvpaper", true)
+    providers.mpvpaper.allowed = wallInOne.settingBool("use_mpvpaper", true)
     providers.mpvpaper.available = providers.probe_ok
         and providers.mpvpaper.plugin_enabled
         and providers.mpvpaper.allowed
-    refreshBackendPolicy()
-    if type(reconcileRendererOwnership) == "function" then
-        reconcileRendererOwnership()
+    wallInOne.refreshBackendPolicy()
+    if type(wallInOne.reconcileRendererOwnership) == "function" then
+        wallInOne.reconcileRendererOwnership()
     end
 end
 
-local function requestAdapterProbe()
+function wallInOne.requestAdapterProbe()
     if not providers.w_engine.available or not providers.noctalia_cli then
         return
     end
@@ -1259,7 +2827,15 @@ local function requestAdapterProbe()
     noctalia.runAsync(command, function(_result) end, 5000)
 end
 
-local function completeProviderProbe(enabled, probeError)
+function wallInOne.startPendingProviderProbe()
+    if not providerProbePending then
+        return
+    end
+    providerProbePending = false
+    wallInOne.probeProviders()
+end
+
+function wallInOne.completeProviderProbe(enabled, probeError)
     providerProbeInFlight = false
     providers.probing = false
     providers.probe_ok = probeError == nil
@@ -1269,23 +2845,24 @@ local function completeProviderProbe(enabled, probeError)
 
     if probeError ~= nil then
         -- Preserve the last known ownership flags for diagnostics, but fail
-        -- closed: refreshBackendPolicy gates every internal start on probe_ok.
-        providers.wallhaven.allowed = settingBool("use_wallhaven", true)
+        -- closed: wallInOne.refreshBackendPolicy gates every internal start on probe_ok.
+        providers.wallhaven.allowed = wallInOne.settingBool("use_wallhaven", true)
         providers.wallhaven.available = false
-        providers.w_engine.allowed = settingBool("use_w_engine", true)
+        providers.w_engine.allowed = wallInOne.settingBool("use_w_engine", true)
         providers.w_engine.available = false
         providers.w_engine.renderer_available = noctalia.commandExists("linux-wallpaperengine")
-        providers.mpvpaper.allowed = settingBool("use_mpvpaper", true)
+        providers.mpvpaper.allowed = wallInOne.settingBool("use_mpvpaper", true)
         providers.mpvpaper.available = false
-        providers.mpvpaper.command_available = noctalia.commandExists("mpvpaper") and noctalia.commandExists("mpv")
-        providers.extra.allowed = settingBool("use_extra_provider", true)
+        providers.mpvpaper.command_available = noctalia.commandExists("mpvpaper")
+        providers.extra.allowed = wallInOne.settingBool("use_extra_provider", true)
         providers.extra.available = false
-        refreshBackendPolicy()
-        if type(reconcileRendererOwnership) == "function" then
-            reconcileRendererOwnership()
+        wallInOne.refreshBackendPolicy()
+        if type(wallInOne.reconcileRendererOwnership) == "function" then
+            wallInOne.reconcileRendererOwnership()
         end
-        persistRuntimeIfChanged(false)
-        publishStatus()
+        wallInOne.persistRuntimeIfChanged(false)
+        wallInOne.publishStatus()
+        wallInOne.startPendingProviderProbe()
         return
     end
 
@@ -1293,13 +2870,15 @@ local function completeProviderProbe(enabled, probeError)
     local wallhaven = pluginList[WALLHAVEN_ID]
     local wEngine = pluginList[W_ENGINE_ID]
     local mpvpaper = pluginList[MPVPAPER_ID]
-    local wallhavenAllowed = settingBool("use_wallhaven", true)
-    local wEngineAllowed = settingBool("use_w_engine", true)
-    local mpvpaperAllowed = settingBool("use_mpvpaper", true)
+    local wallhavenAllowed = wallInOne.settingBool("use_wallhaven", true)
+    local wEngineAllowed = wallInOne.settingBool("use_w_engine", true)
+    local mpvpaperAllowed = wallInOne.settingBool("use_mpvpaper", true)
     providers.wallhaven = {
         allowed = wallhavenAllowed,
         plugin_enabled = wallhaven ~= nil,
         available = probeError == nil and wallhaven ~= nil and wallhavenAllowed,
+        site_available = noctalia.commandExists("xdg-open"),
+        site_url = WALLHAVEN_URL,
         version = type(wallhaven) == "table" and tostring(wallhaven.version or "") or "",
     }
     local previousWEngineVersion = providers.w_engine.version
@@ -1308,6 +2887,8 @@ local function completeProviderProbe(enabled, probeError)
     providers.w_engine.plugin_enabled = wEngine ~= nil
     providers.w_engine.version = type(wEngine) == "table" and tostring(wEngine.version or "") or ""
     providers.w_engine.renderer_available = noctalia.commandExists("linux-wallpaperengine")
+    providers.w_engine.steam_available = noctalia.commandExists("steam") or noctalia.commandExists("xdg-open")
+    providers.w_engine.steam_workshop_available = noctalia.commandExists("xdg-open")
     providers.w_engine.available = probeError == nil and wEngine ~= nil and wEngineAllowed
     if
         wEngine == nil
@@ -1315,13 +2896,13 @@ local function completeProviderProbe(enabled, probeError)
         or previousWEngineAllowed ~= wEngineAllowed
         or (previousWEngineVersion ~= "" and previousWEngineVersion ~= providers.w_engine.version)
     then
-        clearAdapterState()
+        wallInOne.clearAdapterState()
     end
     providers.mpvpaper = {
         allowed = mpvpaperAllowed,
         plugin_enabled = mpvpaper ~= nil,
         available = probeError == nil and mpvpaper ~= nil and mpvpaperAllowed,
-        command_available = noctalia.commandExists("mpvpaper") and noctalia.commandExists("mpv"),
+        command_available = noctalia.commandExists("mpvpaper"),
         internal_available = false,
         effective_backend = "none",
         apply_available = false,
@@ -1334,77 +2915,100 @@ local function completeProviderProbe(enabled, probeError)
         wpaperd = noctalia.commandExists("wpaperctl"),
         hyprpaper = noctalia.commandExists("hyprctl"),
     }
-    refreshExtraProvider(pluginList)
-    refreshBackendPolicy()
-    if type(reconcileRendererOwnership) == "function" then
-        reconcileRendererOwnership()
+    wallInOne.refreshExtraProvider(pluginList)
+    wallInOne.refreshBackendPolicy()
+    if type(wallInOne.reconcileRendererOwnership) == "function" then
+        wallInOne.reconcileRendererOwnership()
     end
-    persistRuntimeIfChanged(false)
-    publishStatus()
-    requestAdapterProbe()
+    wallInOne.persistRuntimeIfChanged(false)
+    wallInOne.publishStatus()
+    wallInOne.requestAdapterProbe()
+    wallInOne.startPendingProviderProbe()
 end
 
-local function probeColorScheme()
+function wallInOne.probeColorScheme()
     if colorProbeInFlight or not noctalia.commandExists("noctalia") then
         return
     end
     colorProbeInFlight = true
     colors.probing = true
-    local started = noctalia.runAsync("noctalia msg color-scheme-get", function(result)
+    local function finishProbe(errorMessage)
         colorProbeInFlight = false
         colors.probing = false
+        colors.error = tostring(errorMessage or "")
+        -- Theme mode/error are live observations but are intentionally absent
+        -- from the persistence signature. Publish their runtime-domain delta
+        -- even when source and scheme did not change.
+        wallInOne.markStateDomain("runtime")
+        wallInOne.persistRuntimeIfChanged(false)
+        wallInOne.publishStatus()
+    end
+    local started = noctalia.runAsync("noctalia msg color-scheme-get", function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            colors.error = commandFailureDetail(result)
-        else
-            local source, scheme = noctalia.string.trim(result.stdout or ""):match("^(%S+)%s+(.+)$")
-            colors.source = tostring(source or "")
-            colors.scheme = tostring(scheme or "")
-            colors.error = ""
+            finishProbe(wallInOne.commandFailureDetail(result))
+            return
         end
-        persistRuntimeIfChanged(false)
-        publishStatus()
+        local source, scheme = noctalia.string.trim(result.stdout or ""):match("^(%S+)%s+(.+)$")
+        colors.source = tostring(source or "")
+        colors.scheme = tostring(scheme or "")
+        local modeStarted = noctalia.runAsync("noctalia msg theme-mode-get", function(modeResult)
+            if type(modeResult) ~= "table" or modeResult.timedOut or tonumber(modeResult.exitCode) ~= 0 then
+                finishProbe(wallInOne.commandFailureDetail(modeResult))
+                return
+            end
+            local mode = noctalia.string.trim(tostring(modeResult.stdout or ""))
+            colors.mode = if mode == "dark" or mode == "light" then mode else ""
+            finishProbe("")
+        end, 5000)
+        if not modeStarted then
+            finishProbe(noctalia.tr("errors.color_probe_start"))
+        end
     end, 5000)
     if not started then
-        colorProbeInFlight = false
-        colors.probing = false
-        colors.error = noctalia.tr("errors.color_probe_start")
+        finishProbe(noctalia.tr("errors.color_probe_start"))
     end
 end
 
-local function probeProviders()
+function wallInOne.probeProviders()
     if providerProbeInFlight then
+        -- Preserve one follow-up request so a hot-swap or explicit refresh
+        -- arriving during discovery is not lost. A boolean latch bounds a
+        -- burst to one additional subprocess instead of growing a queue.
+        providerProbePending = true
         return
     end
-    lastProviderProbeAt = nowSeconds()
+    lastProviderProbeAt = wallInOne.nowSeconds()
     providerProbeInFlight = true
     providers.probing = true
-    publishStatus()
+    wallInOne.publishStatus()
 
     if not noctalia.commandExists("noctalia") then
-        completeProviderProbe(nil, noctalia.tr("errors.noctalia_cli"))
+        wallInOne.completeProviderProbe(nil, noctalia.tr("errors.noctalia_cli"))
         return
     end
     local started = noctalia.runAsync("noctalia msg plugins list", function(result)
         if type(result) ~= "table" then
-            completeProviderProbe(nil, noctalia.tr("errors.provider_probe"))
+            wallInOne.completeProviderProbe(nil, noctalia.tr("errors.provider_probe"))
         elseif result.timedOut then
-            completeProviderProbe(nil, noctalia.tr("errors.provider_probe_timeout"))
+            wallInOne.completeProviderProbe(nil, noctalia.tr("errors.provider_probe_timeout"))
         elseif tonumber(result.exitCode) ~= 0 then
-            completeProviderProbe(
+            wallInOne.completeProviderProbe(
                 nil,
-                noctalia.tr("errors.provider_probe_detail", { detail = commandFailureDetail(result) })
+                noctalia.tr("errors.provider_probe_detail", { detail = wallInOne.commandFailureDetail(result) })
             )
         else
-            completeProviderProbe(parseEnabledPlugins(result.stdout), nil)
+            wallInOne.completeProviderProbe(wallInOne.parseEnabledPlugins(result.stdout), nil)
         end
-        probeColorScheme()
+        wallInOne.probeColorScheme()
     end, 5000)
     if not started then
-        completeProviderProbe(nil, noctalia.tr("errors.provider_probe_start"))
+        wallInOne.completeProviderProbe(nil, noctalia.tr("errors.provider_probe_start"))
     end
 end
 
-local function safeRelativePath(value)
+-- Local media and Steam Workshop discovery ---------------------------------
+
+function wallInOne.safeRelativePath(value)
     if type(value) ~= "string" or value == "" or value:sub(1, 1) == "/" or value:find("[%c]") then
         return nil
     end
@@ -1416,12 +3020,12 @@ local function safeRelativePath(value)
     return value
 end
 
-local function candidateWorkshopRoots()
+function wallInOne.candidateWorkshopRoots()
     local roots = {}
     local seen = {}
-    local custom = settingString("workshop_directory", "")
+    local custom = wallInOne.settingString("workshop_directory", "")
     if custom ~= "" then
-        local expanded = normalizedDirectory(noctalia.expandPath(custom))
+        local expanded = wallInOne.normalizedDirectory(noctalia.expandPath(custom))
         if expanded ~= nil then
             expanded ..= "/"
             seen[expanded] = true
@@ -1438,11 +3042,22 @@ local function candidateWorkshopRoots()
     return roots
 end
 
-local function findWorkshopProject(id)
-    if tostring(id):match("^%d+$") == nil then
+function wallInOne.currentLibraryRootsSignature()
+    -- Only path changes require rebuilding the library candidates. Provider,
+    -- playback, palette, and gesture settings do not alter the inventory.
+    return table.concat({
+        wallInOne.captureDirectory(),
+        wallInOne.videoDirectory(),
+        wallInOne.settingString("motionbgs_download_directory", ""),
+        wallInOne.settingString("workshop_directory", ""),
+    }, "\0")
+end
+
+function wallInOne.findWorkshopProject(id)
+    if not wallInOne.validWorkshopId(id) then
         return nil, nil
     end
-    for _, root in ipairs(candidateWorkshopRoots()) do
+    for _, root in ipairs(wallInOne.candidateWorkshopRoots()) do
         local directory = root .. tostring(id) .. "/"
         local projectPath = directory .. "project.json"
         local projectInfo = noctalia.fileInfo(projectPath)
@@ -1465,29 +3080,110 @@ local function findWorkshopProject(id)
     return nil, nil
 end
 
-refreshLibrary = function()
-    local videoRoot = videoDirectory()
-    local videoEntries = {}
-    if videoRoot ~= "" then
-        local entries = noctalia.listDir(videoRoot)
-        if type(entries) == "table" then
-            for index = 1, math.min(#entries, MAX_LIBRARY_CANDIDATES) do
-                table.insert(videoEntries, tostring(entries[index]))
+function wallInOne.libraryPathToken(path)
+    local hashA = 0
+    local hashB = 0
+    path = tostring(path or "")
+    for index = 1, #path do
+        local byte = string.byte(path, index)
+        hashA = (hashA * 131 + byte) % 2147483647
+        hashB = (hashB * 65599 + byte + index) % 2147483629
+    end
+    return string.format("%08x%08x%08x", hashA, hashB, #path)
+end
+
+function wallInOne.readProviderSidecar(path, suffix, provider)
+    local sidecarPath = tostring(path or "") .. suffix
+    local raw = wallInOne.readBoundedRegularFile(sidecarPath, MAX_MANAGED_SIDECAR_BYTES)
+    local record = type(raw) == "string" and #raw <= MAX_MANAGED_SIDECAR_BYTES and noctalia.json.decode(raw) or nil
+    if
+        type(record) ~= "table"
+        or tonumber(record.schema) ~= 1
+        or tostring(record.provider or "") ~= provider
+        or tostring(record.plugin or "") ~= "goober/wall-in-one"
+        or tostring(record.path or "") ~= tostring(path or "")
+    then
+        return nil
+    end
+    return record, sidecarPath
+end
+
+function wallInOne.appendLibraryDirectory(target, root, mediaType, ownership, provider, seen)
+    root = wallInOne.normalizedDirectory(root)
+    if root == nil then
+        return
+    end
+    local entries = noctalia.listDir(root)
+    if type(entries) ~= "table" then
+        return
+    end
+    for index = 1, math.min(#entries, MAX_LIBRARY_CANDIDATES) do
+        local name = tostring(entries[index] or "")
+        if name ~= "" and not name:find("/", 1, true) and not name:find("[%c]") then
+            local path = root .. "/" .. name
+            local key = mediaType .. "\0" .. path
+            if not seen[key] then
+                seen[key] = true
+                table.insert(target, {
+                    path = path,
+                    name = name,
+                    media_type = mediaType,
+                    ownership = ownership,
+                    provider = provider,
+                })
             end
-            table.sort(videoEntries)
         end
     end
+end
+
+wallInOne.refreshLibrary = function()
+    local imageRoot = wallInOne.captureDirectory()
+    local videoRoot = wallInOne.videoDirectory()
+    local mediaEntries = {}
+    local seenMedia = {}
+    -- Managed roots must claim an overlapping explicit user root first. The
+    -- incremental scan still verifies each sidecar and downgrades unproven
+    -- files to user-owned entries.
+    wallInOne.appendLibraryDirectory(
+        mediaEntries,
+        wallInOne.wallhavenManagedDirectory(),
+        "image",
+        "managed-wallhaven",
+        "Wallhaven",
+        seenMedia
+    )
+    wallInOne.appendLibraryDirectory(
+        mediaEntries,
+        wallInOne.automaticStillDirectory(),
+        "image",
+        "managed-auto",
+        "Wall-in-One",
+        seenMedia
+    )
+    wallInOne.appendLibraryDirectory(
+        mediaEntries,
+        wallInOne.motionBgsManagedDirectory(),
+        "video",
+        "managed-motionbgs",
+        "MotionBGS",
+        seenMedia
+    )
+    wallInOne.appendLibraryDirectory(mediaEntries, imageRoot, "image", "user", "local", seenMedia)
+    wallInOne.appendLibraryDirectory(mediaEntries, videoRoot, "video", "user", "local", seenMedia)
+    table.sort(mediaEntries, function(left, right)
+        return tostring(left.path) < tostring(right.path)
+    end)
 
     local workshopCandidates = {}
     local seenIds = {}
     local workshopNamesExamined = 0
-    for _, root in ipairs(candidateWorkshopRoots()) do
+    for _, root in ipairs(wallInOne.candidateWorkshopRoots()) do
         local ids = noctalia.listDir(root)
         if type(ids) == "table" then
             for _, candidate in ipairs(ids) do
                 workshopNamesExamined += 1
                 local id = tostring(candidate)
-                if id:match("^%d+$") and not seenIds[id] then
+                if wallInOne.validWorkshopId(id) and not seenIds[id] then
                     seenIds[id] = true
                     table.insert(workshopCandidates, { id = id, directory = root .. id .. "/" })
                     if #workshopCandidates >= MAX_LIBRARY_CANDIDATES then
@@ -1508,67 +3204,112 @@ refreshLibrary = function()
     end)
 
     libraryScan = {
+        image_root = imageRoot,
         video_root = videoRoot,
-        video_entries = videoEntries,
-        video_index = 1,
+        media_entries = mediaEntries,
+        media_index = 1,
         workshop_candidates = workshopCandidates,
         workshop_index = 1,
+        stills = {},
         videos = {},
         workshops = {},
-        phase = "videos",
+        phase = "media",
     }
     library = {
+        stills = type(library.stills) == "table" and library.stills or {},
         videos = type(library.videos) == "table" and library.videos or {},
         workshops = type(library.workshops) == "table" and library.workshops or {},
         scanned_at = tostring(library.scanned_at or ""),
-        error = "",
+        error = managedDirectoryError,
         scanning = true,
     }
+    wallInOne.markStateDomain("library")
 end
 
-local function stepLibraryScan()
+function wallInOne.stepLibraryScan()
     local scan = libraryScan
     if type(scan) ~= "table" then
         return false
     end
-    local supportedVideo = {
-        [".mp4"] = true,
-        [".mkv"] = true,
-        [".webm"] = true,
-        [".mov"] = true,
-        [".avi"] = true,
-        [".m4v"] = true,
-        [".gif"] = true,
-    }
     local budget = LIBRARY_SCAN_BATCH
-    while budget > 0 and scan.phase == "videos" do
-        local name = scan.video_entries[scan.video_index]
-        if name == nil or #scan.videos >= MAX_REEL_ENTRIES then
+    while budget > 0 and scan.phase == "media" do
+        local candidate = scan.media_entries[scan.media_index]
+        if candidate == nil or (#scan.videos >= MAX_PLAYLIST_ENTRIES and #scan.stills >= MAX_PLAYLIST_ENTRIES) then
             scan.phase = "workshops"
             break
         end
-        scan.video_index += 1
+        scan.media_index += 1
         budget -= 1
-        local path = scan.video_root .. (if scan.video_root == "/" then "" else "/") .. name
+        local path = tostring(candidate.path or "")
+        local name = tostring(candidate.name or path:match("([^/]+)$") or path)
         local info = noctalia.fileInfo(path)
         local extension = path:lower():match("(%.[%w]+)$") or ""
-        if
-            type(info) == "table"
-            and info.isDir ~= true
-            and (tonumber(info.size) or 0) > 0
-            and supportedVideo[extension]
-        then
-            table.insert(scan.videos, {
+        local expectedMedia = tostring(candidate.media_type or "")
+        local supported = if expectedMedia == "image"
+            then SUPPORTED_IMAGE_EXTENSIONS[extension] == true
+            else SUPPORTED_VIDEO_EXTENSIONS[extension] == true
+        -- When both user roots are the same, classify animated GIF as video
+        -- instead of showing the identical file in both sections.
+        if expectedMedia == "image" and extension == ".gif" and scan.image_root == scan.video_root then
+            supported = false
+        end
+        if type(info) == "table" and info.isDir ~= true and (tonumber(info.size) or 0) > 0 and supported then
+            local entry = {
+                id = expectedMedia .. ":" .. SERVICE_NONCE .. ":" .. wallInOne.libraryPathToken(path),
                 path = path,
                 name = name,
                 size = tonumber(info.size) or 0,
                 mtime = tonumber(info.mtime) or 0,
-            })
+                media_type = expectedMedia,
+                -- A path under a managed root is still ordinary user media
+                -- until its exact provider sidecar validates below.
+                provider = "local",
+                ownership = "user",
+                managed = false,
+                deletable = false,
+                sidecar = "",
+            }
+            if candidate.ownership == "managed-auto" then
+                local record, sidecarPath = wallInOne.readManagedStillSidecar(path)
+                if record ~= nil then
+                    entry.ownership = "managed"
+                    entry.managed = true
+                    entry.deletable = true
+                    entry.sidecar = sidecarPath
+                    entry.dynamic_id = tostring(record.dynamic_id or "")
+                    entry.provider = tostring(record.provider or "Wall-in-One")
+                end
+            elseif candidate.ownership == "managed-motionbgs" then
+                local record, sidecarPath = wallInOne.readProviderSidecar(path, ".motionbgs.json", "MotionBGS")
+                if record ~= nil then
+                    entry.ownership = "managed"
+                    entry.managed = true
+                    entry.deletable = true
+                    entry.sidecar = sidecarPath
+                    entry.source_url = tostring(record.source_page or "")
+                    entry.provider = "MotionBGS"
+                end
+            elseif candidate.ownership == "managed-wallhaven" then
+                local record, sidecarPath = wallInOne.readProviderSidecar(path, ".wallhaven.json", "Wallhaven")
+                if record ~= nil then
+                    entry.ownership = "managed"
+                    entry.managed = true
+                    entry.deletable = true
+                    entry.sidecar = sidecarPath
+                    entry.source_url = tostring(record.source_page or "")
+                    entry.provider = "Wallhaven"
+                end
+            end
+            if expectedMedia == "image" and #scan.stills < MAX_PLAYLIST_ENTRIES then
+                table.insert(scan.stills, entry)
+            elseif expectedMedia == "video" and #scan.videos < MAX_PLAYLIST_ENTRIES then
+                table.insert(scan.videos, entry)
+            end
         end
     end
     while budget > 0 and scan.phase == "workshops" do
         local candidate = scan.workshop_candidates[scan.workshop_index]
-        if candidate == nil or #scan.workshops >= MAX_REEL_ENTRIES then
+        if candidate == nil or #scan.workshops >= MAX_PLAYLIST_ENTRIES then
             scan.phase = "done"
             break
         end
@@ -1585,13 +3326,16 @@ local function stepLibraryScan()
             local raw = noctalia.readFile(projectPath)
             local project = type(raw) == "string" and noctalia.json.decode(raw) or nil
             if type(project) == "table" then
-                local preview = safeRelativePath(project.preview or "preview.jpg")
+                local preview = wallInOne.safeRelativePath(project.preview or "preview.jpg")
                 table.insert(scan.workshops, {
                     id = candidate.id,
-                    title = boundedDetail(project.title or ("Workshop " .. candidate.id)),
-                    kind = boundedDetail(project.type or "unknown"),
+                    title = wallInOne.boundedDetail(project.title or ("Workshop " .. candidate.id)),
+                    kind = wallInOne.boundedDetail(project.type or "unknown"),
                     directory = candidate.directory,
                     preview = if preview ~= nil then candidate.directory .. preview else "",
+                    ownership = "steam",
+                    managed = false,
+                    deletable = false,
                 })
             end
         end
@@ -1600,52 +3344,31 @@ local function stepLibraryScan()
         return false
     end
 
-    local motionDownload = type(motionBgsStatus) == "table"
-            and type(motionBgsStatus.last_download) == "table"
-            and tostring(motionBgsStatus.last_download.path or "")
-        or ""
-    if motionDownload ~= "" then
-        local alreadyListed = false
-        for _, entry in ipairs(scan.videos) do
-            if tostring(entry.path or "") == motionDownload then
-                alreadyListed = true
-                break
-            end
-        end
-        local info = noctalia.fileInfo(motionDownload)
-        local extension = motionDownload:lower():match("(%.[%w]+)$") or ""
-        if
-            not alreadyListed
-            and type(info) == "table"
-            and info.isDir ~= true
-            and (tonumber(info.size) or 0) > 0
-            and supportedVideo[extension]
-        then
-            table.insert(scan.videos, 1, {
-                path = motionDownload,
-                name = tostring(motionBgsStatus.last_download.title or motionDownload:match("([^/]+)$") or "MotionBGS"),
-                size = tonumber(info.size) or 0,
-                mtime = tonumber(info.mtime) or 0,
-                provider = "MotionBGS",
-                source_url = tostring(motionBgsStatus.last_download.source_url or MOTIONBGS_URL),
-            })
-        end
-    end
+    table.sort(scan.stills, function(left, right)
+        return tostring(left.name):lower() < tostring(right.name):lower()
+    end)
+    table.sort(scan.videos, function(left, right)
+        return tostring(left.name):lower() < tostring(right.name):lower()
+    end)
     table.sort(scan.workshops, function(left, right)
         return tostring(left.title):lower() < tostring(right.title):lower()
     end)
     library = {
+        stills = scan.stills,
         videos = scan.videos,
         workshops = scan.workshops,
         scanned_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
-        error = "",
+        error = managedDirectoryError,
         scanning = false,
     }
     libraryScan = nil
+    wallInOne.markStateDomain("library")
     return true
 end
 
-local function captureHelper()
+-- Still capture, pairing, palettes, and serialized wallpaper application ---
+
+function wallInOne.captureHelper()
     local pluginDirectory = noctalia.pluginDir()
     if type(pluginDirectory) ~= "string" or pluginDirectory == "" then
         return nil
@@ -1654,7 +3377,7 @@ local function captureHelper()
     return if noctalia.fileExists(path) then path else nil
 end
 
-local function sanitizedName(value)
+function wallInOne.sanitizedName(value)
     local cleaned = tostring(value or ""):gsub("[^%w._-]", "-"):gsub("%-+", "-")
     cleaned = cleaned:gsub("^%-", ""):gsub("%-$", "")
     if #cleaned > 64 then
@@ -1663,7 +3386,7 @@ local function sanitizedName(value)
     return if cleaned == "" then "wallpaper" else cleaned
 end
 
-local function stablePathTag(value)
+function wallInOne.stablePathTag(value)
     -- A deterministic, non-cryptographic tag prevents equal basename/size/
     -- mtime files in different directories from sharing a capture filename.
     local hash = 0
@@ -1674,16 +3397,18 @@ local function stablePathTag(value)
     return string.format("%08x", hash)
 end
 
-local function fileExtension(path)
+function wallInOne.fileExtension(path)
     return tostring(path or ""):lower():match("(%.[%w]+)$") or ""
 end
 
-local function captureDestination(prefix, identity, output, extension)
-    local directory = captureDirectory()
+function wallInOne.captureDestination(prefix, identity, output, extension, managedAutomatic)
+    local directory = if managedAutomatic == true then wallInOne.automaticStillDirectory() else wallInOne.captureDirectory()
     if directory == "" then
         return nil, noctalia.tr("errors.capture_directory")
     end
-    local ok, directoryError = noctalia.mkdirAll(directory)
+    local ok, directoryError = if managedAutomatic == true
+        then wallInOne.ensureManagedDirectory(directory, "automatic-stills")
+        else noctalia.mkdirAll(directory)
     if ok ~= true then
         return nil, tostring(directoryError or noctalia.tr("errors.capture_directory"))
     end
@@ -1691,16 +3416,91 @@ local function captureDestination(prefix, identity, output, extension)
     return directory
         .. separator
         .. "wall-in-one-"
-        .. sanitizedName(prefix)
+        .. wallInOne.sanitizedName(prefix)
         .. "-"
-        .. sanitizedName(identity)
+        .. wallInOne.sanitizedName(identity)
         .. "-"
-        .. sanitizedName(output or "all")
+        .. wallInOne.sanitizedName(output or "all")
         .. extension,
         nil
 end
 
-local function adapterStagingPath(requestId)
+function wallInOne.directChildOf(path, directory)
+    path = tostring(path or "")
+    directory = wallInOne.normalizedDirectory(directory)
+    if directory == nil or path:sub(1, #directory + 1) ~= directory .. "/" then
+        return false
+    end
+    local name = path:sub(#directory + 2)
+    return name ~= "" and not name:find("/", 1, true) and not name:find("[%c]")
+end
+
+function wallInOne.managedStillSidecar(path)
+    return tostring(path or "") .. MANAGED_SIDECAR_SUFFIX
+end
+
+wallInOne.readManagedStillSidecar = function(path)
+    if not wallInOne.directChildOf(path, wallInOne.automaticStillDirectory()) then
+        return nil
+    end
+    local sidecarPath = wallInOne.managedStillSidecar(path)
+    local raw = wallInOne.readBoundedRegularFile(sidecarPath, MAX_MANAGED_SIDECAR_BYTES)
+    local record = type(raw) == "string" and #raw <= MAX_MANAGED_SIDECAR_BYTES and noctalia.json.decode(raw) or nil
+    if
+        type(record) ~= "table"
+        or tonumber(record.schema) ~= 1
+        or record.plugin ~= "goober/wall-in-one"
+        or record.kind ~= "automatic-still"
+        or record.path ~= path
+        or type(record.dynamic_id) ~= "string"
+        or record.dynamic_id == ""
+    then
+        return nil
+    end
+    return record, sidecarPath
+end
+
+function wallInOne.writeManagedStillSidecar(request, path)
+    if type(request) ~= "table" or request.managed_auto ~= true then
+        return true, nil
+    end
+    local directory = wallInOne.automaticStillDirectory()
+    if not wallInOne.directChildOf(path, directory) then
+        return false, noctalia.tr("errors.managed_path")
+    end
+    local markerOk, markerError = wallInOne.ensureManagedDirectory(directory, "automatic-stills")
+    if not markerOk then
+        return false, markerError
+    end
+    local sidecarPath = wallInOne.managedStillSidecar(path)
+    local encoded, encodeError = noctalia.json.encode({
+        schema = 1,
+        plugin = "goober/wall-in-one",
+        kind = "automatic-still",
+        path = path,
+        provider = tostring(request.provider or ""),
+        dynamic_id = tostring(request.dynamic_id or ""),
+        source = tostring(type(request.spec) == "table" and request.spec.source or ""),
+        created_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
+    }, true)
+    if type(encoded) ~= "string" then
+        return false, tostring(encodeError or noctalia.tr("errors.encode"))
+    end
+    local temporary = sidecarPath .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, encoded .. "\n")
+    if wrote ~= true then
+        return false, tostring(writeError or noctalia.tr("errors.write"))
+    end
+    local installed, installError = noctalia.renameFile(temporary, sidecarPath)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or noctalia.tr("errors.install"))
+    end
+    request.sidecar_path = sidecarPath
+    return true, nil
+end
+
+function wallInOne.adapterStagingPath(requestId)
     local dataDirectory, dataError = noctalia.pluginDataDir()
     if
         type(dataDirectory) ~= "string"
@@ -1718,7 +3518,7 @@ local function adapterStagingPath(requestId)
     return directory .. "/capture-" .. requestId .. ".png", nil
 end
 
-local function cleanupOwnedStaging()
+function wallInOne.cleanupOwnedStaging()
     local dataDirectory = noctalia.pluginDataDir()
     if type(dataDirectory) ~= "string" or dataDirectory == "" or dataDirectory:find("[%c]") then
         return
@@ -1736,10 +3536,10 @@ local function cleanupOwnedStaging()
     end
 end
 
-local function workshopFallbackSpec(id)
-    local info, directory = findWorkshopProject(id)
+function wallInOne.workshopFallbackSpec(id)
+    local info, directory = wallInOne.findWorkshopProject(id)
     local kind = string.lower(tostring(type(info) == "table" and info.type or ""))
-    local file = safeRelativePath(type(info) == "table" and info.file or nil)
+    local file = wallInOne.safeRelativePath(type(info) == "table" and info.file or nil)
     if kind == "video" and file ~= nil and noctalia.commandExists("ffmpeg") then
         local source = directory .. file
         if noctalia.fileExists(source) then
@@ -1747,16 +3547,16 @@ local function workshopFallbackSpec(id)
                 mode = "video",
                 source = source,
                 extension = ".png",
-                value = settingInt("video_frame_second", 1, 0, 3600),
+                value = wallInOne.settingInt("video_frame_second", 1, 0, 3600),
                 method = "ffmpeg-video-frame",
             }
         end
     end
 
-    local preview = safeRelativePath(type(info) == "table" and info.preview or "preview.jpg")
+    local preview = wallInOne.safeRelativePath(type(info) == "table" and info.preview or "preview.jpg")
     if directory ~= nil and preview ~= nil then
         local source = directory .. preview
-        local extension = fileExtension(source)
+        local extension = wallInOne.fileExtension(source)
         if noctalia.fileExists(source) then
             if extension == ".jpg" or extension == ".jpeg" or extension == ".png" or extension == ".webp" then
                 return { mode = "copy", source = source, extension = extension, value = "", method = "workshop-preview" }
@@ -1768,10 +3568,10 @@ local function workshopFallbackSpec(id)
     return nil, noctalia.tr("errors.capture_source", { id = tostring(id) })
 end
 
-local function videoCaptureSpec(sourceOverride)
+function wallInOne.videoCaptureSpec(sourceOverride)
     local source = tostring(sourceOverride or "")
     if source == "" then
-        source = configuredVideoSource()
+        source = wallInOne.configuredVideoSource()
     end
     local info = source ~= "" and noctalia.fileInfo(source) or nil
     if source == "" or type(info) ~= "table" or info.isDir == true then
@@ -1784,29 +3584,100 @@ local function videoCaptureSpec(sourceOverride)
         mode = "video",
         source = source,
         extension = ".png",
-        value = settingInt("video_frame_second", 1, 0, 3600),
+        value = wallInOne.settingInt("video_frame_second", 1, 0, 3600),
         method = "ffmpeg-video-frame",
     }
 end
 
-local function applyPairedStill(output, dynamicId, path, method, notifySuccess)
-    local stillInfo = noctalia.fileInfo(path)
-    if output ~= nil then
-        noctalia.setWallpaper(output, path)
-    else
-        noctalia.setWallpaper(path)
+function wallInOne.paletteInventoryContains(source, selection)
+    local palettes = type(palettesStatus.palettes) == "table" and palettesStatus.palettes or palettesStatus
+    for _, item in ipairs(type(palettes[source]) == "table" and palettes[source] or {}) do
+        if type(item) == "table" and tostring(item.name or "") == selection then
+            return true
+        end
     end
+    return false
+end
 
-    local syncColors = settingBool("sync_colors", false)
-    local key = output or "all"
-    local provider = "w_engine"
-    if tostring(dynamicId):match("^video:") then
-        provider = "video"
-    elseif tostring(dynamicId):match("^manual:") then
-        provider = "manual"
-    elseif tostring(dynamicId):match("^static:") then
-        provider = "noctalia"
+function wallInOne.resolvedPalettePolicy(candidate)
+    local requested = wallInOne.normalizedTheme(candidate) or wallInOne.legacyThemePolicy()
+    if requested.source == "inherit" then
+        return requested, requested, false, ""
     end
+    local inventoryPending = (requested.source == "community" or requested.source == "custom")
+        and palettesStatus.ready ~= true
+    local available = inventoryPending
+        or (requested.source == "wallpaper" and VALID_COLOR_SCHEMES[requested.selection] == true)
+        or (requested.source == "builtin" and BUILTIN_PALETTES[requested.selection] == true)
+        or (
+            (requested.source == "community" or requested.source == "custom")
+            and wallInOne.paletteInventoryContains(requested.source, requested.selection)
+        )
+    if available then
+        return requested, requested, false, ""
+    end
+    return requested,
+        { mode = requested.mode, source = "builtin", selection = "Noctalia" },
+        true,
+        noctalia.tr("errors.palette_missing", { source = requested.source, selection = requested.selection })
+end
+
+function wallInOne.connectedOutputNames()
+    local names = {}
+    for _, outputInfo in ipairs(noctalia.outputs()) do
+        local name = tostring(outputInfo.name or "")
+        if name ~= "" then
+            table.insert(names, name)
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+function wallInOne.resolvedPaletteAuthority(preferred)
+    local configured = wallInOne.settingString("palette_output", "")
+    if configured ~= "" and wallInOne.knownOutputName(configured) ~= nil then
+        return configured
+    end
+    if configured == "" and wallInOne.knownOutputName(preferred) ~= nil then
+        return preferred
+    end
+    return wallInOne.connectedOutputNames()[1] or ""
+end
+
+function wallInOne.pairProvider(dynamicId)
+    if tostring(dynamicId):match("^video:") then
+        return "video"
+    elseif tostring(dynamicId):match("^manual:") then
+        return "manual"
+    elseif tostring(dynamicId):match("^static:") then
+        return "noctalia"
+    end
+    return "w_engine"
+end
+
+function wallInOne.dynamicSourceFingerprint(dynamicId)
+    dynamicId = tostring(dynamicId or "")
+    local info = nil
+    if dynamicId:sub(1, 6) == "video:" then
+        info = noctalia.fileInfo(dynamicId:sub(7))
+    elseif wallInOne.validWorkshopId(dynamicId) then
+        local _project, directory = wallInOne.findWorkshopProject(dynamicId)
+        if directory ~= nil then
+            info = noctalia.fileInfo(directory .. "project.json")
+        end
+    end
+    if type(info) ~= "table" or info.isDir == true or (tonumber(info.size) or 0) <= 0 then
+        return nil, nil
+    end
+    return math.floor(tonumber(info.size) or 0), math.floor(tonumber(info.mtime) or 0)
+end
+
+function wallInOne.recordAppliedPair(output, dynamicId, path, method, managedStill, sidecarPath, theme)
+    local stillInfo = noctalia.fileInfo(path)
+    local sourceSize, sourceMtime = wallInOne.dynamicSourceFingerprint(dynamicId)
+    local key = output or "all"
+    local provider = wallInOne.pairProvider(dynamicId)
     runtime.pairs[key] = {
         provider = provider,
         dynamic_id = dynamicId,
@@ -1815,9 +3686,14 @@ local function applyPairedStill(output, dynamicId, path, method, notifySuccess)
         paired_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
         color_source_before = colors.source,
         color_scheme_before = colors.scheme,
-        color_scheme = if syncColors then configuredColorScheme() else "unchanged",
+        color_scheme = if type(theme) == "table" and theme.source ~= "inherit" then theme.selection else "unchanged",
         still_size = type(stillInfo) == "table" and (tonumber(stillInfo.size) or 0) or 0,
         still_mtime = type(stillInfo) == "table" and (tonumber(stillInfo.mtime) or 0) or 0,
+        source_size = tonumber(sourceSize) or 0,
+        source_mtime = tonumber(sourceMtime) or 0,
+        still_managed = managedStill == true,
+        still_origin = if managedStill == true then "managed-auto" else "user",
+        sidecar_path = if managedStill == true then tostring(sidecarPath or wallInOne.managedStillSidecar(path)) else "",
     }
     runtime.pair_registry[tostring(dynamicId)] = {
         provider = provider,
@@ -1827,6 +3703,11 @@ local function applyPairedStill(output, dynamicId, path, method, notifySuccess)
         paired_at = runtime.pairs[key].paired_at,
         still_size = runtime.pairs[key].still_size,
         still_mtime = runtime.pairs[key].still_mtime,
+        source_size = runtime.pairs[key].source_size,
+        source_mtime = runtime.pairs[key].source_mtime,
+        still_managed = runtime.pairs[key].still_managed,
+        still_origin = runtime.pairs[key].still_origin,
+        sidecar_path = runtime.pairs[key].sidecar_path,
     }
     local registryEntries = {}
     for registryKey, pair in pairs(runtime.pair_registry) do
@@ -1865,73 +3746,416 @@ local function applyPairedStill(output, dynamicId, path, method, notifySuccess)
         end
     end
 
-    local paletteLeader = knownOutputName(settingString("palette_output", ""))
-    if syncColors and paletteLeader ~= nil and paletteLeader ~= output then
-        local leaderPair = runtime.pairs[paletteLeader]
-        if
-            type(leaderPair) == "table"
-            and type(leaderPair.still_path) == "string"
-            and noctalia.fileExists(leaderPair.still_path)
-        then
-            -- Noctalia has one global palette. Re-applying the chosen leader
-            -- last makes that output's persisted still the deterministic source.
-            noctalia.setWallpaper(paletteLeader, leaderPair.still_path)
-        end
-    end
-
     lastActionAt = runtime.pairs[key].paired_at
     lastActionError = ""
-    persistRuntimeIfChanged(true)
-    publishStatus()
+    wallInOne.persistRuntimeIfChanged(true)
+end
 
-    local function finishColorSync(colorError)
-        if colorError ~= nil and colorError ~= "" then
-            lastActionError = colorError
-            notifyBounded("color-sync", colorError)
-        else
-            lastActionError = ""
-        end
-        publishStatus()
-        if notifySuccess then
-            noctalia.notify(noctalia.tr("plugin.title"), noctalia.tr("notifications.paired", { path = path }))
-        end
-    end
+function wallInOne.applyThemePolicy(request, onComplete)
+    local requested, applied, usedFallback, fallbackReason = wallInOne.resolvedPalettePolicy(request.theme)
+    local requestedRecord = {
+        mode = requested.mode,
+        source = requested.source,
+        selection = requested.selection,
+        output = request.output,
+        playlist = tostring(request.playlist_id or ""),
+        entry = tostring(request.entry_id or ""),
+        fallback = false,
+        resolution = "requested",
+        applied_at = "",
+    }
+    runtime.palette.authority_output = tostring(request.authority_output or "")
+    runtime.palette.requested = requestedRecord
 
-    -- Pairing itself never changes the theme source unless this explicit
-    -- opt-in is enabled. If the user's existing source is already `wallpaper`,
-    -- Noctalia may naturally regenerate its global palette from the new still.
-    if not syncColors then
-        finishColorSync(nil)
+    if requested.source == "inherit" then
+        runtime.palette.last_error = ""
+        wallInOne.persistRuntimeIfChanged(true)
+        onComplete(true, "")
         return
     end
     if not noctalia.commandExists("noctalia") then
-        finishColorSync(noctalia.tr("errors.color_cli"))
+        local failure = noctalia.tr("errors.color_cli")
+        runtime.palette.last_error = failure
+        wallInOne.persistRuntimeIfChanged(true)
+        onComplete(false, failure)
         return
     end
-    local scheme = configuredColorScheme()
-    local started = noctalia.runAsync("noctalia msg color-scheme-set wallpaper " .. shellQuote(scheme), function(result)
-        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            finishColorSync(noctalia.tr("errors.color_sync", { detail = commandFailureDetail(result) }))
-        else
-            colors.source = "wallpaper"
-            colors.scheme = scheme
-            colors.error = ""
-            finishColorSync(nil)
+
+    local function stillCurrent()
+        if type(request.should_apply) ~= "function" then
+            return true
         end
+        local checked, current = pcall(request.should_apply)
+        return checked and current == true
+    end
+    local function fail(message)
+        message = tostring(message or noctalia.tr("errors.color_sync_start"))
+        runtime.palette.last_error = message
+        wallInOne.persistRuntimeIfChanged(true)
+        onComplete(false, message)
+    end
+    local function applyPalette()
+        if not stillCurrent() then
+            fail(noctalia.tr("errors.capture_replaced"))
+            return
+        end
+        local command = "noctalia msg color-scheme-set "
+            .. wallInOne.shellQuote(applied.source)
+            .. " "
+            .. wallInOne.shellQuote(applied.selection)
+        local started = noctalia.runAsync(command, function(result)
+            if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
+                fail(noctalia.tr("errors.color_sync", { detail = wallInOne.commandFailureDetail(result) }))
+                return
+            end
+            colors.source = applied.source
+            colors.scheme = applied.selection
+            colors.mode = applied.mode
+            colors.error = ""
+            runtime.palette.applied = {
+                mode = applied.mode,
+                source = applied.source,
+                selection = applied.selection,
+                output = request.output,
+                playlist = tostring(request.playlist_id or ""),
+                entry = tostring(request.entry_id or ""),
+                fallback = usedFallback,
+                resolution = if usedFallback
+                    then "degraded"
+                    elseif applied.source == "community" then "pending"
+                    else "assumed",
+                applied_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
+            }
+            runtime.palette.last_error = fallbackReason
+            wallInOne.persistRuntimeIfChanged(true)
+            onComplete(true, fallbackReason)
+        end, 5000)
+        if not started then
+            fail(noctalia.tr("errors.color_sync_start"))
+        end
+    end
+
+    if applied.mode == "inherit" then
+        applyPalette()
+        return
+    end
+    local started = noctalia.runAsync("noctalia msg theme-mode-set " .. wallInOne.shellQuote(applied.mode), function(result)
+        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
+            fail(noctalia.tr("errors.theme_mode", { detail = wallInOne.commandFailureDetail(result) }))
+            return
+        end
+        applyPalette()
     end, 5000)
     if not started then
-        finishColorSync(noctalia.tr("errors.color_sync_start"))
+        fail(noctalia.tr("errors.theme_mode_start"))
     end
 end
 
-local function releaseCaptureSlot(key)
+function wallInOne.runPairedStill(request, onComplete)
+    local output = request.output
+    local dynamicId = tostring(request.dynamic_id or "")
+    local path = tostring(request.path or "")
+    local method = tostring(request.method or "")
+    local notifySuccess = request.notify == true
+    local managedStill = request.managed == true
+    local sidecarPath = tostring(request.sidecar_path or "")
+    local themePolicy = request.theme
+    local shouldApply = request.should_apply
+    local paletteAllowed = request.palette_allowed
+    local playlistId = tostring(request.playlist_id or "")
+    local entryId = tostring(request.entry_id or "")
+    local recordPair = request.record_pair ~= false
+    local completed = false
+    local function finish(ok, errorMessage)
+        if completed then
+            return
+        end
+        completed = true
+        if ok ~= true and tostring(errorMessage or "") ~= "" then
+            wallInOne.setActionError(tostring(errorMessage), "apply-still")
+        end
+        -- Queue the dynamic renderer continuation before any observational
+        -- publication. Noctalia callbacks have a finite CPU budget, so status
+        -- work must never strand a successfully applied backing still.
+        if type(onComplete) == "function" then
+            onComplete(ok == true, path, errorMessage)
+        end
+        if ok == true and notifySuccess then
+            noctalia.notify(noctalia.tr("plugin.title"), noctalia.tr("notifications.paired", { path = path }))
+        end
+        wallInOne.publishStatus()
+    end
+    local function stillCurrent()
+        if output ~= nil and wallInOne.knownOutputName(output) == nil then
+            return false
+        end
+        if type(shouldApply) ~= "function" then
+            return true
+        end
+        local checked, current = pcall(shouldApply)
+        return checked and current == true
+    end
+    local info = noctalia.fileInfo(path)
+    if type(info) ~= "table" or info.isDir == true or (tonumber(info.size) or 0) <= 0 then
+        finish(false, noctalia.tr("errors.playlist_still_missing", { path = tostring(path or "") }))
+        return false
+    end
+    if not stillCurrent() then
+        finish(false, noctalia.tr("errors.capture_replaced"))
+        return false
+    end
+    if not noctalia.commandExists("noctalia") then
+        finish(false, noctalia.tr("errors.noctalia_cli"))
+        return false
+    end
+
+    local command = "noctalia msg wallpaper-set "
+    if output ~= nil then
+        command ..= wallInOne.shellQuote(output) .. " "
+    end
+    command ..= wallInOne.shellQuote(path)
+    local started = noctalia.runAsync(command, function(result)
+        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
+            finish(false, noctalia.tr("errors.wallpaper_apply", { detail = wallInOne.commandFailureDetail(result) }))
+            return
+        end
+        if not stillCurrent() then
+            finish(false, noctalia.tr("errors.capture_replaced"))
+            return
+        end
+        local requestedTheme = wallInOne.normalizedTheme(themePolicy) or wallInOne.legacyThemePolicy()
+        if recordPair then
+            wallInOne.recordAppliedPair(output, dynamicId, path, method, managedStill, sidecarPath, requestedTheme)
+        end
+
+        local authority = wallInOne.resolvedPaletteAuthority(output)
+        local configuredAuthority = wallInOne.settingString("palette_output", "")
+        local mayApplyPalette = paletteAllowed ~= false and (configuredAuthority == "" or output == authority)
+        if not mayApplyPalette or requestedTheme.source == "inherit" then
+            -- During a coordinated multi-output switch the selected authority
+            -- is applied last. An isolated non-authority switch restores the
+            -- authority's persisted still so wallpaper-derived global colors
+            -- do not drift to the wrong display.
+            if paletteAllowed == nil and configuredAuthority ~= "" and authority ~= "" and authority ~= output then
+                local authorityPair = runtime.pairs[authority]
+                local authorityPath = type(authorityPair) == "table" and tostring(authorityPair.still_path or "") or ""
+                if authorityPath ~= "" and noctalia.fileExists(authorityPath) then
+                    local restoreStarted = noctalia.runAsync(
+                        "noctalia msg wallpaper-set " .. wallInOne.shellQuote(authority) .. " " .. wallInOne.shellQuote(authorityPath),
+                        function(restoreResult)
+                            if
+                                type(restoreResult) ~= "table"
+                                or restoreResult.timedOut
+                                or tonumber(restoreResult.exitCode) ~= 0
+                            then
+                                finish(false, noctalia.tr("errors.palette_authority_restore"))
+                            else
+                                local authorityTheme = wallInOne.normalizedTheme(runtime.palette.requested)
+                                if authorityTheme == nil or authorityTheme.source == "inherit" then
+                                    finish(true, nil)
+                                else
+                                    wallInOne.applyThemePolicy({
+                                        output = authority,
+                                        authority_output = authority,
+                                        playlist_id = runtime.palette.requested.playlist,
+                                        entry_id = runtime.palette.requested.entry,
+                                        theme = authorityTheme,
+                                    }, function(themeOk, themeError)
+                                        finish(themeOk, if themeOk == true then nil else themeError)
+                                    end)
+                                end
+                            end
+                        end,
+                        5000
+                    )
+                    if not restoreStarted then
+                        finish(false, noctalia.tr("errors.palette_authority_restore"))
+                    end
+                    return
+                end
+                local failure = noctalia.tr("errors.palette_authority_restore")
+                runtime.palette.authority_output = authority
+                runtime.palette.last_error = failure
+                wallInOne.persistRuntimeIfChanged(true)
+                wallInOne.notifyBounded("palette-authority-restore", failure)
+            end
+            finish(true, nil)
+            return
+        end
+        wallInOne.applyThemePolicy({
+            output = output,
+            authority_output = authority,
+            playlist_id = playlistId,
+            entry_id = entryId,
+            theme = requestedTheme,
+            should_apply = shouldApply,
+        }, function(ok, paletteMessage)
+            if ok == true and paletteMessage ~= "" then
+                wallInOne.notifyBounded("palette-fallback", paletteMessage)
+            end
+            finish(ok, if ok == true then nil else paletteMessage)
+        end)
+    end, 7000)
+    if not started then
+        finish(false, noctalia.tr("errors.wallpaper_apply_start"))
+        return false
+    end
+    return true
+end
+
+function wallInOne.applyPairedStill(request)
+    if type(request) ~= "table" then
+        return false
+    end
+    local outputKey = tostring(request.output or "all")
+    if wallpaperApplyInFlight ~= nil then
+        for index = #wallpaperApplyQueued, 1, -1 do
+            local queued = wallpaperApplyQueued[index]
+            if type(queued) == "table" and tostring(queued.output or "all") == outputKey then
+                table.remove(wallpaperApplyQueued, index)
+                if type(queued.on_complete) == "function" then
+                    pcall(queued.on_complete, false, nil, noctalia.tr("errors.capture_replaced"))
+                end
+                break
+            end
+        end
+        if #wallpaperApplyQueued >= 64 then
+            if type(request.on_complete) == "function" then
+                pcall(request.on_complete, false, nil, noctalia.tr("errors.apply_queue_full"))
+            end
+            return false
+        end
+        table.insert(wallpaperApplyQueued, request)
+        return true
+    end
+
+    local function start(current)
+        wallpaperApplyInFlight = current
+        return wallInOne.runPairedStill(current, function(ok, path, errorMessage)
+            if wallpaperApplyInFlight == current then
+                wallpaperApplyInFlight = nil
+            end
+            local nextRequest = table.remove(wallpaperApplyQueued, 1)
+            if type(nextRequest) == "table" then
+                start(nextRequest)
+            end
+            if type(current.on_complete) == "function" then
+                local callbackOk, callbackError = pcall(current.on_complete, ok, path, errorMessage)
+                if not callbackOk then
+                    wallInOne.setActionError(
+                        noctalia.tr("errors.capture_callback", { detail = wallInOne.boundedDetail(callbackError) }),
+                        nil
+                    )
+                end
+            end
+        end)
+    end
+    return start(request)
+end
+
+function wallInOne.reassertPaletteAuthority(onComplete)
+    paletteAuthorityGeneration += 1
+    local generation = paletteAuthorityGeneration
+    local authority = wallInOne.resolvedPaletteAuthority(nil)
+    local pair = authority ~= "" and runtime.pairs[authority] or nil
+    local path = type(pair) == "table" and tostring(pair.still_path or "") or ""
+    if authority == "" or path == "" or not noctalia.fileExists(path) then
+        onComplete(false, noctalia.tr("errors.palette_authority_restore"))
+        return
+    end
+    local requested = type(runtime.palette.requested) == "table" and runtime.palette.requested or {}
+    local theme = wallInOne.normalizedTheme(requested) or { mode = "inherit", source = "inherit", selection = "" }
+    wallInOne.applyPairedStill({
+        output = authority,
+        dynamic_id = tostring(pair.dynamic_id or ""),
+        path = path,
+        method = tostring(pair.capture_method or "palette-authority-restore"),
+        notify = false,
+        managed = pair.still_managed == true,
+        sidecar_path = tostring(pair.sidecar_path or ""),
+        theme = theme,
+        playlist_id = tostring(requested.playlist or ""),
+        entry_id = tostring(requested.entry or ""),
+        palette_allowed = true,
+        record_pair = false,
+        should_apply = function()
+            return paletteAuthorityGeneration == generation
+                and wallInOne.resolvedPaletteAuthority(nil) == authority
+                and wallInOne.knownOutputName(authority) ~= nil
+        end,
+        on_complete = function(ok, _path, errorMessage)
+            onComplete(ok == true, if ok == true then "" else tostring(errorMessage or ""))
+        end,
+    })
+end
+
+function wallInOne.reconcilePaletteAuthority(reapply)
+    local nextAuthority = wallInOne.resolvedPaletteAuthority(nil)
+    local changed = nextAuthority ~= paletteAuthorityOutput
+    paletteAuthorityOutput = nextAuthority
+    runtime.palette.authority_output = nextAuthority
+    wallInOne.persistRuntimeIfChanged(changed)
+    if
+        reapply == true
+        and changed
+        and nextAuthority ~= ""
+        and type(runtime.palette.requested) == "table"
+        and next(runtime.palette.requested) ~= nil
+    then
+        wallInOne.reassertPaletteAuthority(function(ok, errorMessage)
+            if ok ~= true then
+                runtime.palette.last_error = tostring(errorMessage or noctalia.tr("errors.palette_authority_restore"))
+                wallInOne.persistRuntimeIfChanged(true)
+                wallInOne.publishStatus()
+            end
+        end)
+    end
+    return changed
+end
+
+function wallInOne.releaseCaptureSlot(key)
     captureInFlight[key] = nil
     activeCaptureRequests[key] = nil
     pendingAdapterCaptures[key] = nil
+    pendingInternalCaptures[key] = nil
 end
 
-local function finishCapture(key, request, ok, errorMessage)
-    releaseCaptureSlot(key)
+function wallInOne.drainInternalCapture(key)
+    local queuedInternal = internalCaptureQueued[key]
+    internalCaptureQueued[key] = nil
+    if type(queuedInternal) == "table" and type(wallInOne.requestInternalCapture) == "function" then
+        wallInOne.requestInternalCapture(queuedInternal)
+    end
+end
+
+function wallInOne.drainCaptureQueues(key)
+    local queued = captureQueued[key]
+    captureQueued[key] = nil
+    if type(queued) == "table" then
+        wallInOne.runCapture(queued)
+    end
+    local queuedAdapter = adapterCaptureQueued[key]
+    adapterCaptureQueued[key] = nil
+    if type(queuedAdapter) == "table" and type(wallInOne.requestRenderedCapture) == "function" then
+        wallInOne.requestRenderedCapture(
+            queuedAdapter.output,
+            queuedAdapter.id,
+            queuedAdapter.pair,
+            queuedAdapter.notify,
+            queuedAdapter.managed_auto
+        )
+    end
+    wallInOne.drainInternalCapture(key)
+end
+
+function wallInOne.finishCapture(key, request, ok, errorMessage)
+    local slot = captureInFlight[key]
+    if type(slot) == "table" then
+        slot.deadline = 0
+        slot.phase = if ok == true and request.pair == true then "applying" else "finishing"
+    end
+    pendingAdapterCaptures[key] = nil
+    pendingInternalCaptures[key] = nil
     if
         type(request.staging_path) == "string"
         and request.staging_path ~= ""
@@ -1941,9 +4165,24 @@ local function finishCapture(key, request, ok, errorMessage)
     end
     if ok then
         local finalPath = tostring(request.pair_path or request.destination)
+        local sidecarOk, sidecarError = wallInOne.writeManagedStillSidecar(request, finalPath)
+        if sidecarOk ~= true then
+            if request.managed_auto == true and noctalia.fileExists(finalPath) then
+                noctalia.removeFile(finalPath)
+            end
+            local failure = tostring(sidecarError or noctalia.tr("errors.managed_sidecar"))
+            wallInOne.setActionError(failure, "capture")
+            if type(request.on_complete) == "function" then
+                pcall(request.on_complete, false, nil, failure)
+            end
+            wallInOne.releaseCaptureSlot(key)
+            wallInOne.publishStatus()
+            wallInOne.drainCaptureQueues(key)
+            return
+        end
         local pairIsCurrent = true
         if request.pair and type(request.output) == "string" and request.output ~= "" then
-            pairIsCurrent = knownOutputName(request.output) ~= nil
+            pairIsCurrent = wallInOne.knownOutputName(request.output) ~= nil
         end
         if pairIsCurrent and request.pair and type(request.should_apply) == "function" then
             local checked, current = pcall(request.should_apply)
@@ -1961,40 +4200,65 @@ local function finishCapture(key, request, ok, errorMessage)
             lastActionError = ""
             lastActionAt = runtime.last_capture.captured_at
         end
-        persistRuntimeIfChanged(true)
+        wallInOne.persistRuntimeIfChanged(true)
         if request.pair and pairIsCurrent then
-            applyPairedStill(request.output, request.dynamic_id, finalPath, request.spec.method, request.notify)
+            wallInOne.applyPairedStill({
+                output = request.output,
+                dynamic_id = request.dynamic_id,
+                path = finalPath,
+                method = request.spec.method,
+                notify = request.notify,
+                managed = request.managed_auto == true,
+                sidecar_path = request.sidecar_path,
+                theme = request.theme,
+                should_apply = request.should_apply,
+                palette_allowed = request.palette_allowed,
+                playlist_id = request.playlist_id,
+                entry_id = request.entry_id,
+                on_complete = function(applied, appliedPath, applyError)
+                    wallInOne.releaseCaptureSlot(key)
+                    if type(request.on_complete) == "function" then
+                        local callbackOk, callbackError = pcall(
+                            request.on_complete,
+                            applied == true,
+                            appliedPath,
+                            applyError
+                        )
+                        if not callbackOk then
+                            wallInOne.setActionError(
+                                noctalia.tr("errors.capture_callback", { detail = wallInOne.boundedDetail(callbackError) }),
+                                nil
+                            )
+                        end
+                    end
+                    wallInOne.publishStatus()
+                    wallInOne.drainCaptureQueues(key)
+                end,
+            })
+            return
         elseif not request.pair and request.notify then
             noctalia.notify(noctalia.tr("plugin.title"), noctalia.tr("notifications.captured", { path = finalPath }))
         end
         if type(request.on_complete) == "function" then
             local callbackOk, callbackError = pcall(request.on_complete, not request.pair or pairIsCurrent, finalPath)
             if not callbackOk then
-                setActionError(noctalia.tr("errors.capture_callback", { detail = boundedDetail(callbackError) }), nil)
+                wallInOne.setActionError(noctalia.tr("errors.capture_callback", { detail = wallInOne.boundedDetail(callbackError) }), nil)
             end
         end
     else
         local failure = tostring(errorMessage or noctalia.tr("errors.capture_failed"))
-        setActionError(failure, "capture")
+        wallInOne.setActionError(failure, "capture")
         if type(request.on_complete) == "function" then
             pcall(request.on_complete, false, nil, failure)
         end
     end
-    publishStatus()
+    wallInOne.publishStatus()
 
-    local queued = captureQueued[key]
-    captureQueued[key] = nil
-    if type(queued) == "table" then
-        runCapture(queued)
-    end
-    local queuedAdapter = adapterCaptureQueued[key]
-    adapterCaptureQueued[key] = nil
-    if type(queuedAdapter) == "table" and type(requestRenderedCapture) == "function" then
-        requestRenderedCapture(queuedAdapter.output, queuedAdapter.id, queuedAdapter.pair, queuedAdapter.notify)
-    end
+    wallInOne.releaseCaptureSlot(key)
+    wallInOne.drainCaptureQueues(key)
 end
 
-runCapture = function(request)
+wallInOne.runCapture = function(request)
     local key = request.output or "all"
     if captureInFlight[key] ~= nil then
         local replaced = captureQueued[key]
@@ -2007,7 +4271,7 @@ runCapture = function(request)
             noctalia.removeFile(replaced.staging_path)
         end
         if type(replaced) == "table" and type(replaced.on_complete) == "function" then
-            pcall(replaced.on_complete, false, noctalia.tr("errors.capture_replaced"))
+            pcall(replaced.on_complete, false, nil, noctalia.tr("errors.capture_replaced"))
         end
         captureQueued[key] = request
         return
@@ -2015,9 +4279,9 @@ runCapture = function(request)
     -- Re-run the atomic helper for a destination that already exists. Pair
     -- registry fingerprints provide the normal cache fast path; a cache miss
     -- must decode-validate/re-extract instead of trusting replaced bytes.
-    local helper = captureHelper()
+    local helper = wallInOne.captureHelper()
     if helper == nil then
-        finishCapture(key, request, false, noctalia.tr("errors.capture_helper"))
+        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.capture_helper"))
         return
     end
 
@@ -2031,14 +4295,14 @@ runCapture = function(request)
         method = request.spec.method,
     }
     activeCaptureRequests[key] = request
-    publishStatus()
+    wallInOne.publishStatus()
     local command = table.concat({
         "bash",
-        shellQuote(helper),
-        shellQuote(request.spec.mode),
-        shellQuote(request.spec.source),
-        shellQuote(request.destination),
-        shellQuote(tostring(request.spec.value or "")),
+        wallInOne.shellQuote(helper),
+        wallInOne.shellQuote(request.spec.mode),
+        wallInOne.shellQuote(request.spec.source),
+        wallInOne.shellQuote(request.destination),
+        wallInOne.shellQuote(tostring(request.spec.value or "")),
     }, " ")
     local started = noctalia.runAsync(command, function(result)
         local outputInfo = noctalia.fileInfo(request.destination)
@@ -2049,55 +4313,74 @@ runCapture = function(request)
             and outputInfo.isDir ~= true
             and (tonumber(outputInfo.size) or 0) > 0
         if ok then
-            finishCapture(key, request, true, nil)
+            wallInOne.finishCapture(key, request, true, nil)
         else
-            finishCapture(
+            wallInOne.finishCapture(
                 key,
                 request,
                 false,
-                noctalia.tr("errors.capture_failed_detail", { detail = commandFailureDetail(result) })
+                noctalia.tr("errors.capture_failed_detail", { detail = wallInOne.commandFailureDetail(result) })
             )
         end
     end, 60000)
     if not started then
-        finishCapture(key, request, false, noctalia.tr("errors.capture_start"))
+        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.capture_start"))
     end
 end
 
-local function captureWorkshopFallback(output, id, force, pair, notifySuccess, onComplete, shouldApply)
+function wallInOne.captureWorkshopFallback(options)
+    options = type(options) == "table" and options or {}
+    local output = options.output
+    local id = options.id
+    local force = options.force == true
+    local pair = options.pair == true
+    local notifySuccess = options.notify == true
+    local onComplete = options.on_complete
+    local shouldApply = options.should_apply
+    local managedAutomatic = options.managed_auto == true
+    local themePolicy = options.theme
+    local paletteAllowed = options.palette_allowed
+    local playlistId = options.playlist_id
+    local entryId = options.entry_id
     if not providers.w_engine.allowed then
-        setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
+        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
         if type(onComplete) == "function" then
             onComplete(false)
         end
-        return
+        return false
     end
-    output = targetOutput(output)
+    output = wallInOne.targetOutput(output)
     id = tostring(id or "")
-    if output == nil or id:match("^%d+$") == nil then
-        setActionError(noctalia.tr("errors.no_current_scene"), "capture-current")
+    if output == nil or not wallInOne.validWorkshopId(id) then
+        wallInOne.setActionError(noctalia.tr("errors.no_current_scene"), "capture-current")
         if type(onComplete) == "function" then
             onComplete(false)
         end
-        return
+        return false
     end
-    local spec, specError = workshopFallbackSpec(id)
+    local spec, specError = wallInOne.workshopFallbackSpec(id)
     if spec == nil then
-        setActionError(specError, "capture-source")
+        wallInOne.setActionError(specError, "capture-source")
         if type(onComplete) == "function" then
             onComplete(false)
         end
-        return
+        return false
     end
-    local destination, destinationError = captureDestination("w-engine", id, output, spec.extension)
+    local destination, destinationError = wallInOne.captureDestination(
+        "w-engine",
+        id,
+        output,
+        spec.extension,
+        managedAutomatic == true
+    )
     if destination == nil then
-        setActionError(destinationError, "capture-directory")
+        wallInOne.setActionError(destinationError, "capture-directory")
         if type(onComplete) == "function" then
             onComplete(false)
         end
-        return
+        return false
     end
-    runCapture({
+    wallInOne.runCapture({
         provider = "w_engine",
         output = output,
         dynamic_id = id,
@@ -2108,22 +4391,41 @@ local function captureWorkshopFallback(output, id, force, pair, notifySuccess, o
         notify = notifySuccess == true,
         on_complete = onComplete,
         should_apply = shouldApply,
+        managed_auto = managedAutomatic == true,
+        theme = themePolicy,
+        palette_allowed = paletteAllowed,
+        playlist_id = playlistId,
+        entry_id = entryId,
     })
+    return true
 end
 
-requestRenderedCapture = function(output, id, pair, notifySuccess)
+wallInOne.requestRenderedCapture = function(output, id, pair, notifySuccess, managedAutomatic)
     if not providers.w_engine.allowed then
-        setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
+        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
         return
     end
-    output = targetOutput(output)
+    output = wallInOne.targetOutput(output)
     id = tostring(id or "")
-    if output == nil or id:match("^%d+$") == nil then
-        setActionError(noctalia.tr("errors.no_current_scene"), "capture-current")
+    if output == nil or not wallInOne.validWorkshopId(id) then
+        wallInOne.setActionError(noctalia.tr("errors.no_current_scene"), "capture-current")
         return
+    end
+    local function currentSceneMatches()
+        return providers.w_engine.allowed == true
+            and tostring(providers.w_engine.current[output] or "") == id
+            and wallInOne.knownOutputName(output) ~= nil
     end
     if not providers.w_engine.adapter_capture or not noctalia.commandExists("ffmpeg") then
-        captureWorkshopFallback(output, id, true, pair, notifySuccess)
+        wallInOne.captureWorkshopFallback({
+            output = output,
+            id = id,
+            force = true,
+            pair = pair,
+            notify = notifySuccess,
+            managed_auto = managedAutomatic,
+            should_apply = currentSceneMatches,
+        })
         return
     end
 
@@ -2134,27 +4436,28 @@ requestRenderedCapture = function(output, id, pair, notifySuccess)
             id = id,
             pair = pair == true,
             notify = notifySuccess == true,
+            managed_auto = managedAutomatic == true,
         }
         return
     end
-    local destination, destinationError = captureDestination("w-engine", id, output, ".png")
+    local destination, destinationError = wallInOne.captureDestination("w-engine", id, output, ".png", managedAutomatic == true)
     if destination == nil then
-        setActionError(destinationError, "capture-directory")
+        wallInOne.setActionError(destinationError, "capture-directory")
         return
     end
     if destination:find("[%c]") ~= nil then
-        setActionError(noctalia.tr("errors.capture_directory"), "capture-directory")
+        wallInOne.setActionError(noctalia.tr("errors.capture_directory"), "capture-directory")
         return
     end
 
     captureSequence += 1
     local requestId = SERVICE_NONCE .. "-" .. tostring(noctalia.nowMs()) .. "-" .. tostring(captureSequence)
-    local stagingPath, stagingError = adapterStagingPath(requestId)
+    local stagingPath, stagingError = wallInOne.adapterStagingPath(requestId)
     if stagingPath == nil then
-        setActionError(stagingError, "capture-directory")
+        wallInOne.setActionError(stagingError, "capture-directory")
         return
     end
-    local delay = settingInt("scene_screenshot_delay", 15, 1, 120)
+    local delay = wallInOne.settingInt("scene_screenshot_delay", 15, 1, 120)
     local request = {
         provider = "w_engine",
         output = output,
@@ -2166,11 +4469,9 @@ requestRenderedCapture = function(output, id, pair, notifySuccess)
         notify = notifySuccess == true,
         request_id = requestId,
         staging_path = stagingPath,
+        managed_auto = managedAutomatic == true,
         should_apply = function()
-            return providers.w_engine.allowed == true
-                and providers.w_engine.adapter_capture == true
-                and tostring(providers.w_engine.current[output] or "") == id
-                and knownOutputName(output) ~= nil
+            return providers.w_engine.adapter_capture == true and currentSceneMatches()
         end,
     }
     pendingAdapterCaptures[key] = request
@@ -2182,9 +4483,9 @@ requestRenderedCapture = function(output, id, pair, notifySuccess)
         destination = destination,
         method = "w-engine-adapter-v1",
         request_id = requestId,
-        deadline = nowSeconds() + math.max(60, delay + 60),
+        deadline = wallInOne.nowSeconds() + math.max(60, delay + 60),
     }
-    publishStatus()
+    wallInOne.publishStatus()
 
     local payload = table.concat({
         requestId,
@@ -2193,58 +4494,149 @@ requestRenderedCapture = function(output, id, pair, notifySuccess)
         stagingPath,
         tostring(delay),
     }, "\t")
-    local command = "noctalia msg plugin " .. W_ENGINE_SERVICE .. " all capture-v1 " .. shellQuote(payload)
+    local command = "noctalia msg plugin " .. W_ENGINE_SERVICE .. " all capture-v1 " .. wallInOne.shellQuote(payload)
     local started = noctalia.runAsync(command, function(result)
         if
             pendingAdapterCaptures[key] == request
             and (type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0)
         then
-            finishCapture(
+            wallInOne.finishCapture(
                 key,
                 request,
                 false,
-                noctalia.tr("errors.w_engine_adapter", { detail = commandFailureDetail(result) })
+                noctalia.tr("errors.w_engine_adapter", { detail = wallInOne.commandFailureDetail(result) })
             )
         end
     end, 5000)
     if not started then
-        finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter_start"))
+        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter_start"))
     end
 end
 
-local function captureCurrent(output, force, pair, notifySuccess)
+function wallInOne.captureCurrent(output, force, pair, notifySuccess)
     if not providers.w_engine.allowed then
-        setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
+        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
         return
     end
-    output = targetOutput(output)
-    local id = output ~= nil and providers.w_engine.current[output] or nil
+    output = wallInOne.targetOutput(output)
+    local owned = output ~= nil and type(rendererStatus.outputs) == "table" and rendererStatus.outputs[output] or nil
+    local internalId = type(owned) == "table" and tostring(owned.workshop_id or "") or ""
+    local externalId = output ~= nil and tostring(providers.w_engine.current[output] or "") or ""
+    local id = if wallInOne.validWorkshopId(internalId)
+        then internalId
+        else externalId ~= "" and externalId or nil
     if id == nil or tostring(id) == "" then
-        id = configuredWorkshopId()
+        id = wallInOne.configuredWorkshopId()
     end
     if id == nil or tostring(id) == "" then
-        setActionError(noctalia.tr("errors.no_current_scene"), "capture-current")
+        wallInOne.setActionError(noctalia.tr("errors.no_current_scene"), "capture-current")
         return
     end
-    if providers.w_engine.adapter_capture and output ~= nil and providers.w_engine.current[output] == id then
-        requestRenderedCapture(output, id, pair, notifySuccess)
+    local applyToken = output ~= nil and (tonumber(applyGeneration[output]) or 0) or 0
+    if output ~= nil then
+        applyGeneration[output] = applyToken
+    end
+    local observedInternal = wallInOne.validWorkshopId(internalId) and internalId == tostring(id)
+    local observedExternal = not observedInternal and externalId ~= "" and externalId == tostring(id)
+    local function captureStillCurrent()
+        if
+            output == nil
+            or tonumber(applyGeneration[output]) ~= applyToken
+            or providers.w_engine.allowed ~= true
+            or wallInOne.knownOutputName(output) == nil
+        then
+            return false
+        end
+        if observedInternal then
+            local currentOwned = type(rendererStatus.outputs) == "table" and rendererStatus.outputs[output] or nil
+            return type(currentOwned) == "table"
+                and currentOwned.backend == "w-engine"
+                and tostring(currentOwned.workshop_id or "") == tostring(id)
+        end
+        if observedExternal then
+            return tostring(providers.w_engine.current[output] or "") == tostring(id)
+        end
+        return true
+    end
+    if providers.w_engine.effective_backend == "internal" and output ~= nil then
+        local backendToken = backendGeneration.w_engine
+        local sameCapturing = type(owned) == "table"
+            and owned.backend == "w-engine"
+            and owned.state == "capturing"
+            and internalId == tostring(id)
+        if sameCapturing then
+            return
+        end
+        local wasRunning = type(owned) == "table"
+            and owned.backend == "w-engine"
+            and (owned.state == "running" or owned.state == "paused")
+            and internalId == tostring(id)
+        if type(owned) == "table" and not wasRunning then
+            wallInOne.captureWorkshopFallback({
+                output = output,
+                id = id,
+                force = force,
+                pair = pair,
+                notify = notifySuccess,
+                should_apply = captureStillCurrent,
+            })
+            return
+        end
+        wallInOne.requestInternalCapture({
+            output = output,
+            id = id,
+            pair = pair,
+            notify = notifySuccess,
+            should_apply = function()
+                return backendGeneration.w_engine == backendToken
+                    and providers.w_engine.effective_backend == "internal"
+                    and providers.w_engine.apply_available == true
+                    and captureStillCurrent()
+            end,
+            start_after = wasRunning,
+            restore_on_failure = wasRunning,
+            restore_paused = wasRunning and owned.state == "paused",
+            managed_auto = false,
+        })
+    elseif providers.w_engine.adapter_capture and output ~= nil and providers.w_engine.current[output] == id then
+        wallInOne.requestRenderedCapture(output, id, pair, notifySuccess, false)
     else
-        captureWorkshopFallback(output, id, force, pair, notifySuccess)
+        wallInOne.captureWorkshopFallback({
+            output = output,
+            id = id,
+            force = force,
+            pair = pair,
+            notify = notifySuccess,
+            should_apply = captureStillCurrent,
+        })
     end
 end
 
-local function captureVideoPath(output, source, force, pair, notifySuccess, onComplete, shouldApply)
-    output = targetOutput(output)
+function wallInOne.captureVideoPath(options)
+    options = type(options) == "table" and options or {}
+    local output = options.output
+    local source = options.source
+    local force = options.force == true
+    local pair = options.pair == true
+    local notifySuccess = options.notify == true
+    local onComplete = options.on_complete
+    local shouldApply = options.should_apply
+    local managedAutomatic = options.managed_auto == true
+    local themePolicy = options.theme
+    local paletteAllowed = options.palette_allowed
+    local playlistId = options.playlist_id
+    local entryId = options.entry_id
+    output = wallInOne.targetOutput(output)
     if output == nil then
-        setActionError(noctalia.tr("availability.output"), "video-capture")
+        wallInOne.setActionError(noctalia.tr("availability.output"), "video-capture")
         if type(onComplete) == "function" then
             onComplete(false)
         end
         return
     end
-    local spec, specError = videoCaptureSpec(source)
+    local spec, specError = wallInOne.videoCaptureSpec(source)
     if spec == nil then
-        setActionError(specError, "video-capture")
+        wallInOne.setActionError(specError, "video-capture")
         if type(onComplete) == "function" then
             onComplete(false)
         end
@@ -2252,20 +4644,26 @@ local function captureVideoPath(output, source, force, pair, notifySuccess, onCo
     end
     local sourceInfo = noctalia.fileInfo(spec.source)
     local identity = table.concat({
-        stablePathTag(spec.source),
+        wallInOne.stablePathTag(spec.source),
         tostring(type(sourceInfo) == "table" and sourceInfo.size or 0),
         tostring(type(sourceInfo) == "table" and sourceInfo.mtime or 0),
-        sanitizedName(spec.source:match("([^/]+)$") or "video"),
+        wallInOne.sanitizedName(spec.source:match("([^/]+)$") or "video"),
     }, "-")
-    local destination, destinationError = captureDestination("video", identity, output, spec.extension)
+    local destination, destinationError = wallInOne.captureDestination(
+        "video",
+        identity,
+        output,
+        spec.extension,
+        managedAutomatic == true
+    )
     if destination == nil then
-        setActionError(destinationError, "capture-directory")
+        wallInOne.setActionError(destinationError, "capture-directory")
         if type(onComplete) == "function" then
             onComplete(false)
         end
         return
     end
-    runCapture({
+    wallInOne.runCapture({
         provider = "video",
         output = output,
         dynamic_id = "video:" .. spec.source,
@@ -2276,14 +4674,28 @@ local function captureVideoPath(output, source, force, pair, notifySuccess, onCo
         notify = notifySuccess == true,
         on_complete = onComplete,
         should_apply = shouldApply,
+        managed_auto = managedAutomatic == true,
+        theme = themePolicy,
+        palette_allowed = paletteAllowed,
+        playlist_id = playlistId,
+        entry_id = entryId,
     })
 end
 
-local function captureConfiguredVideo(output, force, pair, notifySuccess, onComplete)
-    captureVideoPath(output, configuredVideoSource(), force, pair, notifySuccess, onComplete)
+function wallInOne.captureConfiguredVideo(output, force, pair, notifySuccess, onComplete)
+    wallInOne.captureVideoPath({
+        output = output,
+        source = wallInOne.configuredVideoSource(),
+        force = force,
+        pair = pair,
+        notify = notifySuccess,
+        on_complete = onComplete,
+    })
 end
 
-local function nextRendererNonce()
+-- Owned renderer command transport and acknowledgement handling ------------
+
+function wallInOne.nextRendererNonce()
     local previous = noctalia.state.get(RENDERER_COMMAND_KEY)
     local previousNonce = if type(previous) == "table" then tonumber(previous.nonce) or 0 else 0
     local statusNonce = if type(rendererStatus) == "table" then tonumber(rendererStatus.last_nonce) or 0 else 0
@@ -2291,18 +4703,20 @@ local function nextRendererNonce()
     return rendererCommandSequence
 end
 
-local function sendRendererCommand(command, onAcknowledged)
+function wallInOne.sendRendererCommand(command, onAcknowledged)
     if type(rendererStatus) ~= "table" or rendererStatus.ready ~= true then
-        setActionError(noctalia.tr("errors.renderer_unavailable"), "renderer")
+        wallInOne.setActionError(noctalia.tr("errors.renderer_unavailable"), "renderer")
         return false
     end
     command.schema = 1
-    command.nonce = nextRendererNonce()
+    command.nonce = wallInOne.nextRendererNonce()
     if type(onAcknowledged) == "function" then
+        local acknowledgementSeconds =
+            math.max(5, math.min(120, math.floor(tonumber(command.ack_timeout_seconds) or 20)))
         rendererPending[command.nonce] = {
             action = tostring(command.action or ""),
             output = tostring(command.output or ""),
-            deadline = nowSeconds() + 20,
+            deadline = wallInOne.nowSeconds() + acknowledgementSeconds,
             callback = onAcknowledged,
         }
     end
@@ -2310,7 +4724,7 @@ local function sendRendererCommand(command, onAcknowledged)
     return true, command.nonce
 end
 
-local function finishRendererPending(nonce, ok, reason)
+function wallInOne.finishRendererPending(nonce, ok, reason)
     nonce = tonumber(nonce)
     local pending = nonce ~= nil and rendererPending[nonce] or nil
     if type(pending) ~= "table" then
@@ -2321,34 +4735,64 @@ local function finishRendererPending(nonce, ok, reason)
     if type(callback) == "function" then
         local called, callbackError = pcall(callback, ok == true, tostring(reason or ""))
         if not called then
-            setActionError(
-                noctalia.tr("errors.renderer_callback", { detail = boundedDetail(callbackError) }),
+            wallInOne.setActionError(
+                noctalia.tr("errors.renderer_callback", { detail = wallInOne.boundedDetail(callbackError) }),
                 "renderer"
             )
         end
     end
 end
 
-local function failAllRendererPending(reason)
+function wallInOne.failAllRendererPending(reason)
     local nonces = {}
     for nonce in pairs(rendererPending) do
         table.insert(nonces, nonce)
     end
     table.sort(nonces)
     for _, nonce in ipairs(nonces) do
-        finishRendererPending(nonce, false, reason)
+        wallInOne.finishRendererPending(nonce, false, reason)
     end
 end
 
-local function resolveRendererAcknowledgements(nextStatus)
-    if type(nextStatus) ~= "table" or nextStatus.ready ~= true then
-        failAllRendererPending(noctalia.tr("errors.renderer_unavailable"))
+function wallInOne.resolveRendererAcknowledgements(nextStatus)
+    if type(nextStatus) ~= "table" then
+        wallInOne.failAllRendererPending(noctalia.tr("errors.renderer_unavailable"))
         return
     end
 
     local event = tostring(nextStatus.last_event or "")
     local eventNonce = tonumber(nextStatus.last_event_nonce)
-    if event == "started" and type(nextStatus.outputs) == "table" then
+    local failures = {
+        ["error"] = true,
+        ["ignored"] = true,
+        ["start-error"] = true,
+        ["not-running"] = true,
+        ["rejected"] = true,
+        ["protocol-error"] = true,
+        ["startup-error"] = true,
+        ["write-error"] = true,
+        ["write-timeout"] = true,
+        ["queue-error"] = true,
+        ["unavailable"] = true,
+        ["heartbeat-timeout"] = true,
+        ["capture-error"] = true,
+        ["cancelled"] = true,
+        ["unsupported"] = true,
+        ["control-error"] = true,
+    }
+    if nextStatus.ready ~= true then
+        local reason = if failures[event]
+            then tostring(nextStatus.last_error or event)
+            else noctalia.tr("errors.renderer_unavailable")
+        wallInOne.failAllRendererPending(reason)
+        return
+    end
+
+    -- Output ownership is the durable acknowledgement for a start. The
+    -- versioned state slot can advance to a later event before this service
+    -- observes the transient `started` label, but an exact output + nonce
+    -- match still proves that the requested child became the owned renderer.
+    if type(nextStatus.outputs) == "table" then
         for output, owned in pairs(nextStatus.outputs) do
             local nonce = type(owned) == "table" and tonumber(owned.nonce) or nil
             local pending = nonce ~= nil and rendererPending[nonce] or nil
@@ -2356,44 +4800,61 @@ local function resolveRendererAcknowledgements(nextStatus)
                 type(pending) == "table"
                 and tostring(pending.action or ""):match("^start_") ~= nil
                 and tostring(pending.output or "") == tostring(output)
+                and tostring(owned.state or "") ~= "capturing"
             then
-                finishRendererPending(nonce, true, "")
+                wallInOne.finishRendererPending(nonce, true, "")
             end
+        end
+    end
+    if event == "started" then
+        return
+    end
+    if event == "captured" and eventNonce ~= nil then
+        local pending = rendererPending[eventNonce]
+        if type(pending) == "table" and tostring(pending.action or "") == "capture_w_engine" then
+            wallInOne.finishRendererPending(eventNonce, true, "")
         end
         return
     end
     if (event == "stopped" or event == "stopped-all") and eventNonce ~= nil then
         local pending = rendererPending[eventNonce]
-        if type(pending) == "table" and tostring(pending.action or "") == "stop" then
-            finishRendererPending(eventNonce, true, "")
+        local pendingAction = type(pending) == "table" and tostring(pending.action or "") or ""
+        if pendingAction == "stop" or pendingAction == "stop_all" then
+            wallInOne.finishRendererPending(eventNonce, true, "")
+        end
+        return
+    end
+    if
+        (event == "paused" or event == "resumed" or event == "muted" or event == "unmuted" or event == "volume-set")
+        and eventNonce ~= nil
+    then
+        local pending = rendererPending[eventNonce]
+        local action = type(pending) == "table" and tostring(pending.action or "") or ""
+        local accepted = {
+            paused = { pause = true, toggle = true },
+            resumed = { resume = true, toggle = true },
+            muted = { mute = true, toggle_mute = true },
+            unmuted = { unmute = true, toggle_mute = true },
+            ["volume-set"] = { set_volume = true },
+        }
+        if type(accepted[event]) == "table" and accepted[event][action] == true then
+            wallInOne.finishRendererPending(eventNonce, true, "")
         end
         return
     end
 
-    local failures = {
-        ["error"] = true,
-        ["start-error"] = true,
-        ["not-running"] = true,
-        ["rejected"] = true,
-        ["protocol-error"] = true,
-        ["startup-error"] = true,
-        ["write-error"] = true,
-        ["queue-error"] = true,
-        ["unavailable"] = true,
-        ["heartbeat-timeout"] = true,
-    }
     if failures[event] and eventNonce ~= nil then
-        finishRendererPending(eventNonce, false, tostring(nextStatus.last_error or event))
+        wallInOne.finishRendererPending(eventNonce, false, tostring(nextStatus.last_error or event))
     end
 end
 
-local function queueRendererStop(output, onAcknowledged)
+function wallInOne.queueRendererStop(output, onAcknowledged)
     output = tostring(output or "")
     if output == "" then
         return false
     end
     if type(rendererStatus) == "table" and rendererStatus.ready == true then
-        local queued = sendRendererCommand({ action = "stop", output = output }, function(ok, reason)
+        local queued = wallInOne.sendRendererCommand({ action = "stop", output = output }, function(ok, reason)
             -- A failed/rejected/timed-out stop must not latch ownership
             -- reconciliation forever. A later status/probe can safely retry.
             rendererStopping[output] = nil
@@ -2409,20 +4870,80 @@ local function queueRendererStop(output, onAcknowledged)
     return false
 end
 
-invalidateCycleIntent = function(output, stopRenderer)
+wallInOne.invalidateCycleIntent = function(output, stopRenderer)
     output = tostring(output or "")
     if output == "" then
         return
     end
+    wallInOne.resetRendererExitState(output)
     cycleGeneration[output] = (tonumber(cycleGeneration[output]) or 0) + 1
     applyGeneration[output] = (tonumber(applyGeneration[output]) or 0) + 1
     cycleApplying[output] = nil
     if stopRenderer == true then
-        queueRendererStop(output)
+        wallInOne.queueRendererStop(output)
     end
 end
 
-reconcileRendererOwnership = function()
+function wallInOne.resetRendererExitState(output)
+    output = tostring(output or "")
+    if output ~= "" then
+        rendererExitState[output] = nil
+    end
+end
+
+function wallInOne.noteRendererStarted(output, nonce, observedAt)
+    output = tostring(output or "")
+    local now = math.max(0, math.floor(tonumber(observedAt) or wallInOne.nowSeconds()))
+    local state = rendererExitState[output]
+    if type(state) ~= "table" then
+        state = { failures = 0 }
+    end
+    state.started_at = now
+    state.start_nonce = tostring(nonce or "")
+    -- Retain the current floor until the renderer proves stable or an
+    -- explicit user transition resets the policy. This matters if renderer
+    -- readiness itself disappears again immediately after a recovered start.
+    state.retry_at = math.max(0, math.floor(tonumber(state.retry_at) or 0))
+    rendererExitState[output] = state
+end
+
+function wallInOne.noteUnexpectedRendererExit(output, nonce, observedAt)
+    output = tostring(output or "")
+    local now = math.max(0, math.floor(tonumber(observedAt) or wallInOne.nowSeconds()))
+    local state = rendererExitState[output]
+    if type(state) ~= "table" then
+        state = { failures = 0 }
+    end
+    local failures = math.max(0, math.floor(tonumber(state.failures) or 0))
+    local startedAt = tonumber(state.started_at)
+    local sameStart = tostring(state.start_nonce or "") ~= ""
+        and tostring(state.start_nonce) == tostring(nonce or "")
+    if
+        sameStart
+        and startedAt ~= nil
+        and startedAt > 0
+        and now >= startedAt
+        and now - startedAt >= RENDERER_CRASH_STABLE_SECONDS
+    then
+        failures = 0
+    end
+    failures = math.min(#RENDERER_CRASH_BACKOFF_SECONDS, failures + 1)
+    local retryAt = now + RENDERER_CRASH_BACKOFF_SECONDS[failures]
+    rendererExitState[output] = {
+        failures = failures,
+        started_at = 0,
+        start_nonce = "",
+        retry_at = retryAt,
+    }
+    return retryAt
+end
+
+function wallInOne.rendererRetryFloor(output)
+    local state = rendererExitState[tostring(output or "")]
+    return math.max(0, math.floor(tonumber(type(state) == "table" and state.retry_at) or 0))
+end
+
+wallInOne.reconcileRendererOwnership = function()
     local ownedOutputs = type(rendererStatus) == "table"
             and type(rendererStatus.outputs) == "table"
             and rendererStatus.outputs
@@ -2434,18 +4955,18 @@ reconcileRendererOwnership = function()
             elseif backend == "mpvpaper" then providers.mpvpaper
             else nil
         local shouldStop = type(provider) ~= "table"
-            or knownOutputName(output) == nil
+            or wallInOne.knownOutputName(output) == nil
             or provider.allowed ~= true
             or provider.effective_backend ~= "internal"
             or provider.apply_available ~= true
             or provider.conflict == true
         if shouldStop and rendererStopping[output] ~= true then
-            invalidateCycleIntent(output, true)
+            wallInOne.invalidateCycleIntent(output, true)
         end
     end
 end
 
-local function internalBackendReady(provider)
+function wallInOne.internalBackendReady(provider)
     local state = providers[provider]
     if type(state) ~= "table" or state.allowed ~= true then
         return false, noctalia.tr("errors.provider_forced_off", { provider = provider })
@@ -2459,10 +4980,20 @@ local function internalBackendReady(provider)
     return true, nil
 end
 
-local function cachedPair(dynamicId)
+function wallInOne.cachedPair(dynamicId)
     local pair = runtime.pair_registry[tostring(dynamicId)]
     local path = type(pair) == "table" and tostring(pair.still_path or "") or ""
     local info = path ~= "" and noctalia.fileInfo(path) or nil
+    local sourceSize, sourceMtime = wallInOne.dynamicSourceFingerprint(dynamicId)
+    local sourceMatches = sourceSize == nil
+        or (
+            type(pair) == "table"
+            and
+            tonumber(pair.source_size) ~= nil
+            and tonumber(pair.source_mtime) ~= nil
+            and tonumber(pair.source_size) == sourceSize
+            and tonumber(pair.source_mtime) == sourceMtime
+        )
     if
         type(info) == "table"
         and info.isDir ~= true
@@ -2471,13 +5002,15 @@ local function cachedPair(dynamicId)
         and tonumber(pair.still_mtime) ~= nil
         and tonumber(pair.still_size) == tonumber(info.size)
         and tonumber(pair.still_mtime) == tonumber(info.mtime)
+        and sourceMatches
     then
-        return path, tostring(pair.capture_method or "cached-pair")
+        local managed = pair.still_managed == true and wallInOne.readManagedStillSidecar(path) ~= nil
+        return path, tostring(pair.capture_method or "cached-pair"), managed, tostring(pair.sidecar_path or "")
     end
     return nil, nil
 end
 
-local function selectedStaticPair(output, preferredPath)
+function wallInOne.selectedStaticPair(_output, preferredPath)
     local function valid(path)
         path = tostring(path or "")
         local info = path ~= "" and path:sub(1, 1) == "/" and not path:find("[%c]") and noctalia.fileInfo(path) or nil
@@ -2491,96 +5024,370 @@ local function selectedStaticPair(output, preferredPath)
     if preferred ~= nil then
         return preferred, "selected-static"
     end
-    local current = type(runtime.pairs[output]) == "table" and runtime.pairs[output] or nil
-    local provider = type(current) == "table" and tostring(current.provider or "") or ""
-    if provider == "manual" or provider == "noctalia" then
-        local path = valid(current.still_path)
-        if path ~= nil then
-            return path, "selected-static"
-        end
-    end
     return nil, nil
 end
 
-local function startInternalVideo(output, source, onAcknowledged)
-    local ready, reason = internalBackendReady("mpvpaper")
+function wallInOne.startInternalVideo(output, source, onAcknowledged)
+    local ready, reason = wallInOne.internalBackendReady("mpvpaper")
     if not ready then
-        setActionError(reason, "mpvpaper-internal")
+        wallInOne.setActionError(reason, "mpvpaper-internal")
         return false
     end
-    return sendRendererCommand({
+    return wallInOne.sendRendererCommand({
         action = "start_mpvpaper",
         output = output,
         path = source,
-        mute = settingBool("mpv_mute", true),
-        hardware_decode = settingBool("mpv_hardware_decode", true),
-        auto_pause = settingBool("mpv_auto_pause", true),
-        auto_pause_mode = settingString("mpv_auto_pause_mode", "FULL"),
-        options = settingString("mpv_options", ""),
+        layer = wallInOne.configuredInternalLayer(),
+        mute = wallInOne.settingBool("mpv_mute", true),
+        hardware_decode = wallInOne.settingBool("mpv_hardware_decode", true),
+        auto_pause = wallInOne.settingBool("mpv_auto_pause", true),
+        auto_pause_mode = wallInOne.settingString("mpv_auto_pause_mode", "FULL"),
+        options = wallInOne.settingString("mpv_options", ""),
     }, onAcknowledged)
 end
 
-local function startInternalWorkshop(output, id, onAcknowledged)
-    local ready, reason = internalBackendReady("w_engine")
+function wallInOne.buildWorkshopRendererCommand(base)
+    local command = {}
+    for key, value in pairs(type(base) == "table" and base or {}) do
+        command[key] = value
+    end
+    command.layer = wallInOne.configuredInternalLayer()
+    command.fps = wallInOne.settingInt("w_engine_fps", 30, 5, 144)
+    command.volume = wallInOne.settingInt("w_engine_volume", 0, 0, 100)
+    command.scaling = wallInOne.settingString("w_engine_scaling", "fill")
+    command.clamp = wallInOne.settingString("w_engine_clamp", "border")
+    command.silent = wallInOne.settingBool("w_engine_silent", true)
+    command.noautomute = wallInOne.settingBool("w_engine_noautomute", false)
+    command.no_audio_processing = wallInOne.settingBool("w_engine_no_audio_processing", false)
+    command.disable_particles = wallInOne.settingBool("w_engine_disable_particles", false)
+    command.disable_mouse = wallInOne.settingBool("w_engine_disable_mouse", false)
+    command.disable_parallax = wallInOne.settingBool("w_engine_disable_parallax", false)
+    command.no_fullscreen_pause = wallInOne.settingBool("w_engine_no_fullscreen_pause", false)
+    command.fullscreen_pause_only_active = wallInOne.settingBool("w_engine_fullscreen_pause_only_active", false)
+    return command
+end
+
+function wallInOne.startInternalWorkshop(output, id, onAcknowledged)
+    local ready, reason = wallInOne.internalBackendReady("w_engine")
     if not ready then
-        setActionError(reason, "w-engine-internal")
+        wallInOne.setActionError(reason, "w-engine-internal")
+        return false
+    end
+    if not wallInOne.validWorkshopId(id) then
+        wallInOne.setActionError(noctalia.tr("errors.no_current_scene"), "w-engine-internal")
         return false
     end
     if
-        settingBool("w_engine_no_fullscreen_pause", false)
-        and settingBool("w_engine_fullscreen_pause_only_active", false)
+        wallInOne.settingBool("w_engine_no_fullscreen_pause", false)
+        and wallInOne.settingBool("w_engine_fullscreen_pause_only_active", false)
     then
         local reason = noctalia.tr("errors.w_engine_pause_conflict")
-        setActionError(reason, "w-engine-internal")
+        wallInOne.setActionError(reason, "w-engine-internal")
         return false
     end
-    return sendRendererCommand({
+    local _project, projectDirectory = wallInOne.findWorkshopProject(id)
+    return wallInOne.sendRendererCommand(wallInOne.buildWorkshopRendererCommand({
         action = "start_w_engine",
         output = output,
         workshop_id = id,
-        fps = settingInt("w_engine_fps", 30, 5, 144),
-        volume = settingInt("w_engine_volume", 0, 0, 100),
-        scaling = settingString("w_engine_scaling", "fill"),
-        clamp = settingString("w_engine_clamp", "border"),
-        silent = settingBool("w_engine_silent", true),
-        noautomute = settingBool("w_engine_noautomute", false),
-        no_audio_processing = settingBool("w_engine_no_audio_processing", false),
-        disable_particles = settingBool("w_engine_disable_particles", false),
-        disable_mouse = settingBool("w_engine_disable_mouse", false),
-        disable_parallax = settingBool("w_engine_disable_parallax", false),
-        no_fullscreen_pause = settingBool("w_engine_no_fullscreen_pause", false),
-        fullscreen_pause_only_active = settingBool("w_engine_fullscreen_pause_only_active", false),
-    }, onAcknowledged)
+        project_directory = projectDirectory,
+        project_path = if projectDirectory ~= nil then projectDirectory .. "project.json" else nil,
+    }), onAcknowledged)
 end
 
-local function applyVideoWithPair(output, source, notifySuccess, onComplete, shouldStart, preferredStillPath)
-    output = targetOutput(output)
+wallInOne.requestInternalCapture = function(options)
+    options = type(options) == "table" and options or {}
+    local output = options.output
+    local id = options.id
+    local pair = options.pair == true
+    local notifySuccess = options.notify == true
+    local onComplete = options.on_complete
+    local shouldApply = options.should_apply
+    local startAfterCapture = options.start_after == true
+    local restoreOnFailure = options.restore_on_failure == true
+    local restorePaused = options.restore_paused == true
+    local managedAutomatic = options.managed_auto == true
+    local themePolicy = options.theme
+    local paletteAllowed = options.palette_allowed
+    local playlistId = options.playlist_id
+    local entryId = options.entry_id
+    local ready, reason = wallInOne.internalBackendReady("w_engine")
+    output = wallInOne.targetOutput(output)
+    id = tostring(id or "")
+    if not ready or output == nil or not wallInOne.validWorkshopId(id) then
+        local failure = tostring(reason or noctalia.tr("errors.no_current_scene"))
+        wallInOne.setActionError(failure, "w-engine-capture")
+        if type(onComplete) == "function" then
+            onComplete(false, nil, failure)
+        end
+        return false
+    end
+
+    local key = output
+    local function parentStillCurrent()
+        if wallInOne.knownOutputName(output) == nil or providers.w_engine.allowed ~= true then
+            return false
+        end
+        if type(shouldApply) == "function" then
+            local checked, current = pcall(shouldApply)
+            return checked and current == true
+        end
+        return providers.w_engine.effective_backend == "internal" and providers.w_engine.apply_available == true
+    end
+
+    -- Reject a stale dequeued request before assigning a new intent token; it
+    -- must not invalidate playback restoration already started by the request
+    -- that just released this output's capture slot.
+    if not parentStillCurrent() then
+        local failure = noctalia.tr("errors.capture_replaced")
+        if type(onComplete) == "function" then
+            onComplete(false, nil, failure)
+        end
+        return false
+    end
+
+    internalCaptureIntent[key] = (tonumber(internalCaptureIntent[key]) or 0) + 1
+    local intentToken = internalCaptureIntent[key]
+    local function stillCurrent()
+        return tonumber(internalCaptureIntent[key]) == intentToken and parentStillCurrent()
+    end
+
+    if captureInFlight[key] ~= nil then
+        local active = pendingInternalCaptures[key]
+        local inheritRestore = type(active) == "table" and tostring(active.dynamic_id or "") == id
+        local replaced = internalCaptureQueued[key]
+        if type(replaced) == "table" and type(replaced.on_complete) == "function" then
+            pcall(replaced.on_complete, false, nil, noctalia.tr("errors.capture_replaced"))
+        end
+        internalCaptureQueued[key] = {
+            output = output,
+            id = id,
+            pair = pair == true,
+            notify = notifySuccess == true,
+            on_complete = onComplete,
+            should_apply = shouldApply,
+            start_after = startAfterCapture == true or (inheritRestore and active.start_after == true),
+            restore_on_failure = restoreOnFailure == true or (inheritRestore and active.restore_on_failure == true),
+            restore_paused = restorePaused == true or (inheritRestore and active.restore_paused == true),
+            managed_auto = managedAutomatic == true or (inheritRestore and active.managed_auto == true),
+            theme = themePolicy,
+            palette_allowed = paletteAllowed,
+            playlist_id = playlistId,
+            entry_id = entryId,
+        }
+        return true
+    end
+
+    local destination, destinationError = wallInOne.captureDestination("w-engine", id, output, ".png", managedAutomatic == true)
+    if destination == nil then
+        wallInOne.setActionError(destinationError, "capture-directory")
+        if type(onComplete) == "function" then
+            onComplete(false, nil, destinationError)
+        end
+        return false
+    end
+    captureSequence += 1
+    local requestId = SERVICE_NONCE .. "-internal-" .. tostring(noctalia.nowMs()) .. "-" .. tostring(captureSequence)
+    local stagingPath, stagingError = wallInOne.adapterStagingPath(requestId)
+    if stagingPath == nil then
+        wallInOne.setActionError(stagingError, "capture-directory")
+        if type(onComplete) == "function" then
+            onComplete(false, nil, stagingError)
+        end
+        return false
+    end
+
+    local function report(ok, path, errorMessage)
+        if type(onComplete) == "function" then
+            onComplete(ok == true, path, errorMessage)
+        end
+    end
+
+    local function finishWithPlayback(ok, path, errorMessage)
+        local current = stillCurrent()
+        local shouldStart = ok == true and startAfterCapture == true and current
+        local shouldRestore = restoreOnFailure == true and current
+        if not shouldStart and not shouldRestore then
+            report(ok, path, errorMessage)
+            return
+        end
+        local deferred = wallInOne.deferUntilNextUpdate(function()
+            if not stillCurrent() then
+                report(false, path, noctalia.tr("errors.capture_replaced"))
+                return
+            end
+            local queued = wallInOne.startInternalWorkshop(output, id, function(started, startError)
+                if ok == true and started ~= true then
+                    wallInOne.setActionError(tostring(startError or noctalia.tr("errors.renderer_unavailable")), "renderer")
+                    report(false, path, startError)
+                else
+                    if started == true and shouldRestore and restorePaused == true and stillCurrent() then
+                        wallInOne.sendRendererCommand({ action = "pause", output = output })
+                    end
+                    report(ok, path, errorMessage)
+                end
+            end)
+            if not queued then
+                report(false, path, errorMessage)
+            end
+        end)
+        if not deferred then
+            report(false, path, noctalia.tr("errors.apply_queue_full"))
+        end
+    end
+
+    local function useFallback(errorMessage)
+        if not stillCurrent() then
+            local failure = tostring(errorMessage or noctalia.tr("errors.capture_failed"))
+            wallInOne.setActionError(failure, "capture")
+            report(false, nil, failure)
+            wallInOne.drainCaptureQueues(key)
+            return
+        end
+        local fallbackStarted = false
+        fallbackStarted = wallInOne.captureWorkshopFallback({
+            output = output,
+            id = id,
+            force = true,
+            pair = pair,
+            notify = notifySuccess,
+            on_complete = function(ok, path, fallbackError)
+                finishWithPlayback(ok == true, path, fallbackError or errorMessage)
+                -- A normally queued fallback drains through wallInOne.finishCapture.
+                -- Only synchronous preflight failures need a direct drain.
+                if fallbackStarted ~= true then
+                    wallInOne.drainCaptureQueues(key)
+                end
+            end,
+            should_apply = stillCurrent,
+            managed_auto = managedAutomatic,
+            theme = themePolicy,
+            palette_allowed = paletteAllowed,
+            playlist_id = playlistId,
+            entry_id = entryId,
+        })
+    end
+
+    local request = {
+        provider = "w_engine",
+        output = output,
+        dynamic_id = id,
+        spec = { method = "linux-wallpaperengine-fbo-v1" },
+        destination = destination,
+        force = true,
+        pair = pair == true,
+        notify = notifySuccess == true,
+        request_id = requestId,
+        staging_path = stagingPath,
+        start_after = startAfterCapture == true,
+        restore_on_failure = restoreOnFailure == true,
+        restore_paused = restorePaused == true,
+        managed_auto = managedAutomatic == true,
+        theme = themePolicy,
+        palette_allowed = paletteAllowed,
+        playlist_id = playlistId,
+        entry_id = entryId,
+        should_apply = stillCurrent,
+        on_complete = function(ok, path, errorMessage)
+            if ok == true then
+                finishWithPlayback(true, path, nil)
+            elseif path ~= nil and tostring(path) ~= "" and errorMessage == nil then
+                -- The renderer produced and validated a durable export, but a
+                -- newer per-output intent superseded pairing/playback.
+                report(false, path, nil)
+            else
+                useFallback(errorMessage)
+            end
+        end,
+    }
+    pendingInternalCaptures[key] = request
+    captureInFlight[key] = {
+        sequence = captureSequence,
+        provider = "w_engine",
+        dynamic_id = id,
+        output = output,
+        destination = destination,
+        method = "linux-wallpaperengine-fbo-v1",
+        request_id = requestId,
+        deadline = wallInOne.nowSeconds() + 60,
+    }
+    wallInOne.publishStatus()
+
+    local _project, projectDirectory = wallInOne.findWorkshopProject(id)
+    local queued, _nonce = wallInOne.sendRendererCommand(wallInOne.buildWorkshopRendererCommand({
+        action = "capture_w_engine",
+        output = output,
+        workshop_id = id,
+        project_directory = projectDirectory,
+        project_path = if projectDirectory ~= nil then projectDirectory .. "project.json" else nil,
+        destination = stagingPath,
+        screenshot_delay = math.min(5, wallInOne.settingInt("scene_screenshot_delay", 15, 1, 120)),
+        ack_timeout_seconds = 45,
+    }), function(captured, captureError)
+        if pendingInternalCaptures[key] ~= request then
+            return
+        end
+        wallInOne.releaseCaptureSlot(key)
+        if captured ~= true then
+            if noctalia.fileExists(stagingPath) then
+                noctalia.removeFile(stagingPath)
+            end
+            useFallback(captureError)
+            return
+        end
+        request.spec = {
+            mode = "copy",
+            source = stagingPath,
+            value = "",
+            method = "linux-wallpaperengine-fbo-v1",
+        }
+        wallInOne.runCapture(request)
+    end)
+    if not queued then
+        wallInOne.releaseCaptureSlot(key)
+        if noctalia.fileExists(stagingPath) then
+            noctalia.removeFile(stagingPath)
+        end
+        useFallback(noctalia.tr("errors.renderer_unavailable"))
+        return false
+    end
+    return true
+end
+
+function wallInOne.applyVideoWithPair(request)
+    request = type(request) == "table" and request or {}
+    local output = request.output
+    local source = request.source
+    local notifySuccess = request.notify == true
+    local onComplete = request.on_complete
+    local shouldStart = request.should_start
+    local preferredStillPath = request.still_path
+    local themePolicy = request.theme
+    local paletteAllowed = request.palette_allowed
+    local playlistId = request.playlist_id
+    local entryId = request.entry_id
+    output = wallInOne.targetOutput(output)
     if output == nil then
-        setActionError(noctalia.tr("availability.output"), "video-apply")
+        wallInOne.setActionError(noctalia.tr("availability.output"), "video-apply")
         if type(onComplete) == "function" then
             onComplete(false)
         end
         return
     end
-    local ready, reason = internalBackendReady("mpvpaper")
-    if not ready then
-        setActionError(reason, "video-apply")
-        if type(onComplete) == "function" then
-            onComplete(false)
-        end
-        return
-    end
+    local ready, reason = wallInOne.internalBackendReady("mpvpaper")
     local backendToken = backendGeneration.mpvpaper
     local parentShouldStart = shouldStart
     shouldStart = function()
         return backendGeneration.mpvpaper == backendToken
-            and knownOutputName(output) ~= nil
+            and wallInOne.knownOutputName(output) ~= nil
             and (type(parentShouldStart) ~= "function" or parentShouldStart() == true)
     end
     local dynamicId = "video:" .. tostring(source or "")
-    local pairPath, method = selectedStaticPair(output, preferredStillPath)
+    local pairPath, method = wallInOne.selectedStaticPair(output, preferredStillPath)
+    local pairManaged = false
+    local pairSidecar = ""
     if pairPath == nil then
-        pairPath, method = cachedPair(dynamicId)
+        pairPath, method, pairManaged, pairSidecar = wallInOne.cachedPair(dynamicId)
     end
     local function startAfterPair(ok, path, errorMessage)
         if ok ~= true or shouldStart() ~= true then
@@ -2589,17 +5396,38 @@ local function applyVideoWithPair(output, source, notifySuccess, onComplete, sho
             end
             return
         end
-        local queued = startInternalVideo(output, source, function(started, startError)
-            if started ~= true then
-                local failure = tostring(startError or noctalia.tr("errors.renderer_unavailable"))
-                setActionError(failure, if notifySuccess then "renderer" else nil)
-            end
+        if not ready then
+            wallInOne.setActionError(reason, if notifySuccess then "renderer" else nil)
             if type(onComplete) == "function" then
-                onComplete(started == true, path, startError)
+                -- The representative still and palette are already valid. A
+                -- missing renderer degrades motion without leaving the output
+                -- blank or rolling back a successful playlist transition.
+                onComplete(path ~= nil, path, reason)
+            end
+            return
+        end
+        local deferred = wallInOne.deferUntilNextUpdate(function()
+            if shouldStart() ~= true then
+                if type(onComplete) == "function" then
+                    onComplete(false, path, noctalia.tr("errors.capture_replaced"))
+                end
+                return
+            end
+            local queued = wallInOne.startInternalVideo(output, source, function(started, startError)
+                if started ~= true then
+                    local failure = tostring(startError or noctalia.tr("errors.renderer_unavailable"))
+                    wallInOne.setActionError(failure, if notifySuccess then "renderer" else nil)
+                end
+                if type(onComplete) == "function" then
+                    onComplete(started == true, path, startError)
+                end
+            end)
+            if not queued and type(onComplete) == "function" then
+                onComplete(false, path, noctalia.tr("errors.renderer_unavailable"))
             end
         end)
-        if not queued and type(onComplete) == "function" then
-            onComplete(false, path)
+        if not deferred and type(onComplete) == "function" then
+            onComplete(false, path, noctalia.tr("errors.apply_queue_full"))
         end
     end
     if pairPath ~= nil then
@@ -2609,41 +5437,78 @@ local function applyVideoWithPair(output, source, notifySuccess, onComplete, sho
             end
             return
         end
-        applyPairedStill(output, dynamicId, pairPath, method, notifySuccess == true)
-        startAfterPair(true, pairPath)
+        wallInOne.applyPairedStill({
+            output = output,
+            dynamic_id = dynamicId,
+            path = pairPath,
+            method = method,
+            notify = notifySuccess == true,
+            managed = pairManaged,
+            sidecar_path = pairSidecar,
+            theme = themePolicy,
+            on_complete = startAfterPair,
+            should_apply = shouldStart,
+            palette_allowed = paletteAllowed,
+            playlist_id = playlistId,
+            entry_id = entryId,
+        })
+    elseif not wallInOne.settingBool("auto_capture", true) then
+        local failure = noctalia.tr("errors.playlist_still_required")
+        wallInOne.setActionError(failure, if notifySuccess then "playlist-still" else nil)
+        if type(onComplete) == "function" then
+            onComplete(false, nil, failure)
+        end
     else
-        captureVideoPath(output, source, false, true, notifySuccess, startAfterPair, shouldStart)
+        wallInOne.captureVideoPath({
+            output = output,
+            source = source,
+            pair = true,
+            notify = notifySuccess,
+            on_complete = startAfterPair,
+            should_apply = shouldStart,
+            managed_auto = true,
+            theme = themePolicy,
+            palette_allowed = paletteAllowed,
+            playlist_id = playlistId,
+            entry_id = entryId,
+        })
     end
 end
 
-local function applyWorkshopWithPair(output, id, notifySuccess, onComplete, shouldStart, preferredStillPath)
-    output = targetOutput(output)
+function wallInOne.applyWorkshopWithPair(request)
+    request = type(request) == "table" and request or {}
+    local output = request.output
+    local id = request.id
+    local notifySuccess = request.notify == true
+    local onComplete = request.on_complete
+    local shouldStart = request.should_start
+    local preferredStillPath = request.still_path
+    local themePolicy = request.theme
+    local paletteAllowed = request.palette_allowed
+    local playlistId = request.playlist_id
+    local entryId = request.entry_id
+    output = wallInOne.targetOutput(output)
     id = tostring(id or "")
-    if output == nil or id:match("^%d+$") == nil then
-        setActionError(noctalia.tr("errors.no_current_scene"), "workshop-apply")
+    if output == nil or not wallInOne.validWorkshopId(id) then
+        wallInOne.setActionError(noctalia.tr("errors.no_current_scene"), "workshop-apply")
         if type(onComplete) == "function" then
             onComplete(false)
         end
         return
     end
-    local ready, reason = internalBackendReady("w_engine")
-    if not ready then
-        setActionError(reason, "workshop-apply")
-        if type(onComplete) == "function" then
-            onComplete(false)
-        end
-        return
-    end
+    local ready, reason = wallInOne.internalBackendReady("w_engine")
     local backendToken = backendGeneration.w_engine
     local parentShouldStart = shouldStart
     shouldStart = function()
         return backendGeneration.w_engine == backendToken
-            and knownOutputName(output) ~= nil
+            and wallInOne.knownOutputName(output) ~= nil
             and (type(parentShouldStart) ~= "function" or parentShouldStart() == true)
     end
-    local pairPath, method = selectedStaticPair(output, preferredStillPath)
+    local pairPath, method = wallInOne.selectedStaticPair(output, preferredStillPath)
+    local pairManaged = false
+    local pairSidecar = ""
     if pairPath == nil then
-        pairPath, method = cachedPair(id)
+        pairPath, method, pairManaged, pairSidecar = wallInOne.cachedPair(id)
     end
     local function startAfterPair(ok, path, errorMessage)
         if ok ~= true or shouldStart() ~= true then
@@ -2652,17 +5517,35 @@ local function applyWorkshopWithPair(output, id, notifySuccess, onComplete, shou
             end
             return
         end
-        local queued = startInternalWorkshop(output, id, function(started, startError)
-            if started ~= true then
-                local failure = tostring(startError or noctalia.tr("errors.renderer_unavailable"))
-                setActionError(failure, if notifySuccess then "renderer" else nil)
-            end
+        if not ready then
+            wallInOne.setActionError(reason, if notifySuccess then "renderer" else nil)
             if type(onComplete) == "function" then
-                onComplete(started == true, path, startError)
+                onComplete(path ~= nil, path, reason)
+            end
+            return
+        end
+        local deferred = wallInOne.deferUntilNextUpdate(function()
+            if shouldStart() ~= true then
+                if type(onComplete) == "function" then
+                    onComplete(false, path, noctalia.tr("errors.capture_replaced"))
+                end
+                return
+            end
+            local queued = wallInOne.startInternalWorkshop(output, id, function(started, startError)
+                if started ~= true then
+                    local failure = tostring(startError or noctalia.tr("errors.renderer_unavailable"))
+                    wallInOne.setActionError(failure, if notifySuccess then "renderer" else nil)
+                end
+                if type(onComplete) == "function" then
+                    onComplete(started == true, path, startError)
+                end
+            end)
+            if not queued and type(onComplete) == "function" then
+                onComplete(false, path, noctalia.tr("errors.renderer_unavailable"))
             end
         end)
-        if not queued and type(onComplete) == "function" then
-            onComplete(false, path)
+        if not deferred and type(onComplete) == "function" then
+            onComplete(false, path, noctalia.tr("errors.apply_queue_full"))
         end
     end
     if pairPath ~= nil then
@@ -2672,199 +5555,153 @@ local function applyWorkshopWithPair(output, id, notifySuccess, onComplete, shou
             end
             return
         end
-        applyPairedStill(output, id, pairPath, method, notifySuccess == true)
-        startAfterPair(true, pairPath)
+        wallInOne.applyPairedStill({
+            output = output,
+            dynamic_id = id,
+            path = pairPath,
+            method = method,
+            notify = notifySuccess == true,
+            managed = pairManaged,
+            sidecar_path = pairSidecar,
+            theme = themePolicy,
+            on_complete = startAfterPair,
+            should_apply = shouldStart,
+            palette_allowed = paletteAllowed,
+            playlist_id = playlistId,
+            entry_id = entryId,
+        })
+    elseif not wallInOne.settingBool("auto_capture", true) then
+        local failure = noctalia.tr("errors.playlist_still_required")
+        wallInOne.setActionError(failure, if notifySuccess then "playlist-still" else nil)
+        if type(onComplete) == "function" then
+            onComplete(false, nil, failure)
+        end
     else
-        captureWorkshopFallback(output, id, false, true, notifySuccess, startAfterPair, shouldStart)
+        local owned = type(rendererStatus.outputs) == "table" and rendererStatus.outputs[output] or nil
+        local sameActive = type(owned) == "table"
+            and owned.backend == "w-engine"
+            and (owned.state == "running" or owned.state == "paused")
+            and tostring(owned.workshop_id or "") == id
+        if not ready or (type(owned) == "table" and not sameActive) then
+            -- A new project must not destroy unrelated playback merely to make
+            -- its still. Extract its Workshop source/preview first; only a
+            -- successful pair is allowed to replace the existing renderer.
+            wallInOne.captureWorkshopFallback({
+                output = output,
+                id = id,
+                pair = true,
+                notify = notifySuccess,
+                on_complete = startAfterPair,
+                should_apply = shouldStart,
+                managed_auto = true,
+                theme = themePolicy,
+                palette_allowed = paletteAllowed,
+                playlist_id = playlistId,
+                entry_id = entryId,
+            })
+        else
+            wallInOne.requestInternalCapture({
+                output = output,
+                id = id,
+                pair = true,
+                notify = notifySuccess,
+                on_complete = onComplete,
+                should_apply = shouldStart,
+                start_after = true,
+                restore_on_failure = sameActive,
+                restore_paused = sameActive and owned.state == "paused",
+                managed_auto = true,
+                theme = themePolicy,
+                palette_allowed = paletteAllowed,
+                playlist_id = playlistId,
+                entry_id = entryId,
+            })
+        end
     end
 end
 
-local function saveReelConfig(reels)
-    local normalized = normalizedReels(reels)
+-- Named playlists, entries, schedules, and managed-library mutation --------
+
+function wallInOne.editableConfig()
+    local pairings = wallInOne.normalizedPairings(config.pairings)
+    local playlists = wallInOne.normalizedPlaylists(config.playlists)
+    local outputs = playlists ~= nil and wallInOne.normalizedOutputs(config.outputs, playlists) or nil
+    if pairings == nil or playlists == nil or outputs == nil then
+        return nil
+    end
+    return {
+        schema_version = CONFIG_SCHEMA,
+        gestures = wallInOne.cloneGestures(config.gestures),
+        pairings = pairings,
+        playlists = playlists,
+        outputs = outputs,
+    }
+end
+
+function wallInOne.saveConfig(nextConfig, errorKey)
+    local normalized, validationError = wallInOne.validateConfig(nextConfig)
     if normalized == nil then
-        setActionError(noctalia.tr("errors.config_reels"), "cycle-config")
+        wallInOne.setActionError(validationError or noctalia.tr("errors.config_playlists"), errorKey or "playlist-config")
         return false
     end
-    local nextConfig = {
-        schema_version = CONFIG_SCHEMA,
-        gestures = cloneGestures(config.gestures),
-        reels = normalized,
-    }
-    local saved, saveError = atomicWrite("config.json", nextConfig)
+    local saved, saveError = wallInOne.atomicWrite("config.json", normalized)
     if not saved then
         configValid = false
         configError = tostring(saveError or noctalia.tr("errors.config_save"))
-        setActionError(configError, "cycle-config")
+        wallInOne.setActionError(configError, errorKey or "playlist-config")
         return false
     end
-    config = nextConfig
+    config = normalized
     configValid = true
     configError = ""
-    publishStatus()
+    wallInOne.markStateDomain("config")
+    wallInOne.publishStatus()
     return true
 end
 
-local function reelForOutput(output, create)
-    output = targetOutput(output)
-    if output == nil then
-        return nil, nil
-    end
-    local reel = config.reels[output]
-    if type(reel) ~= "table" and create then
-        reel = {
-            interval_seconds = configuredCycleSeconds(),
-            order = configuredCycleOrder(),
-            entries = {},
-        }
-        config.reels[output] = reel
-    end
-    return reel, output
-end
-
-local function addReelEntry(output, rawEntry)
-    local entry = normalizedEntry(rawEntry)
-    if entry == nil then
-        setActionError(noctalia.tr("errors.cycle_entry"), "cycle-add")
-        return false
-    end
-    local reels = normalizedReels(config.reels) or {}
-    local reel, selected = reelForOutput(output, true)
-    if reel == nil or selected == nil then
-        setActionError(noctalia.tr("availability.output"), "cycle-add")
-        return false
-    end
-    if (entry.kind == "video" or entry.kind == "workshop") and entry.still_path == "" then
-        local currentPair = type(runtime.pairs[selected]) == "table" and runtime.pairs[selected] or runtime.pairs.all
-        local currentPath = type(currentPair) == "table" and tostring(currentPair.still_path or "") or ""
-        local currentInfo = currentPath ~= "" and noctalia.fileInfo(currentPath) or nil
-        if
-            currentPath:sub(1, 1) == "/"
-            and not currentPath:find("[%c]")
-            and type(currentInfo) == "table"
-            and currentInfo.isDir ~= true
-            and (tonumber(currentInfo.size) or 0) > 0
-        then
-            entry.still_path = currentPath
-        end
-    end
-    -- reelForOutput touched config; operate on a clean clone for atomic save.
-    reel = reels[selected]
-    if type(reel) ~= "table" then
-        reel = {
-            interval_seconds = configuredCycleSeconds(),
-            order = configuredCycleOrder(),
-            entries = {},
-        }
-        reels[selected] = reel
-    end
-    for index, existing in ipairs(reel.entries) do
-        if existing.kind == entry.kind and existing.source == entry.source then
-            reel.entries[index] = entry
-            return saveReelConfig(reels)
-        end
-    end
-    if #reel.entries >= MAX_REEL_ENTRIES then
-        setActionError(noctalia.tr("errors.cycle_limit", { limit = tostring(MAX_REEL_ENTRIES) }), "cycle-add")
-        return false
-    end
-    table.insert(reel.entries, entry)
-    return saveReelConfig(reels)
-end
-
-local function removeReelEntry(output, requestedIndex)
-    local reels = normalizedReels(config.reels) or {}
-    local _, selected = reelForOutput(output, false)
-    local reel = selected ~= nil and reels[selected] or nil
-    if type(reel) ~= "table" or #reel.entries == 0 then
-        setActionError(noctalia.tr("errors.cycle_empty"), "cycle-remove")
-        return false
-    end
-    local index = math.floor(tonumber(requestedIndex) or #reel.entries)
-    if index < 1 or index > #reel.entries then
-        setActionError(noctalia.tr("errors.cycle_index"), "cycle-remove")
-        return false
-    end
-    invalidateCycleIntent(selected, false)
-    table.remove(reel.entries, index)
-    local state = runtime.cycles[selected]
-    if type(state) == "table" then
-        state.cursor = math.min(math.floor(tonumber(state.cursor) or 0), #reel.entries)
-        state.history = {}
-        state.bag = {}
-        if #reel.entries == 0 then
-            state.running = false
-            state.paused = false
-            state.next_due = 0
-            invalidateCycleIntent(selected, true)
-        end
-    end
-    local saved = saveReelConfig(reels)
-    persistRuntimeIfChanged(true)
-    return saved
-end
-
-local function clearReel(output)
-    local reels = normalizedReels(config.reels) or {}
-    local _, selected = reelForOutput(output, false)
-    if selected == nil then
-        setActionError(noctalia.tr("availability.output"), "cycle-clear")
-        return false
-    end
-    invalidateCycleIntent(selected, true)
-    reels[selected] = {
-        interval_seconds = configuredCycleSeconds(),
-        order = configuredCycleOrder(),
-        entries = {},
-    }
-    runtime.cycles[selected] = {
-        running = false,
-        paused = false,
-        cursor = 0,
-        next_due = 0,
-        history = {},
-        bag = {},
-        last_error = "",
-    }
-    local saved = saveReelConfig(reels)
-    persistRuntimeIfChanged(true)
-    return saved
-end
-
-local function setReelOptions(output, intervalSeconds, order)
-    local reels = normalizedReels(config.reels) or {}
-    local _, selected = reelForOutput(output, true)
-    if selected == nil then
-        setActionError(noctalia.tr("availability.output"), "cycle-options")
-        return false
-    end
-    local reel = reels[selected]
-    if type(reel) ~= "table" then
-        reel = { entries = {} }
-        reels[selected] = reel
-    end
-    local interval = math.floor(tonumber(intervalSeconds) or configuredCycleSeconds())
-    reel.interval_seconds = math.max(MIN_CYCLE_SECONDS, math.min(MAX_CYCLE_SECONDS, interval))
-    order = tostring(order or reel.order or configuredCycleOrder())
-    reel.order = if VALID_CYCLE_ORDERS[order] then order else configuredCycleOrder()
-    local state = runtime.cycles[selected]
-    if type(state) == "table" and state.running == true then
-        state.next_due = nowSeconds() + reel.interval_seconds
-        state.bag = {}
-    end
-    local saved = saveReelConfig(reels)
-    persistRuntimeIfChanged(true)
-    return saved
-end
-
-local function cycleState(output)
-    local state = runtime.cycles[output]
+function wallInOne.outputState(output)
+    local state = runtime.output_states[output]
     if type(state) ~= "table" then
-        state = {}
-        runtime.cycles[output] = state
+        state = {
+            active_playlist = "",
+            manual_pin = false,
+            active_schedule = "",
+            last_transition_at = "",
+        }
+        runtime.output_states[output] = state
+    end
+    state.active_playlist = tostring(state.active_playlist or "")
+    state.manual_pin = state.manual_pin == true
+    state.active_schedule = tostring(state.active_schedule or "")
+    state.last_transition_at = tostring(state.last_transition_at or "")
+    return state
+end
+
+function wallInOne.playlistRunState(output, playlistId)
+    local outputRuns = runtime.runs[output]
+    if type(outputRuns) ~= "table" then
+        outputRuns = {}
+        runtime.runs[output] = outputRuns
+    end
+    local state = outputRuns[playlistId]
+    if type(state) ~= "table" then
+        state = {
+            running = false,
+            paused = false,
+            parked = false,
+            current_entry = "",
+            next_due = 0,
+            history = {},
+            bag = {},
+            last_applied_at = "",
+            last_error = "",
+        }
+        outputRuns[playlistId] = state
     end
     state.running = state.running == true
     state.paused = state.paused == true
-    state.cursor = math.max(0, math.floor(tonumber(state.cursor) or 0))
+    state.parked = state.parked == true
+    state.current_entry = tostring(state.current_entry or "")
     state.next_due = math.max(0, math.floor(tonumber(state.next_due) or 0))
     state.history = type(state.history) == "table" and state.history or {}
     state.bag = type(state.bag) == "table" and state.bag or {}
@@ -2872,13 +5709,500 @@ local function cycleState(output)
     return state
 end
 
-local function shuffledIndices(count, seed)
+function wallInOne.disarmOtherPlaylistRuns(output, activePlaylistId)
+    local outputRuns = runtime.runs[output]
+    if type(outputRuns) ~= "table" then
+        return
+    end
+    for playlistId, run in pairs(outputRuns) do
+        if playlistId ~= activePlaylistId and type(run) == "table" then
+            run.running = false
+            run.paused = false
+            run.next_due = 0
+        end
+    end
+end
+
+function wallInOne.playlistForOutput(output, requestedId)
+    output = wallInOne.targetOutput(output)
+    if output == nil then
+        return nil, nil, nil
+    end
+    local requested = tostring(requestedId or "")
+    if requested ~= "" and config.playlists[requested] ~= nil then
+        return config.playlists[requested], requested, output
+    end
+    local state = wallInOne.outputState(output)
+    if state.active_playlist ~= "" and config.playlists[state.active_playlist] ~= nil then
+        return config.playlists[state.active_playlist], state.active_playlist, output
+    end
+    local outputConfig = config.outputs[output]
+    local fallback = type(outputConfig) == "table" and tostring(outputConfig.fallback_playlist or "") or ""
+    if fallback ~= "" and config.playlists[fallback] ~= nil then
+        return config.playlists[fallback], fallback, output
+    end
+    return nil, nil, output
+end
+
+function wallInOne.currentThemePolicy()
+    -- `theme-mode-get` reports only the resolved light/dark value, so copying
+    -- it would silently turn a user's automatic mode into a fixed mode. Legacy
+    -- Quick Choice requests therefore inherit unless the compatibility color
+    -- sync toggle explicitly asks for wallpaper-derived colors.
+    return wallInOne.legacyThemePolicy()
+end
+
+function wallInOne.entryBundleFromRequest(rawEntry, output, usedIds)
+    local bundle = wallInOne.normalizedEntryBundle(rawEntry)
+    if bundle ~= nil then
+        local id = wallInOne.uniqueIdentifier(usedIds, bundle.id)
+        if id == nil then
+            return nil
+        end
+        bundle.id = id
+        return bundle
+    end
+    local legacy = wallInOne.normalizedLegacyEntry(rawEntry)
+    if legacy == nil then
+        return nil
+    end
+    local id = wallInOne.uniqueIdentifier(
+        usedIds,
+        wallInOne.stableIdentifier("entry", output .. ":" .. legacy.kind .. ":" .. legacy.source, noctalia.nowMs())
+    )
+    if id == nil then
+        return nil
+    end
+    local media = nil
+    local still
+    if legacy.kind == "static" then
+        still = { mode = "selected", path = legacy.source }
+    else
+        media = { kind = legacy.kind, source = legacy.source }
+        still = if legacy.still_path ~= ""
+            then { mode = "selected", path = legacy.still_path }
+            else { mode = "automatic" }
+    end
+    return {
+        id = id,
+        label = if wallInOne.validPersistedKey(legacy.label) then legacy.label else legacy.source:match("([^/]+)$") or legacy.source,
+        media = media,
+        still = still,
+        theme = wallInOne.currentThemePolicy(),
+        added_at = if legacy.added_at ~= "" then legacy.added_at else noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
+    }
+end
+
+function wallInOne.materializedPlaylistEntry(entry, pairings)
+    if type(entry) ~= "table" then
+        return nil
+    end
+    local pairingId = tostring(entry.pairing_id or "")
+    local pairing = type(pairings) == "table" and pairings[pairingId] or nil
+    if type(pairing) ~= "table" then
+        return entry
+    end
+    local materialized = wallInOne.pairingFromEntry(pairing, entry.id)
+    materialized.pairing_id = pairingId
+    materialized.added_at = if tostring(entry.added_at or "") ~= "" then entry.added_at else pairing.added_at
+    return materialized
+end
+
+function wallInOne.syncPairingSnapshots(nextConfig, pairingId)
+    local pairing = type(nextConfig.pairings) == "table" and nextConfig.pairings[pairingId] or nil
+    if type(pairing) ~= "table" then
+        return
+    end
+    for _, playlist in pairs(nextConfig.playlists) do
+        for index, entry in ipairs(playlist.entries) do
+            if tostring(entry.pairing_id or "") == pairingId then
+                local snapshot = wallInOne.pairingFromEntry(pairing, entry.id)
+                snapshot.pairing_id = pairingId
+                snapshot.added_at = if tostring(entry.added_at or "") ~= "" then entry.added_at else pairing.added_at
+                playlist.entries[index] = snapshot
+            end
+        end
+    end
+end
+
+function wallInOne.catalogPairingForEntry(nextConfig, entry)
+    local requestedId = tostring(entry.pairing_id or "")
+    if requestedId ~= "" and type(nextConfig.pairings[requestedId]) == "table" then
+        return requestedId
+    end
+    local signature = wallInOne.bundleSignature(entry)
+    local ids = {}
+    for id in pairs(nextConfig.pairings) do
+        table.insert(ids, id)
+    end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+        if wallInOne.bundleSignature(nextConfig.pairings[id]) == signature then
+            entry.pairing_id = id
+            return id
+        end
+    end
+    if #ids >= MAX_PAIRINGS then
+        return nil
+    end
+    local used = {}
+    for _, id in ipairs(ids) do
+        used[id] = true
+    end
+    local id = wallInOne.uniqueIdentifier(
+        used,
+        wallInOne.stableIdentifier("pairing", signature, noctalia.nowMs())
+    )
+    if id == nil then
+        return nil
+    end
+    nextConfig.pairings[id] = wallInOne.pairingFromEntry(entry, id)
+    entry.pairing_id = id
+    return id
+end
+
+function wallInOne.savePairing(rawPairing)
+    if type(rawPairing) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "pairing-save")
+        return nil
+    end
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil then
+        wallInOne.setActionError(noctalia.tr("errors.config_playlists"), "pairing-save")
+        return nil
+    end
+    local id = tostring(rawPairing.id or "")
+    local existing = nextConfig.pairings[id]
+    if id == "" then
+        if wallInOne.countMap(nextConfig.pairings) >= MAX_PAIRINGS then
+            wallInOne.setActionError(noctalia.tr("errors.pairing_limit", { limit = tostring(MAX_PAIRINGS) }), "pairing-save")
+            return nil
+        end
+        local used = {}
+        for candidateId in pairs(nextConfig.pairings) do
+            used[candidateId] = true
+        end
+        id = wallInOne.uniqueIdentifier(
+            used,
+            wallInOne.stableIdentifier("pairing", tostring(rawPairing.label or "pairing"), noctalia.nowMs())
+        ) or ""
+    end
+    local candidate = {
+        id = id,
+        label = rawPairing.label,
+        media = rawPairing.media,
+        still = rawPairing.still,
+        theme = rawPairing.theme,
+        added_at = if tostring(rawPairing.added_at or "") ~= ""
+            then rawPairing.added_at
+            elseif type(existing) == "table" and tostring(existing.added_at or "") ~= ""
+            then existing.added_at
+            else noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
+    }
+    local pairing = wallInOne.normalizedEntryBundle(candidate)
+    if pairing == nil or (existing == nil and wallInOne.countMap(nextConfig.pairings) >= MAX_PAIRINGS) then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "pairing-save")
+        return nil
+    end
+    pairing.pairing_id = nil
+    nextConfig.pairings[id] = pairing
+    wallInOne.syncPairingSnapshots(nextConfig, id)
+    if not wallInOne.saveConfig(nextConfig, "pairing-save") then
+        return nil
+    end
+    return id
+end
+
+function wallInOne.deletePairing(pairingId)
+    pairingId = tostring(pairingId or "")
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil or type(nextConfig.pairings[pairingId]) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "pairing-delete")
+        return false
+    end
+    -- Occurrences deliberately retain their last valid snapshot. Removing a
+    -- drawer card must never corrupt a playlist that already references it.
+    nextConfig.pairings[pairingId] = nil
+    for _, playlist in pairs(nextConfig.playlists) do
+        for _, entry in ipairs(playlist.entries) do
+            if tostring(entry.pairing_id or "") == pairingId then
+                entry.pairing_id = nil
+            end
+        end
+    end
+    return wallInOne.saveConfig(nextConfig, "pairing-delete")
+end
+
+function wallInOne.addPairingToPlaylist(output, playlistId, pairingId, beforeId)
+    local selectedId = tostring(playlistId or "")
+    local selectedOutput = tostring(output or "")
+    if type(config.playlists[selectedId]) ~= "table" then
+        local _playlist
+        _playlist, selectedId, selectedOutput = wallInOne.ensureEditablePlaylist(output, playlistId)
+        if selectedId == nil or selectedOutput == nil then
+            return false
+        end
+    end
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[selectedId] or nil
+    local pairing = nextConfig ~= nil and nextConfig.pairings[tostring(pairingId or "")] or nil
+    if type(playlist) ~= "table" or type(pairing) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "playlist-add-pairing")
+        return false
+    end
+    if #playlist.entries >= MAX_PLAYLIST_ENTRIES then
+        wallInOne.setActionError(
+            noctalia.tr("errors.playlist_entry_limit", { limit = tostring(MAX_PLAYLIST_ENTRIES) }),
+            "playlist-add-pairing"
+        )
+        return false
+    end
+    local used = {}
+    for _, entry in ipairs(playlist.entries) do
+        used[entry.id] = true
+    end
+    local entryId = wallInOne.uniqueIdentifier(
+        used,
+        wallInOne.stableIdentifier("entry", selectedId .. ":" .. pairing.id, noctalia.nowMs())
+    )
+    if entryId == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "playlist-add-pairing")
+        return false
+    end
+    local entry = wallInOne.pairingFromEntry(pairing, entryId)
+    entry.pairing_id = pairing.id
+    entry.added_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    local anchor = wallInOne.entryIndexById(playlist, tostring(beforeId or ""))
+    if anchor == nil then
+        table.insert(playlist.entries, entry)
+    else
+        table.insert(playlist.entries, anchor, entry)
+    end
+    return wallInOne.saveConfig(nextConfig, "playlist-add-pairing")
+end
+
+function wallInOne.createPlaylist(name, output, quickChoice)
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil or wallInOne.countMap(nextConfig.playlists) >= MAX_PLAYLISTS then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_limit", { limit = tostring(MAX_PLAYLISTS) }), "playlist-create")
+        return nil
+    end
+    name = noctalia.string.trim(tostring(name or ""))
+    if not wallInOne.validPersistedKey(name) then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_name"), "playlist-create")
+        return nil
+    end
+    local used = {}
+    for id in pairs(nextConfig.playlists) do
+        used[id] = true
+    end
+    local id = wallInOne.uniqueIdentifier(used, wallInOne.stableIdentifier(if quickChoice then "quick" else "playlist", name, noctalia.nowMs()))
+    if id == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_name"), "playlist-create")
+        return nil
+    end
+    nextConfig.playlists[id] = {
+        name = name,
+        order = wallInOne.configuredPlaylistOrder(),
+        interval_seconds = wallInOne.configuredCycleSeconds(),
+        entries = {},
+        quick_choice = quickChoice == true,
+    }
+    if output ~= nil then
+        nextConfig.outputs[output] = nextConfig.outputs[output] or {
+            fallback_playlist = "",
+            quick_choice_playlist = "",
+            schedules = {},
+        }
+        if quickChoice then
+            nextConfig.outputs[output].quick_choice_playlist = id
+        elseif nextConfig.outputs[output].fallback_playlist == "" then
+            nextConfig.outputs[output].fallback_playlist = id
+        end
+    end
+    if not wallInOne.saveConfig(nextConfig, "playlist-create") then
+        return nil
+    end
+    return id
+end
+
+function wallInOne.ensureEditablePlaylist(output, requestedId)
+    local playlist, playlistId, selectedOutput = wallInOne.playlistForOutput(output, requestedId)
+    if selectedOutput == nil then
+        wallInOne.setActionError(noctalia.tr("availability.output"), "playlist")
+        return nil, nil, nil
+    end
+    if playlist ~= nil then
+        return playlist, playlistId, selectedOutput
+    end
+    local id = wallInOne.createPlaylist("Playlist · " .. selectedOutput, selectedOutput, false)
+    return if id ~= nil then config.playlists[id] else nil, id, selectedOutput
+end
+
+function wallInOne.addPlaylistEntry(output, playlistId, rawEntry)
+    local selectedId = tostring(playlistId or "")
+    local selectedOutput = tostring(output or "")
+    if type(config.playlists[selectedId]) ~= "table" then
+        local _playlist
+        _playlist, selectedId, selectedOutput = wallInOne.ensureEditablePlaylist(output, playlistId)
+        if selectedId == nil or selectedOutput == nil then
+            return false
+        end
+    end
+    local nextConfig = wallInOne.editableConfig()
+    local nextPlaylist = nextConfig ~= nil and nextConfig.playlists[selectedId] or nil
+    if type(nextPlaylist) ~= "table" or #nextPlaylist.entries >= MAX_PLAYLIST_ENTRIES then
+        wallInOne.setActionError(
+            noctalia.tr("errors.playlist_entry_limit", { limit = tostring(MAX_PLAYLIST_ENTRIES) }),
+            "playlist-add"
+        )
+        return false
+    end
+    local used = {}
+    for _, entry in ipairs(nextPlaylist.entries) do
+        used[entry.id] = true
+    end
+    local entry = wallInOne.entryBundleFromRequest(
+        rawEntry,
+        if selectedOutput ~= "" then selectedOutput else selectedId,
+        used
+    )
+    if entry == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "playlist-add")
+        return false
+    end
+    local pairingId = wallInOne.catalogPairingForEntry(nextConfig, entry)
+    if pairingId == nil then
+        wallInOne.setActionError(noctalia.tr("errors.pairing_limit", { limit = tostring(MAX_PAIRINGS) }), "playlist-add")
+        return false
+    end
+    entry = wallInOne.materializedPlaylistEntry(entry, nextConfig.pairings)
+    table.insert(nextPlaylist.entries, entry)
+    return wallInOne.saveConfig(nextConfig, "playlist-add")
+end
+
+function wallInOne.effectivePlaylistOrder(output, playlist)
+    local outputConfig = config.outputs[tostring(output or "")]
+    local outputOrder = type(outputConfig) == "table" and tostring(outputConfig.order or "") or ""
+    if VALID_PLAYLIST_ORDERS[outputOrder] then
+        return outputOrder
+    end
+    local playlistOrder = type(playlist) == "table" and tostring(playlist.order or "") or ""
+    return if VALID_PLAYLIST_ORDERS[playlistOrder] then playlistOrder else wallInOne.configuredPlaylistOrder()
+end
+
+function wallInOne.effectivePlaylistInterval(output, playlist)
+    local outputConfig = config.outputs[tostring(output or "")]
+    local outputInterval = type(outputConfig) == "table" and tonumber(outputConfig.interval_seconds) or nil
+    if
+        outputInterval ~= nil
+        and outputInterval % 1 == 0
+        and outputInterval >= MIN_CYCLE_SECONDS
+        and outputInterval <= MAX_CYCLE_SECONDS
+    then
+        return math.floor(outputInterval)
+    end
+    local playlistInterval = type(playlist) == "table" and tonumber(playlist.interval_seconds) or nil
+    if
+        playlistInterval ~= nil
+        and playlistInterval % 1 == 0
+        and playlistInterval >= MIN_CYCLE_SECONDS
+        and playlistInterval <= MAX_CYCLE_SECONDS
+    then
+        return math.floor(playlistInterval)
+    end
+    return wallInOne.configuredCycleSeconds()
+end
+
+function wallInOne.setPlaylistOptions(playlistId, intervalSeconds, order)
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[tostring(playlistId or "")] or nil
+    if type(playlist) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_missing"), "playlist-options")
+        return false
+    end
+    playlist.interval_seconds = math.max(
+        MIN_CYCLE_SECONDS,
+        math.min(MAX_CYCLE_SECONDS, math.floor(tonumber(intervalSeconds) or playlist.interval_seconds))
+    )
+    order = tostring(order or playlist.order)
+    if order == "sequential" or order == "loop" then
+        order = "rotate"
+    end
+    playlist.order = if VALID_PLAYLIST_ORDERS[order] then order else playlist.order
+    local saved = wallInOne.saveConfig(nextConfig, "playlist-options")
+    if not saved then
+        return false
+    end
+    for output, outputRuns in pairs(runtime.runs) do
+        local run = type(outputRuns) == "table" and outputRuns[tostring(playlistId)] or nil
+        if type(run) == "table" and run.running == true then
+            run.next_due = wallInOne.nowSeconds()
+                + wallInOne.effectivePlaylistInterval(output, config.playlists[tostring(playlistId)])
+            run.bag = {}
+        end
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    return true
+end
+
+function wallInOne.setOutputPlaylistOptions(output, intervalSeconds, order, inherit)
+    output = wallInOne.targetOutput(output)
+    local nextConfig = wallInOne.editableConfig()
+    if output == nil or nextConfig == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_assignment"), "output-options")
+        return false
+    end
+    local outputConfig = nextConfig.outputs[output]
+    if type(outputConfig) ~= "table" then
+        outputConfig = { fallback_playlist = "", quick_choice_playlist = "", schedules = {} }
+        nextConfig.outputs[output] = outputConfig
+    end
+    if inherit == true then
+        outputConfig.order = nil
+        outputConfig.interval_seconds = nil
+    else
+        order = tostring(order or "")
+        if order == "sequential" or order == "loop" then
+            order = "rotate"
+        end
+        local interval = tonumber(intervalSeconds)
+        if not VALID_PLAYLIST_ORDERS[order] or interval == nil or interval % 1 ~= 0 then
+            wallInOne.setActionError(noctalia.tr("errors.config_playlists"), "output-options")
+            return false
+        end
+        outputConfig.order = order
+        outputConfig.interval_seconds = math.max(
+            MIN_CYCLE_SECONDS,
+            math.min(MAX_CYCLE_SECONDS, math.floor(interval))
+        )
+    end
+    if not wallInOne.saveConfig(nextConfig, "output-options") then
+        return false
+    end
+    local outputRuns = runtime.runs[output]
+    if type(outputRuns) == "table" then
+        local now = wallInOne.nowSeconds()
+        for playlistId, run in pairs(outputRuns) do
+            if type(run) == "table" then
+                run.bag = {}
+                if run.running == true and run.paused ~= true then
+                    run.next_due = now + wallInOne.effectivePlaylistInterval(output, config.playlists[playlistId])
+                end
+            end
+        end
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    return true
+end
+
+function wallInOne.shuffledEntryIds(entries, seed)
     local values = {}
-    for index = 1, count do
-        table.insert(values, index)
+    for _, entry in ipairs(entries) do
+        table.insert(values, entry.id)
     end
     seed = math.max(1, math.floor(tonumber(seed) or 1) % 2147483647)
-    for index = count, 2, -1 do
+    for index = #values, 2, -1 do
         seed = (seed * 48271) % 2147483647
         local selected = (seed % index) + 1
         values[index], values[selected] = values[selected], values[index]
@@ -2886,220 +6210,804 @@ local function shuffledIndices(count, seed)
     return values
 end
 
-local function selectCycleIndex(reel, state, direction)
-    local count = #reel.entries
-    if count == 0 then
+function wallInOne.entryIndexById(playlist, entryId)
+    for index, entry in ipairs(playlist.entries) do
+        if entry.id == entryId then
+            return index
+        end
+    end
+    return nil
+end
+
+function wallInOne.selectPlaylistEntryId(playlist, state, direction, order)
+    local count = #playlist.entries
+    if count < 1 then
         return nil
     end
     if direction == "previous" then
         if #state.history > 1 then
             table.remove(state.history)
-            return math.max(1, math.min(count, math.floor(tonumber(state.history[#state.history]) or 1)))
+            local previous = tostring(state.history[#state.history] or "")
+            if wallInOne.entryIndexById(playlist, previous) ~= nil then
+                return previous
+            end
         end
-        return ((math.max(1, state.cursor) - 2) % count) + 1
-    elseif direction == "random" or reel.order == "random" then
-        local seed = noctalia.nowMs() + (state.cursor * 7919) + #state.history
-        return (math.floor(seed) % count) + 1
-    elseif reel.order == "shuffle" then
+        local currentIndex = wallInOne.entryIndexById(playlist, state.current_entry) or 1
+        return playlist.entries[((currentIndex - 2) % count) + 1].id
+    elseif direction == "random" then
+        local seed = noctalia.nowMs() + #state.history * 7919
+        return playlist.entries[(math.floor(seed) % count) + 1].id
+    elseif order == "shuffle" then
         if #state.bag == 0 then
-            state.bag = shuffledIndices(count, noctalia.nowMs() + state.cursor)
-            if count > 1 and state.bag[1] == state.cursor then
+            state.bag = wallInOne.shuffledEntryIds(playlist.entries, noctalia.nowMs() + #state.history)
+            if count > 1 and state.bag[1] == state.current_entry then
                 state.bag[1], state.bag[2] = state.bag[2], state.bag[1]
             end
         end
-        return math.floor(tonumber(table.remove(state.bag, 1)) or 1)
+        return tostring(table.remove(state.bag, 1) or "")
     end
-    return (state.cursor % count) + 1
+    local currentIndex = wallInOne.entryIndexById(playlist, state.current_entry) or 0
+    return playlist.entries[(currentIndex % count) + 1].id
 end
 
-local function applyCycleEntry(output, entry, onComplete, shouldStart, notifySuccess)
-    local parentShouldStart = shouldStart
+function wallInOne.applyPlaylistEntry(request)
+    local output = request.output
+    local entry = request.entry
+    local onComplete = if type(request.on_complete) == "function" then request.on_complete else function() end
+    local parentShouldStart = request.should_start
     local applyToken = (tonumber(applyGeneration[output]) or 0) + 1
     applyGeneration[output] = applyToken
-    shouldStart = function()
+    local function shouldStart()
         if tonumber(applyGeneration[output]) ~= applyToken then
             return false
         end
-        return knownOutputName(output) ~= nil and (type(parentShouldStart) ~= "function" or parentShouldStart() == true)
+        return wallInOne.knownOutputName(output) ~= nil and (type(parentShouldStart) ~= "function" or parentShouldStart() == true)
     end
     if shouldStart() ~= true then
         onComplete(false)
         return
     end
-    if entry.kind == "static" then
-        local info = noctalia.fileInfo(entry.source)
+    local media = type(entry.media) == "table" and entry.media or nil
+    local still = type(entry.still) == "table" and entry.still or nil
+    local selectedStill = type(still) == "table" and still.mode == "selected" and tostring(still.path or "") or ""
+    local degradedDynamicId = ""
+    local degradedWarning = ""
+    local degradedManaged = false
+    local degradedSidecar = ""
+    if selectedStill ~= "" then
+        local info = noctalia.fileInfo(selectedStill)
         if type(info) ~= "table" or info.isDir == true or (tonumber(info.size) or 0) <= 0 then
-            setActionError(noctalia.tr("errors.cycle_static_missing", { path = entry.source }), "cycle-static")
-            onComplete(false)
+            local failure = noctalia.tr("errors.playlist_still_missing", { path = selectedStill })
+            wallInOne.setActionError(failure, "playlist-still")
+            onComplete(false, nil, failure)
             return
         end
+    end
+    if media ~= nil and media.kind == "video" then
+        local mediaInfo = noctalia.fileInfo(tostring(media.source or ""))
+        if type(mediaInfo) ~= "table" or mediaInfo.isDir == true or (tonumber(mediaInfo.size) or 0) <= 0 then
+            local dynamicId = "video:" .. tostring(media.source or "")
+            if selectedStill == "" then
+                selectedStill = wallInOne.cachedPair(dynamicId) or ""
+                if selectedStill == "" then
+                    local failure = noctalia.tr("errors.video_source")
+                    wallInOne.setActionError(failure, "playlist-video")
+                    onComplete(false, nil, failure)
+                    return
+                end
+                local cached = runtime.pair_registry[dynamicId]
+                degradedManaged = type(cached) == "table" and cached.still_managed == true
+                degradedSidecar = degradedManaged and tostring(cached.sidecar_path or "") or ""
+            end
+            degradedDynamicId = dynamicId
+            degradedWarning = noctalia.tr("errors.video_source_degraded", { path = tostring(media.source or "") })
+            media = nil
+            wallInOne.notifyBounded("video-static-fallback", degradedWarning)
+        end
+    end
+    if media == nil then
         local function applyStatic(stopped)
             if stopped ~= true or (type(shouldStart) == "function" and shouldStart() ~= true) then
                 onComplete(false)
                 return
             end
-            applyPairedStill(output, "static:" .. entry.source, entry.source, "cycle-static", false)
-            onComplete(true, entry.source)
+            wallInOne.applyPairedStill({
+                output = output,
+                dynamic_id = if degradedDynamicId ~= "" then degradedDynamicId else "static:" .. selectedStill,
+                path = selectedStill,
+                method = if degradedDynamicId ~= "" then "playlist-video-static-fallback" else "playlist-static",
+                notify = request.notify == true,
+                managed = degradedManaged,
+                sidecar_path = degradedSidecar,
+                theme = entry.theme,
+                on_complete = function(ok, appliedPath, errorMessage)
+                    onComplete(
+                        ok,
+                        appliedPath,
+                        if ok == true and degradedWarning ~= "" then degradedWarning else errorMessage
+                    )
+                end,
+                should_apply = shouldStart,
+                palette_allowed = request.palette_allowed,
+                playlist_id = request.playlist_id,
+                entry_id = entry.id,
+            })
         end
-        local queued = queueRendererStop(output, function(stopped)
+        local queued = wallInOne.queueRendererStop(output, function(stopped)
             applyStatic(stopped == true)
         end)
         if not queued then
             applyStatic(true)
         end
-    elseif entry.kind == "video" then
-        applyVideoWithPair(output, entry.source, notifySuccess == true, onComplete, shouldStart, entry.still_path)
-    elseif entry.kind == "workshop" then
-        applyWorkshopWithPair(output, entry.source, notifySuccess == true, onComplete, shouldStart, entry.still_path)
+    elseif media.kind == "video" then
+        wallInOne.applyVideoWithPair({
+            output = output,
+            source = media.source,
+            notify = request.notify == true,
+            on_complete = onComplete,
+            should_start = shouldStart,
+            still_path = selectedStill,
+            theme = entry.theme,
+            palette_allowed = request.palette_allowed,
+            playlist_id = request.playlist_id,
+            entry_id = entry.id,
+        })
+    elseif media.kind == "workshop" then
+        wallInOne.applyWorkshopWithPair({
+            output = output,
+            id = media.source,
+            notify = request.notify == true,
+            on_complete = onComplete,
+            should_start = shouldStart,
+            still_path = selectedStill,
+            theme = entry.theme,
+            palette_allowed = request.palette_allowed,
+            playlist_id = request.playlist_id,
+            entry_id = entry.id,
+        })
     else
-        setActionError(noctalia.tr("errors.cycle_entry"), "cycle-entry")
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "playlist-entry")
         onComplete(false)
     end
 end
 
-local function applyManualEntry(output, entry, notifySuccess)
-    output = targetOutput(output)
-    entry = normalizedEntry(entry)
-    if output == nil or entry == nil then
-        setActionError(noctalia.tr("errors.cycle_entry"), "apply-entry")
-        return
-    end
-    -- A manual selection supersedes every asynchronous cycle/static intent
-    -- already in flight on this output. The next scheduler tick may take over
-    -- again if the cycle remains running, but stale callbacks cannot do so.
-    invalidateCycleIntent(output, false)
-    applyCycleEntry(output, entry, function(_ok) end, nil, notifySuccess == true)
-end
-
-local advanceCycle
-
-advanceCycle = function(output, direction)
-    local reel, selected = reelForOutput(output, false)
-    if selected == nil or type(reel) ~= "table" or #reel.entries == 0 then
-        setActionError(noctalia.tr("errors.cycle_empty"), "cycle")
+function wallInOne.applyManualEntry(output, entry, notifySuccess)
+    output = wallInOne.targetOutput(output)
+    if output == nil then
+        wallInOne.setActionError(noctalia.tr("availability.output"), "apply-entry")
         return false
     end
-    if cycleApplying[selected] then
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil then
+        wallInOne.setActionError(noctalia.tr("errors.config_playlists"), "quick-choice")
         return false
     end
-    local state = cycleState(selected)
-    if state.paused == true then
-        setActionError(noctalia.tr("errors.cycle_paused"), "cycle")
-        return false
+    local outputConfig = nextConfig.outputs[output]
+    if type(outputConfig) ~= "table" then
+        outputConfig = { fallback_playlist = "", quick_choice_playlist = "", schedules = {} }
+        nextConfig.outputs[output] = outputConfig
     end
-    local index = selectCycleIndex(reel, state, direction or "next")
-    if index == nil then
-        return false
-    end
-    state.cursor = index
-    if direction ~= "previous" then
-        table.insert(state.history, index)
-        while #state.history > 64 do
-            table.remove(state.history, 1)
-        end
-    end
-    state.last_entry = normalizedEntry(reel.entries[index])
-    state.last_applied_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    state.last_error = ""
-    local generation = (tonumber(cycleGeneration[selected]) or 0) + 1
-    cycleGeneration[selected] = generation
-    cycleApplying[selected] = generation
-    local expectsRunning = state.running == true
-    local function shouldStart()
-        if tonumber(cycleGeneration[selected]) ~= generation then
+    local quickId = tostring(outputConfig.quick_choice_playlist or "")
+    local quick = nextConfig.playlists[quickId]
+    if type(quick) ~= "table" then
+        if wallInOne.countMap(nextConfig.playlists) >= MAX_PLAYLISTS then
+            wallInOne.setActionError(noctalia.tr("errors.playlist_limit", { limit = tostring(MAX_PLAYLISTS) }), "quick-choice")
             return false
         end
-        local current = cycleState(selected)
-        if current.paused == true then
+        local used = {}
+        for id in pairs(nextConfig.playlists) do
+            used[id] = true
+        end
+        quickId = wallInOne.uniqueIdentifier(used, wallInOne.stableIdentifier("quick", output, 1)) or ""
+        if quickId == "" then
+            wallInOne.setActionError(noctalia.tr("errors.playlist_name"), "quick-choice")
             return false
         end
-        return not expectsRunning or current.running == true
+        quick = {
+            name = "Quick Choice · " .. output,
+            order = "rotate",
+            interval_seconds = wallInOne.configuredCycleSeconds(),
+            entries = {},
+            quick_choice = true,
+        }
+        nextConfig.playlists[quickId] = quick
+        outputConfig.quick_choice_playlist = quickId
     end
-    persistRuntimeIfChanged(true)
-    publishStatus()
-    applyCycleEntry(selected, reel.entries[index], function(ok, _path, applyError)
-        if tonumber(cycleGeneration[selected]) ~= generation then
-            return
-        end
-        cycleApplying[selected] = nil
-        local current = cycleState(selected)
-        current.last_error = if ok == true
-            then ""
-            else tostring(applyError or lastActionError or noctalia.tr("errors.cycle_apply"))
-        current.next_due = nowSeconds() + math.max(MIN_CYCLE_SECONDS, tonumber(reel.interval_seconds) or 900)
-        persistRuntimeIfChanged(true)
-        publishStatus()
-    end, shouldStart)
+    local bundle = wallInOne.entryBundleFromRequest(entry, output, {})
+    if bundle == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "quick-choice")
+        return false
+    end
+    bundle = wallInOne.materializedPlaylistEntry(bundle, nextConfig.pairings)
+    quick.entries = { bundle }
+    if not wallInOne.saveConfig(nextConfig, "quick-choice") then
+        return false
+    end
+    wallInOne.invalidateCycleIntent(output, false)
+    local state = wallInOne.outputState(output)
+    wallInOne.disarmOtherPlaylistRuns(output, quickId)
+    state.active_playlist = quickId
+    state.manual_pin = true
+    state.active_schedule = ""
+    state.last_transition_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    local run = wallInOne.playlistRunState(output, quickId)
+    run.running = false
+    run.paused = false
+    run.parked = false
+    run.current_entry = bundle.id
+    run.next_due = 0
+    run.history = { bundle.id }
+    run.bag = {}
+    wallInOne.persistRuntimeIfChanged(true)
+    wallInOne.applyPlaylistEntry({
+        output = output,
+        playlist_id = quickId,
+        entry = bundle,
+        notify = notifySuccess == true,
+        on_complete = function(ok, _path, applyError)
+            run.parked = ok == true
+            run.last_applied_at = if ok == true
+                then noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+                else run.last_applied_at
+            run.last_error = if ok == true then tostring(applyError or "") else tostring(applyError or lastActionError)
+            wallInOne.persistRuntimeIfChanged(true)
+            wallInOne.publishStatus()
+        end,
+    })
     return true
 end
 
-local function setCycleRunState(output, action)
-    local reel, selected = reelForOutput(output, false)
-    if selected == nil or type(reel) ~= "table" or #reel.entries == 0 then
-        setActionError(noctalia.tr("errors.cycle_empty"), "cycle")
-        return
+function wallInOne.managedLibraryEntry(itemId)
+    itemId = tostring(itemId or "")
+    if itemId == "" or #itemId > 80 or itemId:find("[%c]") then
+        return nil
     end
-    local state = cycleState(selected)
-    if action == "start" then
-        invalidateCycleIntent(selected, false)
-        state.running = true
-        state.paused = false
-        state.next_due = nowSeconds()
-        persistRuntimeIfChanged(true)
-        advanceCycle(selected, "next")
-        return
-    elseif action == "stop" then
-        invalidateCycleIntent(selected, true)
-        state.running = false
-        state.paused = false
-        state.next_due = 0
-    elseif action == "pause" then
-        invalidateCycleIntent(selected, false)
-        state.paused = true
-        local owned = type(rendererStatus.outputs) == "table" and rendererStatus.outputs[selected] or nil
-        if type(owned) == "table" and tostring(owned.state or "") == "running" then
-            sendRendererCommand({ action = "pause", output = selected })
-        end
-    elseif action == "resume" then
-        state.running = true
-        state.paused = false
-        local owned = type(rendererStatus.outputs) == "table" and rendererStatus.outputs[selected] or nil
-        if type(owned) == "table" and tostring(owned.state or "") == "paused" then
-            sendRendererCommand({ action = "resume", output = selected })
-            state.next_due = nowSeconds() + math.max(MIN_CYCLE_SECONDS, tonumber(reel.interval_seconds) or 900)
-        else
-            state.next_due = nowSeconds()
+    for _, entries in ipairs({ library.stills, library.videos }) do
+        if type(entries) == "table" then
+            for _, entry in ipairs(entries) do
+                if type(entry) == "table" and entry.id == itemId and entry.managed == true and entry.deletable == true then
+                    return entry
+                end
+            end
         end
     end
-    persistRuntimeIfChanged(true)
-    publishStatus()
-    if action == "resume" and (tonumber(state.next_due) or 0) <= nowSeconds() then
-        advanceCycle(selected, "next")
+    return nil
+end
+
+function wallInOne.removeManagedPayload(path, sidecarPath)
+    local pathInfo = noctalia.fileInfo(path)
+    local sidecarInfo = noctalia.fileInfo(sidecarPath)
+    if
+        type(pathInfo) ~= "table"
+        or pathInfo.isDir == true
+        or (tonumber(pathInfo.size) or 0) <= 0
+        or type(sidecarInfo) ~= "table"
+        or sidecarInfo.isDir == true
+        or (tonumber(sidecarInfo.size) or 0) <= 0
+    then
+        return false, noctalia.tr("errors.managed_missing")
+    end
+
+    local suffix = ".wall-in-one-deleting-" .. SERVICE_NONCE .. "-" .. tostring(noctalia.nowMs())
+    local stagedPath = path .. suffix
+    local stagedSidecar = sidecarPath .. suffix
+    local sidecarStaged, sidecarStageError = noctalia.renameFile(sidecarPath, stagedSidecar)
+    if sidecarStaged ~= true then
+        return false, tostring(sidecarStageError or noctalia.tr("errors.managed_delete"))
+    end
+    local pathStaged, pathStageError = noctalia.renameFile(path, stagedPath)
+    if pathStaged ~= true then
+        noctalia.renameFile(stagedSidecar, sidecarPath)
+        return false, tostring(pathStageError or noctalia.tr("errors.managed_delete"))
+    end
+
+    local removed, removeError = noctalia.removeFile(stagedPath)
+    if removed ~= true then
+        noctalia.renameFile(stagedPath, path)
+        noctalia.renameFile(stagedSidecar, sidecarPath)
+        return false, tostring(removeError or noctalia.tr("errors.managed_delete"))
+    end
+    local sidecarRemoved, sidecarError = noctalia.removeFile(stagedSidecar)
+    if sidecarRemoved ~= true then
+        -- The payload removal is the commit point. A failure to unlink the
+        -- already-detached sidecar must not report that the media survived or
+        -- prevent playlist/reference cleanup after the payload is gone.
+        wallInOne.notifyBounded(
+            "managed-sidecar-cleanup",
+            tostring(sidecarError or noctalia.tr("errors.managed_sidecar_delete"))
+        )
+    end
+    return true, nil
+end
+
+function wallInOne.removeManagedStill(path)
+    local record, sidecarPath = wallInOne.readManagedStillSidecar(path)
+    if record == nil then
+        return false, noctalia.tr("errors.managed_sidecar")
+    end
+    local removed, removeError = wallInOne.removeManagedPayload(path, sidecarPath)
+    if not removed then
+        return false, removeError
+    end
+    return true, nil, tostring(record.dynamic_id or "")
+end
+
+function wallInOne.removeDeletedPathFromPlaylists(path, mediaType)
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil then
+        return false
+    end
+    local changed = false
+    local removedByPlaylist = {}
+    local removedPairings = {}
+    for pairingId, pairing in pairs(nextConfig.pairings) do
+        local media = type(pairing) == "table" and type(pairing.media) == "table" and pairing.media or nil
+        local still = type(pairing) == "table" and type(pairing.still) == "table" and pairing.still or nil
+        local sourceMatches = (mediaType == "image" and media == nil and still ~= nil and still.path == path)
+            or (mediaType == "video" and media ~= nil and media.kind == "video" and media.source == path)
+        local selectedStillMatches = still ~= nil and still.mode == "selected" and still.path == path
+        if sourceMatches or selectedStillMatches then
+            removedPairings[pairingId] = true
+            nextConfig.pairings[pairingId] = nil
+            changed = true
+        end
+    end
+    for playlistId, playlist in pairs(nextConfig.playlists) do
+        local removed = {}
+        if type(playlist) == "table" and type(playlist.entries) == "table" then
+            for index = #playlist.entries, 1, -1 do
+                local entry = playlist.entries[index]
+                local media = type(entry) == "table" and type(entry.media) == "table" and entry.media or nil
+                local still = type(entry) == "table" and type(entry.still) == "table" and entry.still or nil
+                local sourceMatches = (mediaType == "image" and media == nil and still ~= nil and still.path == path)
+                    or (mediaType == "video" and media ~= nil and media.kind == "video" and media.source == path)
+                if removedPairings[tostring(entry.pairing_id or "")] or sourceMatches then
+                    removed[entry.id] = true
+                    table.remove(playlist.entries, index)
+                    changed = true
+                elseif still ~= nil and still.mode == "selected" and still.path == path then
+                    -- A selected still is required and may not silently become
+                    -- automatic. Remove the now-invalid bundle instead.
+                    removed[entry.id] = true
+                    table.remove(playlist.entries, index)
+                    changed = true
+                end
+            end
+        end
+        if next(removed) ~= nil then
+            removedByPlaylist[playlistId] = removed
+        end
+    end
+    if changed and not wallInOne.saveConfig(nextConfig, "managed-delete") then
+        return false
+    end
+    for output, outputRuns in pairs(runtime.runs) do
+        if type(outputRuns) == "table" then
+            for playlistId, removed in pairs(removedByPlaylist) do
+                local run = outputRuns[playlistId]
+                if type(run) == "table" then
+                    if removed[run.current_entry] then
+                        run.current_entry = ""
+                    end
+                    local function retain(values)
+                        local retained = {}
+                        for _, id in ipairs(type(values) == "table" and values or {}) do
+                            if not removed[id] then
+                                table.insert(retained, id)
+                            end
+                        end
+                        return retained
+                    end
+                    run.history = retain(run.history)
+                    run.bag = retain(run.bag)
+                    local playlist = nextConfig.playlists[playlistId]
+                    if type(playlist) == "table" and #playlist.entries == 0 then
+                        run.running = false
+                        run.paused = false
+                        run.parked = false
+                        run.next_due = 0
+                        local state = runtime.output_states[output]
+                        if type(state) == "table" and state.active_playlist == playlistId then
+                            wallInOne.invalidateCycleIntent(output, true)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if changed and not wallInOne.persistRuntimeIfChanged(true) then
+        return false
+    end
+    return true
+end
+
+function wallInOne.clearDeletedPairState(path, dynamicId)
+    dynamicId = tostring(dynamicId or "")
+    local stopOutputs = {}
+    for output, pair in pairs(runtime.pairs) do
+        if
+            type(pair) == "table"
+            and (pair.still_path == path or (dynamicId ~= "" and pair.dynamic_id == dynamicId))
+        then
+            if output ~= "all" and wallInOne.knownOutputName(output) ~= nil then
+                stopOutputs[output] = true
+            end
+            runtime.pairs[output] = nil
+        end
+    end
+    for key, pair in pairs(runtime.pair_registry) do
+        if
+            type(pair) == "table"
+            and (pair.still_path == path or (dynamicId ~= "" and (key == dynamicId or pair.dynamic_id == dynamicId)))
+        then
+            runtime.pair_registry[key] = nil
+        end
+    end
+    local ownedOutputs = type(rendererStatus.outputs) == "table" and rendererStatus.outputs or {}
+    for output, owned in pairs(ownedOutputs) do
+        if
+            type(owned) == "table"
+            and (
+                stopOutputs[output]
+                or (path ~= "" and owned.source == path)
+                or (dynamicId:match("^video:") and owned.source == dynamicId:sub(7))
+            )
+        then
+            stopOutputs[output] = true
+        end
+    end
+    for output in pairs(stopOutputs) do
+        wallInOne.invalidateCycleIntent(output, true)
     end
 end
 
-local function addCurrentStaticToCycle(output)
-    output = targetOutput(output)
+function wallInOne.managedStillsForDynamic(dynamicId)
+    dynamicId = tostring(dynamicId or "")
+    local candidates = {}
+    local seen = {}
+    local function consider(pair)
+        if
+            type(pair) ~= "table"
+            or pair.still_managed ~= true
+            or tostring(pair.dynamic_id or "") ~= dynamicId
+        then
+            return
+        end
+        local path = tostring(pair.still_path or "")
+        if path == "" or seen[path] then
+            return
+        end
+        local record, sidecarPath = wallInOne.readManagedStillSidecar(path)
+        if type(record) ~= "table" or tostring(record.dynamic_id or "") ~= dynamicId then
+            return
+        end
+        seen[path] = true
+        table.insert(candidates, { path = path, sidecar = sidecarPath })
+    end
+    for _, pair in pairs(runtime.pairs) do
+        consider(pair)
+    end
+    consider(runtime.pair_registry[dynamicId])
+    table.sort(candidates, function(left, right)
+        return left.path < right.path
+    end)
+    return candidates
+end
+
+function wallInOne.deleteManagedLibraryItem(itemId)
+    local entry = wallInOne.managedLibraryEntry(itemId)
+    if entry == nil then
+        wallInOne.setActionError(noctalia.tr("errors.managed_item"), "managed-delete")
+        return false
+    end
+
+    local path = tostring(entry.path or "")
+    local sidecarPath = tostring(entry.sidecar or "")
+    local dynamicId = tostring(entry.dynamic_id or "")
+    local sidecarRecord = nil
+    if entry.media_type == "image" and wallInOne.directChildOf(path, wallInOne.automaticStillDirectory()) then
+        sidecarRecord, sidecarPath = wallInOne.readManagedStillSidecar(path)
+        dynamicId = type(sidecarRecord) == "table" and tostring(sidecarRecord.dynamic_id or "") or ""
+    elseif entry.media_type == "video" and wallInOne.directChildOf(path, wallInOne.motionBgsManagedDirectory()) then
+        sidecarRecord, sidecarPath = wallInOne.readProviderSidecar(path, ".motionbgs.json", "MotionBGS")
+        local info = noctalia.fileInfo(path)
+        if
+            type(sidecarRecord) ~= "table"
+            or sidecarRecord.plugin ~= "goober/wall-in-one"
+            or sidecarRecord.path ~= path
+            or tostring(sidecarRecord.source_page or ""):sub(1, #MOTIONBGS_URL) ~= MOTIONBGS_URL
+            or type(info) ~= "table"
+            or tonumber(sidecarRecord.bytes) ~= tonumber(info.size)
+        then
+            sidecarRecord = nil
+        end
+        dynamicId = "video:" .. path
+    elseif entry.media_type == "image" and wallInOne.directChildOf(path, wallInOne.wallhavenManagedDirectory()) then
+        sidecarRecord, sidecarPath = wallInOne.readProviderSidecar(path, ".wallhaven.json", "Wallhaven")
+        local info = noctalia.fileInfo(path)
+        if
+            type(sidecarRecord) ~= "table"
+            or sidecarRecord.plugin ~= "goober/wall-in-one"
+            or sidecarRecord.path ~= path
+            or tostring(sidecarRecord.source_page or ""):sub(1, #"https://wallhaven.cc/")
+                ~= "https://wallhaven.cc/"
+            or type(info) ~= "table"
+            or tonumber(sidecarRecord.bytes) ~= tonumber(info.size)
+        then
+            sidecarRecord = nil
+        end
+    end
+    if sidecarRecord == nil or sidecarPath == "" or tostring(entry.sidecar or "") ~= sidecarPath then
+        wallInOne.setActionError(noctalia.tr("errors.managed_sidecar"), "managed-delete")
+        return false
+    end
+
+    lastActionError = ""
+
+    -- Resolve every output-specific generated still before mutating metadata.
+    -- pair_registry is intentionally only a last-used cache and cannot by
+    -- itself represent the same dynamic source paired on multiple outputs.
+    local pairedStills = if entry.media_type == "video"
+        then wallInOne.managedStillsForDynamic(dynamicId)
+        else {}
+
+    -- Metadata commits before payload removal. A storage failure therefore
+    -- leaves recoverable files in place instead of deleting media while stale
+    -- playlist references remain on disk.
+    if not wallInOne.removeDeletedPathFromPlaylists(path, entry.media_type) then
+        return false
+    end
+    for _, still in ipairs(pairedStills) do
+        if not wallInOne.removeDeletedPathFromPlaylists(still.path, "image") then
+            return false
+        end
+    end
+    wallInOne.clearDeletedPairState(path, dynamicId)
+    if not wallInOne.persistRuntimeIfChanged(true) then
+        return false
+    end
+
+    local removed, removeError = wallInOne.removeManagedPayload(path, sidecarPath)
+    if not removed then
+        wallInOne.setActionError(removeError, "managed-delete")
+        wallInOne.refreshLibrary()
+        wallInOne.publishStatus()
+        return false
+    end
+
+    local cleanupOk = true
+    for _, still in ipairs(pairedStills) do
+        local stillRemoved, stillError = wallInOne.removeManagedStill(still.path)
+        if not stillRemoved then
+            cleanupOk = false
+            wallInOne.setActionError(stillError, "managed-delete")
+        end
+    end
+    lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    wallInOne.refreshLibrary()
+    wallInOne.publishStatus()
+    return cleanupOk
+end
+
+wallInOne.advancePlaylist = function(output, playlistId, direction, options)
+    options = type(options) == "table" and options or {}
+    local playlist, selectedId, selectedOutput = wallInOne.playlistForOutput(output, playlistId)
+    if selectedOutput == nil or selectedId == nil or type(playlist) ~= "table" or #playlist.entries == 0 then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_empty"), "playlist")
+        return false
+    end
+    if cycleApplying[selectedOutput] then
+        return false
+    end
+    local state = wallInOne.playlistRunState(selectedOutput, selectedId)
+    if state.paused == true and options.allow_paused ~= true then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_paused"), "playlist")
+        return false
+    end
+    local restoreCurrent = options.restore_current == true
+    local restoredNextDue = math.max(0, math.floor(tonumber(state.next_due) or 0))
+    local entryId = if restoreCurrent
+        then tostring(state.current_entry or "")
+        else wallInOne.selectPlaylistEntryId(
+            playlist,
+            state,
+            direction or "next",
+            wallInOne.effectivePlaylistOrder(selectedOutput, playlist)
+        )
+    local entryIndex = entryId ~= nil and wallInOne.entryIndexById(playlist, entryId) or nil
+    local entry = entryIndex ~= nil
+            and wallInOne.materializedPlaylistEntry(playlist.entries[entryIndex], config.pairings)
+        or nil
+    if entry == nil then
+        return false
+    end
+    if not restoreCurrent and direction ~= "previous" then
+        table.insert(state.history, entryId)
+        while #state.history > MAX_HISTORY_ENTRIES do
+            table.remove(state.history, 1)
+        end
+    end
+    if not restoreCurrent then
+        state.current_entry = entryId
+    end
+    state.parked = false
+    state.last_error = ""
+    local generation = (tonumber(cycleGeneration[selectedOutput]) or 0) + 1
+    cycleGeneration[selectedOutput] = generation
+    cycleApplying[selectedOutput] = generation
+    local expectsRunning = state.running == true
+    local function shouldStart()
+        if tonumber(cycleGeneration[selectedOutput]) ~= generation then
+            return false
+        end
+        local currentOutputState = wallInOne.outputState(selectedOutput)
+        local current = wallInOne.playlistRunState(selectedOutput, selectedId)
+        if current.paused == true then
+            return false
+        end
+        return currentOutputState.active_playlist == selectedId and (not expectsRunning or current.running == true)
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    wallInOne.publishStatus()
+    wallInOne.applyPlaylistEntry({
+        output = selectedOutput,
+        playlist_id = selectedId,
+        entry = entry,
+        notify = options.notify == true,
+        palette_allowed = options.palette_allowed,
+        should_start = shouldStart,
+        on_complete = function(ok, _path, applyError)
+            if tonumber(cycleGeneration[selectedOutput]) ~= generation then
+                if cycleApplying[selectedOutput] == generation then
+                    cycleApplying[selectedOutput] = nil
+                end
+                if type(options.on_complete) == "function" then
+                    options.on_complete(false, noctalia.tr("errors.capture_replaced"))
+                end
+                return
+            end
+            if cycleApplying[selectedOutput] == generation then
+                cycleApplying[selectedOutput] = nil
+            end
+            local current = wallInOne.playlistRunState(selectedOutput, selectedId)
+            current.last_error = if ok == true
+                then tostring(applyError or "")
+                else tostring(applyError or lastActionError or noctalia.tr("errors.playlist_apply"))
+            if ok == true then
+                current.last_applied_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+            end
+            local appliedMedia = type(entry.media) == "table" and entry.media or nil
+            if ok == true and (#playlist.entries == 1 or appliedMedia == nil) then
+                wallInOne.resetRendererExitState(selectedOutput)
+            end
+            if restoreCurrent then
+                -- Service/host teardown removes internally owned renderers.
+                -- Recreate the saved current entry without consuming another
+                -- rotate/shuffle choice or moving its already-saved deadline.
+                current.next_due = if current.running == true and current.paused ~= true
+                    then restoredNextDue
+                    else 0
+            elseif ok == true and #playlist.entries == 1 then
+                current.running = false
+                current.paused = false
+                current.parked = true
+                current.next_due = 0
+            elseif current.running == true and current.paused ~= true then
+                current.next_due = wallInOne.nowSeconds()
+                    + wallInOne.effectivePlaylistInterval(selectedOutput, playlist)
+            else
+                current.next_due = 0
+            end
+            wallInOne.persistRuntimeIfChanged(true)
+            wallInOne.publishStatus()
+            if type(options.on_complete) == "function" then
+                options.on_complete(ok == true, applyError)
+            end
+        end,
+    })
+    return true
+end
+
+function wallInOne.setPlaylistRunState(output, playlistId, action, manualPin, deferApply)
+    local playlist, selectedId, selectedOutput = wallInOne.playlistForOutput(output, playlistId)
+    if selectedOutput == nil or selectedId == nil or type(playlist) ~= "table" or #playlist.entries == 0 then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_empty"), "playlist")
+        return false
+    end
+    local outputRuntime = wallInOne.outputState(selectedOutput)
+    wallInOne.disarmOtherPlaylistRuns(selectedOutput, selectedId)
+    outputRuntime.active_playlist = selectedId
+    if manualPin ~= nil then
+        outputRuntime.manual_pin = manualPin == true
+        if manualPin == true then
+            outputRuntime.active_schedule = ""
+        end
+    end
+    outputRuntime.last_transition_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    local state = wallInOne.playlistRunState(selectedOutput, selectedId)
+    if action == "start" then
+        wallInOne.invalidateCycleIntent(selectedOutput, false)
+        state.running = #playlist.entries > 1
+        state.paused = false
+        state.parked = false
+        state.next_due = wallInOne.nowSeconds()
+        wallInOne.persistRuntimeIfChanged(true)
+        if deferApply == true then
+            return true
+        end
+        return wallInOne.advancePlaylist(selectedOutput, selectedId, "next", { notify = true })
+    elseif action == "stop" then
+        wallInOne.invalidateCycleIntent(selectedOutput, true)
+        state.running = false
+        state.paused = false
+        state.parked = false
+        state.next_due = 0
+    elseif action == "pause" then
+        wallInOne.invalidateCycleIntent(selectedOutput, false)
+        state.paused = true
+        local owned = type(rendererStatus.outputs) == "table" and rendererStatus.outputs[selectedOutput] or nil
+        local ownedState = type(owned) == "table" and tostring(owned.state or "") or ""
+        if type(owned) == "table" and (ownedState == "running" or ownedState == "paused") then
+            -- Coordinator status can trail the renderer by one shared-state
+            -- observation. The supervisor's playback commands are idempotent,
+            -- so always deliver the requested intent to an owned playback
+            -- child instead of dropping it because this snapshot is stale.
+            wallInOne.sendRendererCommand({ action = "pause", output = selectedOutput })
+        end
+    elseif action == "resume" then
+        if #playlist.entries == 1 and state.parked == true then
+            state.running = false
+            state.paused = false
+            state.next_due = 0
+            wallInOne.persistRuntimeIfChanged(true)
+            wallInOne.publishStatus()
+            return true
+        end
+        state.running = #playlist.entries > 1
+        state.paused = false
+        state.parked = false
+        local owned = type(rendererStatus.outputs) == "table" and rendererStatus.outputs[selectedOutput] or nil
+        local ownedState = type(owned) == "table" and tostring(owned.state or "") or ""
+        if type(owned) == "table" and (ownedState == "running" or ownedState == "paused") then
+            wallInOne.sendRendererCommand({ action = "resume", output = selectedOutput })
+            state.next_due = wallInOne.nowSeconds()
+                + wallInOne.effectivePlaylistInterval(selectedOutput, playlist)
+        else
+            state.next_due = wallInOne.nowSeconds()
+        end
+    else
+        return false
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    wallInOne.publishStatus()
+    if action == "resume" and (tonumber(state.next_due) or 0) <= wallInOne.nowSeconds() then
+        return wallInOne.advancePlaylist(selectedOutput, selectedId, "next", { notify = true })
+    end
+    return true
+end
+
+function wallInOne.addCurrentStaticToPlaylist(output, playlistId)
+    output = wallInOne.targetOutput(output)
     if output == nil or not providers.noctalia_cli then
-        setActionError(noctalia.tr("availability.backing"), "cycle-add-static")
+        wallInOne.setActionError(noctalia.tr("availability.backing"), "playlist-add-static")
         return
     end
-    local command = "noctalia msg wallpaper-get " .. shellQuote(output)
+    local command = "noctalia msg wallpaper-get " .. wallInOne.shellQuote(output)
     local started = noctalia.runAsync(command, function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            setActionError(
-                noctalia.tr("errors.backing_query", { detail = commandFailureDetail(result) }),
-                "cycle-add-static"
+            wallInOne.setActionError(
+                noctalia.tr("errors.backing_query", { detail = wallInOne.commandFailureDetail(result) }),
+                "playlist-add-static"
             )
             return
         end
         local source = noctalia.string.trim(tostring(result.stdout or ""))
         local info = source ~= "" and noctalia.fileInfo(source) or nil
         if source:sub(1, 1) ~= "/" or source:find("[%c]") or type(info) ~= "table" or info.isDir == true then
-            setActionError(noctalia.tr("errors.backing_source"), "cycle-add-static")
+            wallInOne.setActionError(noctalia.tr("errors.backing_source"), "playlist-add-static")
             return
         end
-        addReelEntry(output, {
+        wallInOne.addPlaylistEntry(output, playlistId, {
             kind = "static",
             source = source,
             label = source:match("([^/]+)$") or source,
@@ -3107,26 +7015,623 @@ local function addCurrentStaticToCycle(output)
         })
     end, 5000)
     if not started then
-        setActionError(noctalia.tr("errors.backing_query_start"), "cycle-add-static")
+        wallInOne.setActionError(noctalia.tr("errors.backing_query_start"), "playlist-add-static")
     end
 end
 
-local function captureCurrentBacking(output, force, notifySuccess)
-    output = targetOutput(output)
+function wallInOne.renamePlaylist(playlistId, name)
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[tostring(playlistId or "")] or nil
+    name = noctalia.string.trim(tostring(name or ""))
+    if type(playlist) ~= "table" or not wallInOne.validPersistedKey(name) then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_name"), "playlist-rename")
+        return false
+    end
+    playlist.name = name
+    return wallInOne.saveConfig(nextConfig, "playlist-rename")
+end
+
+function wallInOne.duplicatePlaylist(playlistId, name, output)
+    local source = config.playlists[tostring(playlistId or "")]
+    if type(source) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_missing"), "playlist-duplicate")
+        return nil
+    end
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil or wallInOne.countMap(nextConfig.playlists) >= MAX_PLAYLISTS then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_limit", { limit = tostring(MAX_PLAYLISTS) }), "playlist-duplicate")
+        return nil
+    end
+    name = noctalia.string.trim(tostring(name or (source.name .. " copy")))
+    if not wallInOne.validPersistedKey(name) then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_name"), "playlist-duplicate")
+        return nil
+    end
+    local usedPlaylists = {}
+    for id in pairs(nextConfig.playlists) do
+        usedPlaylists[id] = true
+    end
+    local newId = wallInOne.uniqueIdentifier(usedPlaylists, wallInOne.stableIdentifier("playlist", name, noctalia.nowMs()))
+    if newId == nil then
+        return nil
+    end
+    local copy = wallInOne.normalizedPlaylist(source)
+    copy.name = name
+    copy.quick_choice = false
+    local usedEntries = {}
+    for index, entry in ipairs(copy.entries) do
+        entry.id = wallInOne.uniqueIdentifier(
+            usedEntries,
+            wallInOne.stableIdentifier("entry", newId .. ":" .. entry.id, index)
+        )
+    end
+    nextConfig.playlists[newId] = copy
+    output = wallInOne.targetOutput(output)
+    if output ~= nil then
+        nextConfig.outputs[output] = nextConfig.outputs[output]
+            or { fallback_playlist = "", quick_choice_playlist = "", schedules = {} }
+        nextConfig.outputs[output].fallback_playlist = newId
+    end
+    if not wallInOne.saveConfig(nextConfig, "playlist-duplicate") then
+        return nil
+    end
+    if output ~= nil then
+        local state = wallInOne.outputState(output)
+        wallInOne.disarmOtherPlaylistRuns(output, newId)
+        state.active_playlist = newId
+        state.manual_pin = true
+        state.active_schedule = ""
+        wallInOne.persistRuntimeIfChanged(true)
+    end
+    return newId
+end
+
+function wallInOne.fallbackPlaylistId(playlists, excludedId)
+    local ids = {}
+    for id, playlist in pairs(playlists) do
+        if id ~= excludedId and type(playlist) == "table" and playlist.quick_choice ~= true then
+            table.insert(ids, id)
+        end
+    end
+    table.sort(ids)
+    return ids[1] or ""
+end
+
+function wallInOne.deletePlaylist(playlistId)
+    playlistId = tostring(playlistId or "")
+    local current = config.playlists[playlistId]
+    if type(current) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_missing"), "playlist-delete")
+        return false
+    end
+    if current.quick_choice == true then
+        wallInOne.setActionError(noctalia.tr("errors.quick_choice_protected"), "playlist-delete")
+        return false
+    end
+    local nextConfig = wallInOne.editableConfig()
+    nextConfig.playlists[playlistId] = nil
+    local replacement = wallInOne.fallbackPlaylistId(nextConfig.playlists, playlistId)
+    for output, outputConfig in pairs(nextConfig.outputs) do
+        if outputConfig.fallback_playlist == playlistId then
+            outputConfig.fallback_playlist = replacement
+        end
+        for index = #outputConfig.schedules, 1, -1 do
+            if outputConfig.schedules[index].playlist == playlistId then
+                table.remove(outputConfig.schedules, index)
+            end
+        end
+    end
+    local saved = wallInOne.saveConfig(nextConfig, "playlist-delete")
+    if not saved then
+        return false
+    end
+    for output, state in pairs(runtime.output_states) do
+        if type(state) == "table" and state.active_playlist == playlistId then
+            wallInOne.invalidateCycleIntent(output, true)
+            state.active_playlist = replacement
+            state.active_schedule = ""
+            state.manual_pin = false
+        end
+    end
+    for _, outputRuns in pairs(runtime.runs) do
+        if type(outputRuns) == "table" then
+            outputRuns[playlistId] = nil
+        end
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    return true
+end
+
+function wallInOne.setOutputFallback(output, playlistId)
+    output = wallInOne.targetOutput(output)
+    playlistId = tostring(playlistId or "")
+    if output == nil or config.playlists[playlistId] == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_assignment"), "playlist-assign")
+        return false
+    end
+    local nextConfig = wallInOne.editableConfig()
+    nextConfig.outputs[output] = nextConfig.outputs[output]
+        or { fallback_playlist = "", quick_choice_playlist = "", schedules = {} }
+    nextConfig.outputs[output].fallback_playlist = playlistId
+    if not wallInOne.saveConfig(nextConfig, "playlist-assign") then
+        return false
+    end
+    local state = wallInOne.outputState(output)
+    if state.manual_pin ~= true and state.active_schedule == "" then
+        wallInOne.disarmOtherPlaylistRuns(output, playlistId)
+        state.active_playlist = playlistId
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    return true
+end
+
+function wallInOne.removePlaylistEntry(playlistId, entryId)
+    playlistId = tostring(playlistId or "")
+    entryId = tostring(entryId or "")
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[playlistId] or nil
+    local index = type(playlist) == "table" and wallInOne.entryIndexById(playlist, entryId) or nil
+    if index == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "playlist-entry-remove")
+        return false
+    end
+    table.remove(playlist.entries, index)
+    if not wallInOne.saveConfig(nextConfig, "playlist-entry-remove") then
+        return false
+    end
+    for output, outputRuns in pairs(runtime.runs) do
+        local run = type(outputRuns) == "table" and outputRuns[playlistId] or nil
+        if type(run) == "table" then
+            if run.current_entry == entryId then
+                wallInOne.invalidateCycleIntent(output, #playlist.entries == 0)
+                run.current_entry = ""
+            end
+            local function without(values)
+                local result = {}
+                for _, id in ipairs(type(values) == "table" and values or {}) do
+                    if id ~= entryId then
+                        table.insert(result, id)
+                    end
+                end
+                return result
+            end
+            run.history = without(run.history)
+            run.bag = without(run.bag)
+            if #playlist.entries == 0 then
+                run.running = false
+                run.paused = false
+                run.parked = false
+                run.next_due = 0
+            end
+        end
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    return true
+end
+
+function wallInOne.clearPlaylist(playlistId)
+    playlistId = tostring(playlistId or "")
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[playlistId] or nil
+    if type(playlist) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_missing"), "playlist-clear")
+        return false
+    end
+    playlist.entries = {}
+    if not wallInOne.saveConfig(nextConfig, "playlist-clear") then
+        return false
+    end
+    for output, outputRuns in pairs(runtime.runs) do
+        local run = type(outputRuns) == "table" and outputRuns[playlistId] or nil
+        if type(run) == "table" then
+            wallInOne.invalidateCycleIntent(output, true)
+            run.running = false
+            run.paused = false
+            run.parked = false
+            run.current_entry = ""
+            run.next_due = 0
+            run.history = {}
+            run.bag = {}
+        end
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+    return true
+end
+
+function wallInOne.savePlaylistEntry(playlistId, rawEntry)
+    playlistId = tostring(playlistId or "")
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[playlistId] or nil
+    local entry = wallInOne.normalizedEntryBundle(rawEntry)
+    local index = entry ~= nil and type(playlist) == "table" and wallInOne.entryIndexById(playlist, entry.id) or nil
+    if index == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "playlist-entry-save")
+        return false
+    end
+    local pairingId = tostring(entry.pairing_id or "")
+    if pairingId ~= "" and type(nextConfig.pairings[pairingId]) == "table" then
+        nextConfig.pairings[pairingId] = wallInOne.pairingFromEntry(entry, pairingId)
+        wallInOne.syncPairingSnapshots(nextConfig, pairingId)
+    else
+        entry.pairing_id = nil
+        playlist.entries[index] = entry
+    end
+    return wallInOne.saveConfig(nextConfig, "playlist-entry-save")
+end
+
+function wallInOne.movePlaylistEntry(playlistId, entryId, direction)
+    playlistId = tostring(playlistId or "")
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[playlistId] or nil
+    local index = type(playlist) == "table" and wallInOne.entryIndexById(playlist, tostring(entryId or "")) or nil
+    if index == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "playlist-entry-move")
+        return false
+    end
+    local target = if tostring(direction) == "up" then index - 1 elseif tostring(direction) == "down" then index + 1 else 0
+    if target < 1 or target > #playlist.entries then
+        return true
+    end
+    playlist.entries[index], playlist.entries[target] = playlist.entries[target], playlist.entries[index]
+    return wallInOne.saveConfig(nextConfig, "playlist-entry-move")
+end
+
+function wallInOne.placePlaylistEntry(playlistId, entryId, anchorId, placement)
+    playlistId = tostring(playlistId or "")
+    entryId = tostring(entryId or "")
+    anchorId = tostring(anchorId or "")
+    placement = tostring(placement or "")
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[playlistId] or nil
+    local source = type(playlist) == "table" and wallInOne.entryIndexById(playlist, entryId) or nil
+    if source == nil or (placement ~= "before" and placement ~= "after" and placement ~= "end") then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "playlist-entry-place")
+        return false
+    end
+    if entryId == anchorId then
+        return true
+    end
+    local entry = table.remove(playlist.entries, source)
+    if placement == "end" then
+        table.insert(playlist.entries, entry)
+    else
+        local anchor = wallInOne.entryIndexById(playlist, anchorId)
+        if anchor == nil then
+            wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "playlist-entry-place")
+            return false
+        end
+        table.insert(playlist.entries, if placement == "after" then anchor + 1 else anchor, entry)
+    end
+    return wallInOne.saveConfig(nextConfig, "playlist-entry-place")
+end
+
+function wallInOne.applyPlaylistEntryById(output, playlistId, entryId)
+    local playlist, selectedId, selectedOutput = wallInOne.playlistForOutput(output, playlistId)
+    local index = type(playlist) == "table" and wallInOne.entryIndexById(playlist, tostring(entryId or "")) or nil
+    if selectedOutput == nil or selectedId == nil or index == nil then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "playlist-entry-apply")
+        return false
+    end
+    wallInOne.invalidateCycleIntent(selectedOutput, false)
+    local outputRuntime = wallInOne.outputState(selectedOutput)
+    wallInOne.disarmOtherPlaylistRuns(selectedOutput, selectedId)
+    outputRuntime.active_playlist = selectedId
+    outputRuntime.manual_pin = true
+    outputRuntime.active_schedule = ""
+    outputRuntime.last_transition_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    local run = wallInOne.playlistRunState(selectedOutput, selectedId)
+    run.running = false
+    run.paused = false
+    run.parked = false
+    run.current_entry = tostring(entryId)
+    run.next_due = 0
+    table.insert(run.history, tostring(entryId))
+    while #run.history > MAX_HISTORY_ENTRIES do
+        table.remove(run.history, 1)
+    end
+    wallInOne.applyPlaylistEntry({
+        output = selectedOutput,
+        playlist_id = selectedId,
+        entry = wallInOne.materializedPlaylistEntry(playlist.entries[index], config.pairings),
+        notify = true,
+        on_complete = function(ok, _path, applyError)
+            run.parked = ok == true
+            run.last_applied_at = if ok == true
+                then noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+                else run.last_applied_at
+            run.last_error = if ok == true then tostring(applyError or "") else tostring(applyError or lastActionError)
+            wallInOne.persistRuntimeIfChanged(true)
+            wallInOne.publishStatus()
+        end,
+    })
+    wallInOne.persistRuntimeIfChanged(true)
+    return true
+end
+
+function wallInOne.upsertSchedule(output, rawSchedule)
+    output = wallInOne.targetOutput(output)
+    if output == nil or type(rawSchedule) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-save")
+        return false
+    end
+    local nextConfig = wallInOne.editableConfig()
+    local outputConfig = nextConfig.outputs[output]
+    if type(outputConfig) ~= "table" then
+        outputConfig = { fallback_playlist = "", quick_choice_playlist = "", schedules = {} }
+        nextConfig.outputs[output] = outputConfig
+    end
+    local id = tostring(rawSchedule.id or "")
+    if id == "" then
+        local used = {}
+        for _, schedule in ipairs(outputConfig.schedules) do
+            used[schedule.id] = true
+        end
+        id = wallInOne.uniqueIdentifier(
+            used,
+            wallInOne.stableIdentifier("schedule", output .. ":" .. tostring(rawSchedule.name or "schedule"), noctalia.nowMs())
+        ) or ""
+    end
+    local candidate = {
+        id = id,
+        name = rawSchedule.name,
+        playlist = rawSchedule.playlist,
+        enabled = rawSchedule.enabled,
+        weekdays = rawSchedule.weekdays,
+        -- Commands from the schema-3 panel remain safe during a rolling plugin
+        -- reload: an omitted month filter means every month, never no month.
+        months = if rawSchedule.months ~= nil then rawSchedule.months else wallInOne.allMonths(),
+        start_minute = rawSchedule.start_minute,
+        end_minute = rawSchedule.end_minute,
+        all_day = rawSchedule.all_day,
+    }
+    local normalized = wallInOne.normalizedSchedule(candidate, nextConfig.playlists)
+    if normalized == nil then
+        wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-save")
+        return false
+    end
+    local replaced = false
+    for index, schedule in ipairs(outputConfig.schedules) do
+        if schedule.id == id then
+            outputConfig.schedules[index] = normalized
+            replaced = true
+            break
+        end
+    end
+    if not replaced then
+        if #outputConfig.schedules >= MAX_SCHEDULES_PER_OUTPUT then
+            wallInOne.setActionError(
+                noctalia.tr("errors.schedule_limit", { limit = tostring(MAX_SCHEDULES_PER_OUTPUT) }),
+                "schedule-save"
+            )
+            return false
+        end
+        table.insert(outputConfig.schedules, normalized)
+    end
+    return wallInOne.saveConfig(nextConfig, "schedule-save")
+end
+
+function wallInOne.deleteSchedule(output, scheduleId)
+    output = wallInOne.targetOutput(output)
+    local nextConfig = wallInOne.editableConfig()
+    local outputConfig = output ~= nil and nextConfig ~= nil and nextConfig.outputs[output] or nil
+    if type(outputConfig) ~= "table" then
+        return false
+    end
+    for index, schedule in ipairs(outputConfig.schedules) do
+        if schedule.id == tostring(scheduleId or "") then
+            table.remove(outputConfig.schedules, index)
+            local saved = wallInOne.saveConfig(nextConfig, "schedule-delete")
+            if not saved then
+                return false
+            end
+            local state = runtime.output_states[output]
+            if type(state) == "table" and state.active_schedule == schedule.id then
+                state.active_schedule = ""
+            end
+            wallInOne.persistRuntimeIfChanged(true)
+            return true
+        end
+    end
+    return false
+end
+
+function wallInOne.placeSchedule(output, scheduleId, anchorId, placement)
+    output = wallInOne.targetOutput(output)
+    scheduleId = tostring(scheduleId or "")
+    anchorId = tostring(anchorId or "")
+    placement = tostring(placement or "")
+    if output == nil or scheduleId == "" or anchorId == "" or (placement ~= "before" and placement ~= "after") then
+        wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-place")
+        return false
+    end
+    if scheduleId == anchorId then
+        return true
+    end
+    local nextConfig = wallInOne.editableConfig()
+    local outputConfig = nextConfig ~= nil and nextConfig.outputs[output] or nil
+    local schedules = type(outputConfig) == "table" and outputConfig.schedules or nil
+    if type(schedules) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-place")
+        return false
+    end
+    local sourceIndex = nil
+    local anchorIndex = nil
+    for index, schedule in ipairs(schedules) do
+        if schedule.id == scheduleId then
+            sourceIndex = index
+        end
+        if schedule.id == anchorId then
+            anchorIndex = index
+        end
+    end
+    if sourceIndex == nil or anchorIndex == nil then
+        wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-place")
+        return false
+    end
+
+    -- Work only on the normalized editable copy, then persist once. Recompute
+    -- the anchor after removal so moves across either side cannot drift by one.
+    local moving = table.remove(schedules, sourceIndex)
+    anchorIndex = nil
+    for index, schedule in ipairs(schedules) do
+        if schedule.id == anchorId then
+            anchorIndex = index
+            break
+        end
+    end
+    if anchorIndex == nil then
+        wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-place")
+        return false
+    end
+    table.insert(schedules, if placement == "before" then anchorIndex else anchorIndex + 1, moving)
+    return wallInOne.saveConfig(nextConfig, "schedule-place")
+end
+
+function wallInOne.weekdayEnabled(schedule, weekday)
+    for _, value in ipairs(type(schedule.weekdays) == "table" and schedule.weekdays or {}) do
+        if tonumber(value) == weekday then
+            return true
+        end
+    end
+    return false
+end
+
+function wallInOne.monthEnabled(schedule, month)
+    for _, value in ipairs(type(schedule.months) == "table" and schedule.months or {}) do
+        if tonumber(value) == month then
+            return true
+        end
+    end
+    return false
+end
+
+function wallInOne.scheduleMatches(schedule, weekday, month, dayOfMonth, minute)
+    if schedule.enabled ~= true then
+        return false
+    end
+    weekday = math.floor(tonumber(weekday) or -1)
+    month = math.floor(tonumber(month) or -1)
+    dayOfMonth = math.floor(tonumber(dayOfMonth) or -1)
+    minute = math.floor(tonumber(minute) or -1)
+    if
+        weekday < 0
+        or weekday > 6
+        or month < 1
+        or month > 12
+        or dayOfMonth < 1
+        or dayOfMonth > 31
+        or minute < 0
+        or minute > 1439
+    then
+        return false
+    end
+    if schedule.all_day == true then
+        return wallInOne.weekdayEnabled(schedule, weekday) and wallInOne.monthEnabled(schedule, month)
+    end
+    local startMinute = tonumber(schedule.start_minute) or 0
+    local endMinute = tonumber(schedule.end_minute) or 0
+    if startMinute < endMinute then
+        return wallInOne.weekdayEnabled(schedule, weekday)
+            and wallInOne.monthEnabled(schedule, month)
+            and minute >= startMinute
+            and minute < endMinute
+    end
+    if minute >= startMinute then
+        return wallInOne.weekdayEnabled(schedule, weekday) and wallInOne.monthEnabled(schedule, month)
+    end
+    if minute >= endMinute then
+        return false
+    end
+    local previousWeekday = (weekday + 6) % 7
+    local previousMonth = if dayOfMonth == 1 then ((month + 10) % 12) + 1 else month
+    return wallInOne.weekdayEnabled(schedule, previousWeekday) and wallInOne.monthEnabled(schedule, previousMonth)
+end
+
+function wallInOne.winningScheduleAt(outputConfig, weekday, month, dayOfMonth, minute)
+    local winner = nil
+    for _, schedule in ipairs(outputConfig.schedules) do
+        if wallInOne.scheduleMatches(schedule, weekday, month, dayOfMonth, minute) then
+            -- Rules are rendered and persisted top-to-bottom. Replacing the
+            -- candidate makes the lowest matching rule the deterministic winner.
+            winner = schedule
+        end
+    end
+    return winner
+end
+
+function wallInOne.winningSchedule(outputConfig)
+    local weekday = tonumber(noctalia.formatTime("%w")) or 0
+    local month = tonumber(noctalia.formatTime("%m")) or 1
+    local dayOfMonth = tonumber(noctalia.formatTime("%d")) or 1
+    local hour = tonumber(noctalia.formatTime("%H")) or 0
+    local minute = hour * 60 + (tonumber(noctalia.formatTime("%M")) or 0)
+    return wallInOne.winningScheduleAt(outputConfig, weekday, month, dayOfMonth, minute)
+end
+
+function wallInOne.reevaluateOutputSchedule(output, force, deferApply)
+    local outputConfig = config.outputs[output]
+    if type(outputConfig) ~= "table" or wallInOne.knownOutputName(output) == nil then
+        return false
+    end
+    local state = wallInOne.outputState(output)
+    if state.manual_pin == true then
+        return false
+    end
+    local winner = wallInOne.winningSchedule(outputConfig)
+    local desired = if winner ~= nil then winner.playlist else tostring(outputConfig.fallback_playlist or "")
+    local scheduleId = if winner ~= nil then winner.id else ""
+    if desired == "" or config.playlists[desired] == nil then
+        return false
+    end
+    local changed = state.active_playlist ~= desired or state.active_schedule ~= scheduleId
+    if changed then
+        wallInOne.disarmOtherPlaylistRuns(output, desired)
+    end
+    state.active_playlist = desired
+    state.active_schedule = scheduleId
+    if changed then
+        state.last_transition_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    end
+    local run = wallInOne.playlistRunState(output, desired)
+    if changed or (force == true and run.current_entry == "") then
+        local started = wallInOne.setPlaylistRunState(output, desired, "start", false, deferApply == true)
+        return started, if started == true and deferApply == true then desired else nil
+    end
+    wallInOne.persistRuntimeIfChanged(changed)
+    if changed then
+        wallInOne.publishStatus()
+    end
+    return changed, nil
+end
+
+function wallInOne.resumeOutputSchedule(output)
+    output = wallInOne.targetOutput(output)
     if output == nil then
-        setActionError(noctalia.tr("availability.output"), "capture-backing")
+        return false
+    end
+    local state = wallInOne.outputState(output)
+    state.manual_pin = false
+    state.active_schedule = ""
+    wallInOne.persistRuntimeIfChanged(true)
+    return wallInOne.reevaluateOutputSchedule(output, true)
+end
+
+function wallInOne.captureCurrentBacking(output, force, notifySuccess)
+    output = wallInOne.targetOutput(output)
+    if output == nil then
+        wallInOne.setActionError(noctalia.tr("availability.output"), "capture-backing")
         return
     end
     if not providers.noctalia_cli then
-        setActionError(noctalia.tr("availability.native_cli"), "capture-backing")
+        wallInOne.setActionError(noctalia.tr("availability.native_cli"), "capture-backing")
         return
     end
 
-    local command = "noctalia msg wallpaper-get " .. shellQuote(output)
+    local command = "noctalia msg wallpaper-get " .. wallInOne.shellQuote(output)
     local started = noctalia.runAsync(command, function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            setActionError(
-                noctalia.tr("errors.backing_query", { detail = commandFailureDetail(result) }),
+            wallInOne.setActionError(
+                noctalia.tr("errors.backing_query", { detail = wallInOne.commandFailureDetail(result) }),
                 "capture-backing"
             )
             return
@@ -3134,7 +7639,7 @@ local function captureCurrentBacking(output, force, notifySuccess)
 
         local source = noctalia.string.trim(tostring(result.stdout or ""))
         local info = source ~= "" and noctalia.fileInfo(source) or nil
-        local extension = fileExtension(source)
+        local extension = wallInOne.fileExtension(source)
         local supported = extension == ".png"
             or extension == ".jpg"
             or extension == ".jpeg"
@@ -3149,7 +7654,7 @@ local function captureCurrentBacking(output, force, notifySuccess)
             or (tonumber(info.size) or 0) <= 0
             or not supported
         then
-            setActionError(noctalia.tr("errors.backing_source"), "capture-backing")
+            wallInOne.setActionError(noctalia.tr("errors.backing_source"), "capture-backing")
             return
         end
 
@@ -3162,16 +7667,16 @@ local function captureCurrentBacking(output, force, notifySuccess)
             method = "noctalia-current-backing-frame"
         end
         local identity = table.concat({
-            sanitizedName(source:match("([^/]+)$") or "backing"),
+            wallInOne.sanitizedName(source:match("([^/]+)$") or "backing"),
             tostring(tonumber(info.size) or 0),
             tostring(tonumber(info.mtime) or 0),
         }, "-")
-        local destination, destinationError = captureDestination("backing", identity, output, destinationExtension)
+        local destination, destinationError = wallInOne.captureDestination("backing", identity, output, destinationExtension)
         if destination == nil then
-            setActionError(destinationError, "capture-directory")
+            wallInOne.setActionError(destinationError, "capture-directory")
             return
         end
-        runCapture({
+        wallInOne.runCapture({
             provider = "noctalia",
             output = output,
             dynamic_id = "backing:" .. source,
@@ -3188,19 +7693,19 @@ local function captureCurrentBacking(output, force, notifySuccess)
         })
     end, 5000)
     if not started then
-        setActionError(noctalia.tr("errors.backing_query_start"), "capture-backing")
+        wallInOne.setActionError(noctalia.tr("errors.backing_query_start"), "capture-backing")
     end
 end
 
-local function pairConfiguredStill(output, notifySuccess)
-    output = targetOutput(output)
+function wallInOne.pairConfiguredStill(output, notifySuccess)
+    output = wallInOne.targetOutput(output)
     if output == nil then
-        setActionError(noctalia.tr("availability.output"), "manual-pair")
+        wallInOne.setActionError(noctalia.tr("availability.output"), "manual-pair")
         return
     end
-    local source = configuredManualPair()
+    local source = wallInOne.configuredManualPair()
     local info = source ~= "" and noctalia.fileInfo(source) or nil
-    local extension = fileExtension(source)
+    local extension = wallInOne.fileExtension(source)
     local supported = extension == ".png"
         or extension == ".jpg"
         or extension == ".jpeg"
@@ -3215,10 +7720,10 @@ local function pairConfiguredStill(output, notifySuccess)
         or not supported
         or (extension == ".gif" and not noctalia.commandExists("ffmpeg"))
     then
-        setActionError(noctalia.tr("errors.manual_pair"), "manual-pair")
+        wallInOne.setActionError(noctalia.tr("errors.manual_pair"), "manual-pair")
         return
     end
-    invalidateCycleIntent(output, false)
+    wallInOne.invalidateCycleIntent(output, false)
     local pairToken = tonumber(applyGeneration[output]) or 0
     local destination
     local pairPath
@@ -3226,25 +7731,25 @@ local function pairConfiguredStill(output, notifySuccess)
     local destinationError
     if extension == ".gif" then
         local identity = table.concat({
-            stablePathTag(source),
+            wallInOne.stablePathTag(source),
             tostring(tonumber(info.size) or 0),
             tostring(tonumber(info.mtime) or 0),
-            sanitizedName(source:match("([^/]+)$") or "manual"),
+            wallInOne.sanitizedName(source:match("([^/]+)$") or "manual"),
         }, "-")
-        destination, destinationError = captureDestination("manual", identity, output, ".png")
+        destination, destinationError = wallInOne.captureDestination("manual", identity, output, ".png")
     else
         captureSequence += 1
-        destination, destinationError = adapterStagingPath(
+        destination, destinationError = wallInOne.adapterStagingPath(
             "manual-" .. SERVICE_NONCE .. "-" .. tostring(noctalia.nowMs()) .. "-" .. tostring(captureSequence)
         )
         stagingPath = destination
         pairPath = source
     end
     if destination == nil then
-        setActionError(destinationError, "capture-directory")
+        wallInOne.setActionError(destinationError, "capture-directory")
         return
     end
-    runCapture({
+    wallInOne.runCapture({
         provider = "manual",
         output = output,
         dynamic_id = "manual:" .. source,
@@ -3261,12 +7766,37 @@ local function pairConfiguredStill(output, notifySuccess)
         pair = true,
         notify = notifySuccess == true,
         should_apply = function()
-            return tonumber(applyGeneration[output]) == pairToken and knownOutputName(output) ~= nil
+            return tonumber(applyGeneration[output]) == pairToken and wallInOne.knownOutputName(output) ~= nil
         end,
     })
 end
 
-local function actionAvailability(action, output)
+wallInOne.ownedRendererActions = {
+    playback_pause = { command = "pause", capability = "pause" },
+    playback_resume = { command = "resume", capability = "resume" },
+    playback_toggle = { command = "toggle", capability = "toggle" },
+    playback_stop = { command = "stop", capability = "stop" },
+    audio_mute = { command = "mute", capability = "mute" },
+    audio_unmute = { command = "unmute", capability = "unmute" },
+    audio_toggle = { command = "toggle_mute", capability = "toggle_mute" },
+    audio_volume_down = { command = "set_volume", capability = "set_volume" },
+    audio_volume_up = { command = "set_volume", capability = "set_volume" },
+    audio_set_volume = { command = "set_volume", capability = "set_volume" },
+}
+
+function wallInOne.ownedRenderer(output)
+    output = wallInOne.targetOutput(output)
+    local outputs = type(rendererStatus.outputs) == "table" and rendererStatus.outputs or {}
+    local owned = output ~= nil and outputs[output] or nil
+    if type(owned) == "table" then
+        return owned, output
+    end
+    return nil, output
+end
+
+-- User actions, provider commands, and IPC ----------------------------------
+
+function wallInOne.actionAvailability(action, output)
     if action == "native_open" or action == "hub_open" or action == "no_action" then
         return true, ""
     end
@@ -3276,8 +7806,28 @@ local function actionAvailability(action, output)
     if action == "wallhaven_open" then
         return providers.wallhaven.available, noctalia.tr("availability.wallhaven")
     end
+    if action == "wallhaven_site" then
+        return providers.wallhaven.site_available == true, noctalia.tr("availability.wallhaven_site")
+    end
     if action == "motionbgs_open" then
         return providers.motionbgs.available, noctalia.tr("availability.motionbgs")
+    end
+    if action == "steam_launch" then
+        return providers.w_engine.steam_available == true, noctalia.tr("availability.steam")
+    end
+    if action == "steam_workshop" then
+        return providers.w_engine.steam_workshop_available == true, noctalia.tr("availability.steam_workshop")
+    end
+    if action == "playback_stop_all" then
+        local outputs = type(rendererStatus.outputs) == "table" and rendererStatus.outputs or {}
+        return rendererStatus.ready == true and next(outputs) ~= nil, noctalia.tr("availability.renderer_control")
+    end
+    if wallInOne.ownedRendererActions[action] ~= nil then
+        local owned = wallInOne.ownedRenderer(output)
+        local capabilities = type(owned) == "table" and owned.capabilities or nil
+        local capability = wallInOne.ownedRendererActions[action].capability
+        return type(capabilities) == "table" and capabilities[capability] == true,
+            noctalia.tr("availability.renderer_control")
     end
     if action == "w_engine_open" then
         return providers.w_engine.available, noctalia.tr("availability.w_engine")
@@ -3289,52 +7839,55 @@ local function actionAvailability(action, output)
         return providers.mpvpaper.available, noctalia.tr("availability.mpvpaper")
     end
     if MPVPAPER_VERBS[action] ~= nil then
-        if action == "mpvpaper_clear" and targetOutput(output) == nil then
+        if action == "mpvpaper_clear" and wallInOne.targetOutput(output) == nil then
             return false, noctalia.tr("availability.output")
         end
         return providers.mpvpaper.available and providers.noctalia_cli, noctalia.tr("availability.mpvpaper_ipc")
     end
     if action == "capture_backing" then
-        return providers.noctalia_cli and targetOutput(output) ~= nil, noctalia.tr("availability.backing")
+        return providers.noctalia_cli and wallInOne.targetOutput(output) ~= nil, noctalia.tr("availability.backing")
     end
     if action == "capture_current" or action == "capture_pair" then
         if not providers.w_engine.allowed then
             return false, noctalia.tr("availability.w_engine_forced_off")
         end
-        local selected = targetOutput(output)
-        local id = selected ~= nil and providers.w_engine.current[selected] or nil
+        local selected = wallInOne.targetOutput(output)
+        local id = selected ~= nil and providers.w_engine.internal_current[selected] or nil
         if id == nil or tostring(id) == "" then
-            id = configuredWorkshopId()
+            id = selected ~= nil and providers.w_engine.current[selected] or nil
         end
-        return id ~= nil and tostring(id):match("^%d+$") ~= nil, noctalia.tr("availability.current_scene")
+        if id == nil or tostring(id) == "" then
+            id = wallInOne.configuredWorkshopId()
+        end
+        return wallInOne.validWorkshopId(id), noctalia.tr("availability.current_scene")
     end
     if action == "video_capture" or action == "video_capture_pair" then
-        local source = configuredVideoSource()
+        local source = wallInOne.configuredVideoSource()
         return source ~= "" and noctalia.fileExists(source) and noctalia.commandExists("ffmpeg"),
             noctalia.tr("availability.video")
     end
     if action == "video_apply_pair" then
-        local source = configuredVideoSource()
+        local source = wallInOne.configuredVideoSource()
         return providers.mpvpaper.apply_available == true and source ~= "" and noctalia.fileExists(source),
             noctalia.tr("availability.video_apply")
     end
     if action == "workshop_apply_pair" then
-        return providers.w_engine.apply_available == true and configuredWorkshopId() ~= "",
+        return providers.w_engine.apply_available == true and wallInOne.configuredWorkshopId() ~= "",
             noctalia.tr("availability.workshop_apply")
     end
     if action == "cycle_add_static" then
-        return providers.noctalia_cli and targetOutput(output) ~= nil, noctalia.tr("availability.backing")
+        return providers.noctalia_cli and wallInOne.targetOutput(output) ~= nil, noctalia.tr("availability.backing")
     end
     if action == "cycle_add_video" then
-        local source = configuredVideoSource()
+        local source = wallInOne.configuredVideoSource()
         return source ~= "" and noctalia.fileExists(source), noctalia.tr("availability.video")
     end
     if action == "cycle_add_workshop" then
-        return configuredWorkshopId() ~= "", noctalia.tr("availability.current_scene")
+        return wallInOne.configuredWorkshopId() ~= "", noctalia.tr("availability.current_scene")
     end
     if action == "cycle_remove_last" or action == "cycle_clear" then
-        local reel = reelForOutput(output, false)
-        return type(reel) == "table" and #reel.entries > 0, noctalia.tr("availability.cycle")
+        local playlist = wallInOne.playlistForOutput(output, nil)
+        return type(playlist) == "table" and #playlist.entries > 0, noctalia.tr("availability.cycle")
     end
     if
         action == "cycle_start"
@@ -3345,27 +7898,26 @@ local function actionAvailability(action, output)
         or action == "cycle_previous"
         or action == "cycle_random"
     then
-        local reel = reelForOutput(output, false)
+        local playlist, playlistId, selected = wallInOne.playlistForOutput(output, nil)
         if action == "cycle_next" or action == "cycle_previous" or action == "cycle_random" then
-            local selected = targetOutput(output)
-            local state = selected ~= nil and runtime.cycles[selected] or nil
+            local state = selected ~= nil and playlistId ~= nil and wallInOne.playlistRunState(selected, playlistId) or nil
             if type(state) == "table" and state.paused == true then
-                return false, noctalia.tr("errors.cycle_paused")
+                return false, noctalia.tr("errors.playlist_paused")
             end
         end
-        return type(reel) == "table" and #reel.entries > 0, noctalia.tr("availability.cycle")
+        return type(playlist) == "table" and #playlist.entries > 0, noctalia.tr("availability.cycle")
     end
     if action == "manual_pair" then
-        local source = configuredManualPair()
+        local source = wallInOne.configuredManualPair()
         local info = source ~= "" and noctalia.fileInfo(source) or nil
-        local extension = fileExtension(source)
+        local extension = wallInOne.fileExtension(source)
         local supported = extension == ".png"
             or extension == ".jpg"
             or extension == ".jpeg"
             or extension == ".webp"
             or (extension == ".avif" and noctalia.commandExists("ffmpeg"))
             or (extension == ".gif" and noctalia.commandExists("ffmpeg"))
-        return targetOutput(output) ~= nil
+        return wallInOne.targetOutput(output) ~= nil
             and type(info) == "table"
             and info.isDir ~= true
             and (tonumber(info.size) or 0) > 0
@@ -3378,38 +7930,104 @@ local function actionAvailability(action, output)
     return false, noctalia.tr("availability.unknown")
 end
 
-local function runNativeSwitch(request, action)
+function wallInOne.runNativeSwitch(request, action)
     local command = "noctalia msg " .. NATIVE_SWITCH_VERBS[action]
-    local output = targetOutput(request.output)
+    local output = wallInOne.targetOutput(request.output)
     if output ~= nil then
-        command ..= " " .. shellQuote(output)
+        command ..= " " .. wallInOne.shellQuote(output)
     end
     local started = noctalia.runAsync(command, function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            setActionError(noctalia.tr("errors.native_switch", { detail = commandFailureDetail(result) }), action)
+            wallInOne.setActionError(noctalia.tr("errors.native_switch", { detail = wallInOne.commandFailureDetail(result) }), action)
         else
             lastActionError = ""
             lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-            publishStatus()
+            wallInOne.publishStatus()
         end
     end, 5000)
     if not started then
-        setActionError(noctalia.tr("errors.native_switch_start"), action)
+        wallInOne.setActionError(noctalia.tr("errors.native_switch_start"), action)
     end
 end
 
-local function openMotionBgs()
-    local started = noctalia.runAsync("xdg-open " .. shellQuote(MOTIONBGS_URL), function(result)
+function wallInOne.openMotionBgs()
+    local started = noctalia.runAsync("xdg-open " .. wallInOne.shellQuote(MOTIONBGS_URL), function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            setActionError(noctalia.tr("errors.motionbgs_open", { detail = commandFailureDetail(result) }), "motionbgs")
+            wallInOne.setActionError(noctalia.tr("errors.motionbgs_open", { detail = wallInOne.commandFailureDetail(result) }), "motionbgs")
         end
     end, 5000)
     if not started then
-        setActionError(noctalia.tr("errors.motionbgs_start"), "motionbgs")
+        wallInOne.setActionError(noctalia.tr("errors.motionbgs_start"), "motionbgs")
     end
 end
 
-local function nextMotionBgsNonce()
+function wallInOne.openWallhavenSite()
+    local started = noctalia.runAsync("xdg-open " .. wallInOne.shellQuote(WALLHAVEN_URL), function(result)
+        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
+            wallInOne.setActionError(
+                noctalia.tr("errors.wallhaven_open", { detail = wallInOne.commandFailureDetail(result) }),
+                "wallhaven-site"
+            )
+        end
+    end, 5000)
+    if not started then
+        wallInOne.setActionError(noctalia.tr("errors.wallhaven_start"), "wallhaven-site")
+    end
+end
+
+function wallInOne.openSteamTarget(action)
+    local command
+    if action == "steam_launch" and noctalia.commandExists("steam") then
+        command = "steam -applaunch " .. WALLPAPER_ENGINE_APP_ID
+    elseif action == "steam_launch" then
+        command = "xdg-open " .. wallInOne.shellQuote("steam://run/" .. WALLPAPER_ENGINE_APP_ID)
+    else
+        command = "xdg-open " .. wallInOne.shellQuote(WALLPAPER_ENGINE_WORKSHOP_URL)
+    end
+    local started = noctalia.runAsync(command, function(result)
+        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
+            wallInOne.setActionError(noctalia.tr("errors.steam_open", { detail = wallInOne.commandFailureDetail(result) }), action)
+        else
+            lastActionError = ""
+            lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+            wallInOne.publishStatus()
+        end
+    end, 10000)
+    if not started then
+        wallInOne.setActionError(noctalia.tr("errors.steam_start"), action)
+    end
+end
+
+function wallInOne.runOwnedRendererControl(request, action)
+    if action == "playback_stop_all" then
+        wallInOne.sendRendererCommand({ action = "stop_all" })
+        return
+    end
+    local owned, output = wallInOne.ownedRenderer(request.output)
+    local mapping = wallInOne.ownedRendererActions[action]
+    if type(owned) ~= "table" or output == nil or type(mapping) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("availability.renderer_control"), "renderer-control")
+        return
+    end
+    local command = { action = mapping.command, output = output }
+    if mapping.command == "set_volume" then
+        local current = math.max(0, math.min(100, math.floor(tonumber(owned.volume) or 100)))
+        local requested = tonumber(request.volume)
+        if action == "audio_volume_down" then
+            requested = current - 5
+        elseif action == "audio_volume_up" then
+            requested = current + 5
+        end
+        command.volume = math.max(0, math.min(100, math.floor(requested or current)))
+    end
+    if wallInOne.sendRendererCommand(command) then
+        lastActionError = ""
+        lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+        wallInOne.publishStatus()
+    end
+end
+
+function wallInOne.nextMotionBgsNonce()
     local previous = noctalia.state.get(MOTIONBGS_COMMAND_KEY)
     local previousNonce = if type(previous) == "table" then tonumber(previous.nonce) or 0 else 0
     local statusNonce = if type(motionBgsStatus) == "table" then tonumber(motionBgsStatus.last_nonce) or 0 else 0
@@ -3417,163 +8035,310 @@ local function nextMotionBgsNonce()
     return motionBgsCommandSequence
 end
 
-local function sendMotionBgsCommand(request, action)
+function wallInOne.sendMotionBgsCommand(request, action)
     if not configValid or not runtimeValid then
-        setActionError(noctalia.tr("errors.storage_disabled"), "storage")
+        wallInOne.setActionError(noctalia.tr("errors.storage_disabled"), "storage")
         return false
     end
-    if not settingBool("use_motionbgs", true) or providers.motionbgs.integration_available ~= true then
-        setActionError(noctalia.tr("errors.motionbgs_unavailable"), "motionbgs")
+    if not wallInOne.settingBool("use_motionbgs", true) or providers.motionbgs.integration_available ~= true then
+        wallInOne.setActionError(noctalia.tr("errors.motionbgs_unavailable"), "motionbgs")
         return false
     end
     local command = {
         schema = 1,
-        nonce = nextMotionBgsNonce(),
+        nonce = wallInOne.nextMotionBgsNonce(),
         action = tostring(action or ""),
     }
     if action == "search" then
         command.query = tostring(request.query or "")
-        command.limit = settingInt("motionbgs_result_limit", 24, 1, 24)
+        command.limit = wallInOne.settingInt("motionbgs_result_limit", 24, 1, 24)
         command.force = request.force == true
     elseif action == "details" then
         command.slug = tostring(request.slug or "")
         command.force = request.force == true
     elseif action == "download" then
         command.slug = tostring(request.slug or "")
-        command.quality = if tostring(request.quality or settingString("motionbgs_quality", "hd")) == "4k"
+        command.quality = if tostring(request.quality or wallInOne.settingString("motionbgs_quality", "hd")) == "4k"
             then "4k"
             else "hd"
         command.force = request.force == true
     elseif action ~= "clear" then
-        setActionError(noctalia.tr("errors.motionbgs_action"), "motionbgs")
+        wallInOne.setActionError(noctalia.tr("errors.motionbgs_action"), "motionbgs")
         return false
     end
     noctalia.state.set(MOTIONBGS_COMMAND_KEY, command)
     lastActionError = ""
     lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    publishStatus()
+    wallInOne.publishStatus()
     return true
 end
 
-local function runWEngineControl(request, action)
+function wallInOne.nextPalettesNonce()
+    local previous = noctalia.state.get(PALETTES_COMMAND_KEY)
+    local previousNonce = if type(previous) == "table" then tonumber(previous.nonce) or 0 else 0
+    local statusNonce = if type(palettesStatus) == "table" then tonumber(palettesStatus.last_nonce) or 0 else 0
+    palettesCommandSequence = math.max(palettesCommandSequence, previousNonce, statusNonce) + 1
+    return palettesCommandSequence
+end
+
+function wallInOne.refreshPaletteInventory(force)
+    noctalia.state.set(PALETTES_COMMAND_KEY, {
+        schema = 1,
+        nonce = wallInOne.nextPalettesNonce(),
+        action = "refresh",
+        force = force == true,
+    })
+    return true
+end
+
+function wallInOne.requestPalettePreview(request)
+    local key = tostring(request.key or "")
+    local path = tostring(request.path or "")
+    local scheme = tostring(request.scheme or "")
+    local pairingId = tostring(request.pairing_id or "")
+    local pairing = type(config.pairings) == "table" and config.pairings[pairingId] or nil
+    if type(pairing) == "table" then
+        local still = type(pairing.still) == "table" and pairing.still or nil
+        local media = type(pairing.media) == "table" and pairing.media or nil
+        if path == "" and type(still) == "table" and still.mode == "selected" then
+            path = tostring(still.path or "")
+        elseif path == "" and type(still) == "table" and still.mode == "automatic" and type(media) == "table" then
+            local dynamicId = if media.kind == "video" then "video:" .. tostring(media.source or "") else tostring(media.source or "")
+            path = wallInOne.cachedPair(dynamicId) or ""
+        end
+        if scheme == "" and type(pairing.theme) == "table" and pairing.theme.source == "wallpaper" then
+            scheme = tostring(pairing.theme.selection or "")
+        end
+    end
+    if not wallInOne.validPersistedKey(key) or not VALID_COLOR_SCHEMES[scheme] then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_still_missing", { path = path }), "palette-preview")
+        return false
+    end
+    -- Forward a bounded empty path when an automatic representative is not
+    -- ready yet. The palette worker owns final source validation and publishes
+    -- a keyed error, so the panel can correlate the rejection and retry after
+    -- a capture or explicit refresh instead of latching an unanswered key.
+    path = if wallInOne.validAbsolutePath(path) then path else ""
+    noctalia.state.set(PALETTES_COMMAND_KEY, {
+        schema = 1,
+        nonce = wallInOne.nextPalettesNonce(),
+        action = "preview",
+        key = key,
+        path = path,
+        scheme = scheme,
+    })
+    return true
+end
+
+function wallInOne.nextWallhavenNonce()
+    local previous = noctalia.state.get(WALLHAVEN_COMMAND_KEY)
+    local previousNonce = if type(previous) == "table" then tonumber(previous.nonce) or 0 else 0
+    local statusNonce = if type(wallhavenStatus) == "table" then tonumber(wallhavenStatus.last_nonce) or 0 else 0
+    wallhavenCommandSequence = math.max(wallhavenCommandSequence, previousNonce, statusNonce) + 1
+    return wallhavenCommandSequence
+end
+
+function wallInOne.currentWallhavenItem(id)
+    id = tostring(id or "")
+    local selected = type(wallhavenResults.selected) == "table" and wallhavenResults.selected or nil
+    if type(selected) == "table" and tostring(selected.id or "") == id then
+        return selected
+    end
+    for _, item in ipairs(type(wallhavenResults.items) == "table" and wallhavenResults.items or {}) do
+        if type(item) == "table" and tostring(item.id or "") == id then
+            return item
+        end
+    end
+    return nil
+end
+
+function wallInOne.sendWallhavenCommand(request, action)
+    if not wallInOne.settingBool("use_wallhaven", true) or wallhavenStatus.available ~= true then
+        wallInOne.setActionError(noctalia.tr("errors.wallhaven_unavailable"), "wallhaven")
+        return false
+    end
+    local nonce = wallInOne.nextWallhavenNonce()
+    local command = {
+        schema = 1,
+        nonce = nonce,
+        action = action,
+    }
+    if action == "search" then
+        command.filters = {
+            query = tostring(request.query or ""),
+            categories = tostring(request.categories or "111"),
+            purity = tostring(request.purity or "100"),
+            sorting = tostring(request.sorting or "date_added"),
+            order = tostring(request.order or "desc"),
+            atleast = tostring(request.atleast or ""),
+            ratios = tostring(request.ratios or ""),
+            colors = tostring(request.colors or ""),
+            page = tonumber(request.page) or 1,
+        }
+    elseif action == "detail" then
+        command.id = tostring(request.id or "")
+    elseif action == "download" then
+        local item = wallInOne.currentWallhavenItem(request.id)
+        if type(item) ~= "table" then
+            wallInOne.setActionError(noctalia.tr("errors.wallhaven_result"), "wallhaven")
+            return false
+        end
+        local directory = wallInOne.wallhavenManagedDirectory()
+        local ready, directoryError = wallInOne.ensureManagedDirectory(directory, "wallhaven")
+        if ready ~= true then
+            wallInOne.setActionError(tostring(directoryError or noctalia.tr("errors.managed_directory")), "wallhaven")
+            return false
+        end
+        local extension = tostring(item.extension or ""):lower()
+        if extension ~= "jpg" and extension ~= "png" then
+            wallInOne.setActionError(noctalia.tr("errors.wallhaven_result"), "wallhaven")
+            return false
+        end
+        local target = directory .. "/wallhaven-" .. tostring(item.id or "") .. "." .. extension
+        command.id = tostring(item.id or "")
+        command.url = tostring(item.path or item.short_url or "")
+        command.target_path = target
+        command.staging_path = target .. ".wallhaven-" .. tostring(nonce) .. ".stage"
+    elseif action ~= "clear" then
+        wallInOne.setActionError(noctalia.tr("errors.wallhaven_action"), "wallhaven")
+        return false
+    end
+    noctalia.state.set(WALLHAVEN_COMMAND_KEY, command)
+    lastActionError = ""
+    lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    wallInOne.publishStatus()
+    return true
+end
+
+function wallInOne.runWEngineControl(request, action)
     if not providers.w_engine.available then
-        setActionError(noctalia.tr("errors.w_engine_forced_off"), action)
+        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), action)
         return
     end
-    local output = targetOutput(request.output)
+    local output = wallInOne.targetOutput(request.output)
     local command = "noctalia msg plugin " .. W_ENGINE_SERVICE .. " all " .. W_ENGINE_VERBS[action]
     if output ~= nil then
-        command ..= " " .. shellQuote(output)
+        command ..= " " .. wallInOne.shellQuote(output)
     end
     local started = noctalia.runAsync(command, function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            setActionError(noctalia.tr("errors.w_engine_ipc", { detail = commandFailureDetail(result) }), action)
+            wallInOne.setActionError(noctalia.tr("errors.w_engine_ipc", { detail = wallInOne.commandFailureDetail(result) }), action)
         else
             lastActionError = ""
             lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-            publishStatus()
+            wallInOne.publishStatus()
         end
     end, 5000)
     if not started then
-        setActionError(noctalia.tr("errors.w_engine_ipc_start"), action)
+        wallInOne.setActionError(noctalia.tr("errors.w_engine_ipc_start"), action)
     end
 end
 
-local function runMpvpaperControl(request, action)
+function wallInOne.runMpvpaperControl(request, action)
     if not providers.mpvpaper.available then
-        setActionError(noctalia.tr("errors.mpvpaper_forced_off"), action)
+        wallInOne.setActionError(noctalia.tr("errors.mpvpaper_forced_off"), action)
         return
     end
-    local output = targetOutput(request.output)
+    local output = wallInOne.targetOutput(request.output)
     local command = "noctalia msg plugin " .. MPVPAPER_SERVICE .. " all " .. MPVPAPER_VERBS[action]
     if action ~= "mpvpaper_clear_all" and output ~= nil then
-        command ..= " " .. shellQuote(output)
+        command ..= " " .. wallInOne.shellQuote(output)
     end
     local started = noctalia.runAsync(command, function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            setActionError(noctalia.tr("errors.mpvpaper_ipc", { detail = commandFailureDetail(result) }), action)
+            wallInOne.setActionError(noctalia.tr("errors.mpvpaper_ipc", { detail = wallInOne.commandFailureDetail(result) }), action)
         else
             lastActionError = ""
             lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-            publishStatus()
+            wallInOne.publishStatus()
         end
     end, 5000)
     if not started then
-        setActionError(noctalia.tr("errors.mpvpaper_ipc_start"), action)
+        wallInOne.setActionError(noctalia.tr("errors.mpvpaper_ipc_start"), action)
     end
 end
 
-local function actionPanelTarget(action)
+function wallInOne.actionPanelTarget(action)
     if action == "extra_provider_open" then
         return providers.extra.panel
     end
     return OPEN_TARGETS[action]
 end
 
-local function dispatchAction(request, action)
+function wallInOne.dispatchAction(request, action)
     -- The explicit site link is the scraper's disaster-recovery path. Keep it
     -- independent of plugin storage and the adapter enable switch.
-    if action == "motionbgs_open" then
-        local available, unavailableReason = actionAvailability(action, request.output)
+    if action == "motionbgs_open" or action == "wallhaven_site" then
+        local available, unavailableReason = wallInOne.actionAvailability(action, request.output)
         if available then
-            openMotionBgs()
+            if action == "wallhaven_site" then
+                wallInOne.openWallhavenSite()
+            else
+                wallInOne.openMotionBgs()
+            end
         else
-            setActionError(unavailableReason, "motionbgs")
+            wallInOne.setActionError(unavailableReason, if action == "wallhaven_site" then "wallhaven-site" else "motionbgs")
         end
         return
     end
     if not configValid or not runtimeValid then
-        notifyBounded("storage", noctalia.tr("errors.storage_disabled"))
+        wallInOne.notifyBounded("storage", noctalia.tr("errors.storage_disabled"))
         return
     end
     if not VALID_ACTIONS[action] then
-        notifyBounded("unknown", noctalia.tr("availability.unknown"))
+        wallInOne.notifyBounded("unknown", noctalia.tr("availability.unknown"))
         return
     end
-    local available, unavailableReason = actionAvailability(action, request.output)
+    local available, unavailableReason = wallInOne.actionAvailability(action, request.output)
     if not available then
         local message = noctalia.tr("errors.action_unavailable", { action = action, reason = unavailableReason })
-        setActionError(message, action)
+        wallInOne.setActionError(message, action)
         return
     end
     if action == "no_action" then
         return
+    elseif action == "steam_launch" or action == "steam_workshop" then
+        wallInOne.openSteamTarget(action)
+        return
+    elseif action == "playback_stop_all" or wallInOne.ownedRendererActions[action] ~= nil then
+        wallInOne.runOwnedRendererControl(request, action)
+        return
     elseif NATIVE_SWITCH_VERBS[action] ~= nil then
-        runNativeSwitch(request, action)
+        wallInOne.runNativeSwitch(request, action)
         return
     elseif W_ENGINE_VERBS[action] ~= nil then
-        runWEngineControl(request, action)
+        wallInOne.runWEngineControl(request, action)
         return
     elseif MPVPAPER_VERBS[action] ~= nil then
-        runMpvpaperControl(request, action)
+        wallInOne.runMpvpaperControl(request, action)
         return
     elseif action == "capture_backing" then
-        captureCurrentBacking(request.output, true, true)
+        wallInOne.captureCurrentBacking(request.output, true, true)
         return
     elseif action == "capture_current" then
-        captureCurrent(request.output, true, false, true)
+        wallInOne.captureCurrent(request.output, true, false, true)
         return
     elseif action == "capture_pair" then
-        captureCurrent(request.output, true, true, true)
+        wallInOne.captureCurrent(request.output, true, true, true)
         return
     elseif action == "video_capture" then
-        captureConfiguredVideo(request.output, true, false, true)
+        wallInOne.captureConfiguredVideo(request.output, true, false, true)
         return
     elseif action == "video_capture_pair" then
-        captureConfiguredVideo(request.output, true, true, true)
+        wallInOne.captureConfiguredVideo(request.output, true, true, true)
         return
     elseif action == "video_apply_pair" then
-        applyManualEntry(request.output, { kind = "video", source = configuredVideoSource() }, true)
+        wallInOne.applyManualEntry(request.output, { kind = "video", source = wallInOne.configuredVideoSource() }, true)
         return
     elseif action == "workshop_apply_pair" then
-        applyManualEntry(request.output, { kind = "workshop", source = configuredWorkshopId() }, true)
+        wallInOne.applyManualEntry(request.output, { kind = "workshop", source = wallInOne.configuredWorkshopId() }, true)
         return
     elseif action == "cycle_add_static" then
-        addCurrentStaticToCycle(request.output)
+        wallInOne.addCurrentStaticToPlaylist(request.output, nil)
         return
     elseif action == "cycle_add_video" then
-        local source = configuredVideoSource()
-        addReelEntry(request.output, {
+        local source = wallInOne.configuredVideoSource()
+        wallInOne.addPlaylistEntry(request.output, nil, {
             kind = "video",
             source = source,
             label = source:match("([^/]+)$") or source,
@@ -3581,8 +8346,8 @@ local function dispatchAction(request, action)
         })
         return
     elseif action == "cycle_add_workshop" then
-        local id = configuredWorkshopId()
-        addReelEntry(request.output, {
+        local id = wallInOne.configuredWorkshopId()
+        wallInOne.addPlaylistEntry(request.output, nil, {
             kind = "workshop",
             source = id,
             label = "Workshop " .. id,
@@ -3590,84 +8355,92 @@ local function dispatchAction(request, action)
         })
         return
     elseif action == "cycle_remove_last" then
-        removeReelEntry(request.output, nil)
+        local playlist, playlistId = wallInOne.playlistForOutput(request.output, nil)
+        local lastEntry = type(playlist) == "table" and playlist.entries[#playlist.entries] or nil
+        if playlistId ~= nil and type(lastEntry) == "table" then
+            wallInOne.removePlaylistEntry(playlistId, lastEntry.id)
+        end
         return
     elseif action == "cycle_clear" then
-        clearReel(request.output)
+        local _playlist, playlistId = wallInOne.playlistForOutput(request.output, nil)
+        if playlistId ~= nil then
+            wallInOne.clearPlaylist(playlistId)
+        end
         return
     elseif action == "cycle_start" then
-        setCycleRunState(request.output, "start")
+        wallInOne.setPlaylistRunState(request.output, nil, "start", true)
         return
     elseif action == "cycle_stop" then
-        setCycleRunState(request.output, "stop")
+        wallInOne.setPlaylistRunState(request.output, nil, "stop", true)
         return
     elseif action == "cycle_pause" then
-        setCycleRunState(request.output, "pause")
+        wallInOne.setPlaylistRunState(request.output, nil, "pause", true)
         return
     elseif action == "cycle_resume" then
-        setCycleRunState(request.output, "resume")
+        wallInOne.setPlaylistRunState(request.output, nil, "resume", true)
         return
     elseif action == "cycle_next" or action == "cycle_previous" or action == "cycle_random" then
         local direction = action:gsub("^cycle_", "")
-        advanceCycle(request.output, direction)
+        wallInOne.advancePlaylist(request.output, nil, direction, { notify = true })
         return
     elseif action == "manual_pair" then
-        pairConfiguredStill(request.output, true)
+        wallInOne.pairConfiguredStill(request.output, true)
         return
     end
 
     lastActionError = ""
     lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    publishStatus()
+    wallInOne.publishStatus()
     if tostring(request.producer or "") == "ipc" then
-        local target = actionPanelTarget(action)
+        local target = wallInOne.actionPanelTarget(action)
         if type(target) == "string" and target ~= "" then
             noctalia.togglePanel(target)
         end
     end
 end
 
-local function setMapping(button, action)
+function wallInOne.setMapping(button, action)
     if not configValid or not runtimeValid then
-        notifyBounded("storage", noctalia.tr("errors.storage_disabled"))
+        wallInOne.notifyBounded("storage", noctalia.tr("errors.storage_disabled"))
         return
     end
     if button ~= "left" and button ~= "middle" and button ~= "right" then
         return
     end
-    if not VALID_ACTIONS[action] then
-        notifyBounded("unknown", noctalia.tr("availability.unknown"))
+    if not VALID_GESTURE_ACTIONS[action] then
+        wallInOne.notifyBounded("unknown", noctalia.tr("availability.unknown"))
         return
     end
-    local nextConfig = {
-        schema_version = CONFIG_SCHEMA,
-        gestures = cloneGestures(config.gestures),
-        reels = normalizedReels(config.reels) or {},
-    }
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil then
+        wallInOne.setActionError(noctalia.tr("errors.config_playlists"), "set-mapping")
+        return
+    end
     nextConfig.gestures[button] = action
-    local saved, saveError = atomicWrite("config.json", nextConfig)
-    if not saved then
-        configError = tostring(saveError or noctalia.tr("errors.config_save"))
-        configValid = false
-        notifyBounded("config-save", noctalia.tr("errors.config_save"))
-        publishStatus()
-        return
-    end
-    config = nextConfig
-    configError = ""
-    publishStatus()
+    wallInOne.saveConfig(nextConfig, "set-mapping")
 end
 
-local function tabFields(payload)
+function wallInOne.tabFields(payload)
+    local text = tostring(payload or "")
     local fields = {}
-    for value in (tostring(payload or "") .. "\t"):gmatch("([^\t]*)\t") do
+    if #text > MAX_ADAPTER_PAYLOAD_BYTES then
+        return fields
+    end
+    local withoutTabs = text:gsub("\t", "")
+    if withoutTabs:find("[%c]") ~= nil then
+        return fields
+    end
+    for value in (text .. "\t"):gmatch("([^\t]*)\t") do
+        if #fields >= ADAPTER_FIELD_COUNT then
+            return {}
+        end
         table.insert(fields, value)
     end
-    return fields
+    return if #fields == ADAPTER_FIELD_COUNT then fields else {}
 end
 
-local function receiveProviderCapabilities(payload)
-    local fields = tabFields(payload)
+function wallInOne.receiveProviderCapabilities(payload)
+    local fields = wallInOne.tabFields(payload)
     if fields[1] ~= "w_engine" or fields[2] ~= "1" or not providers.w_engine.available then
         return
     end
@@ -3678,27 +8451,27 @@ local function receiveProviderCapabilities(payload)
     providers.w_engine.adapter_seen_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
     providers.w_engine.adapter_seen_ms = noctalia.nowMs()
     providers.w_engine.adapter_probe_ms = 0
-    persistRuntimeIfChanged(true)
-    publishStatus()
+    wallInOne.persistRuntimeIfChanged(false)
+    wallInOne.publishStatus()
 end
 
-local function receiveProviderCurrent(payload)
-    local fields = tabFields(payload)
+function wallInOne.receiveProviderCurrent(payload)
+    local fields = wallInOne.tabFields(payload)
     if fields[1] ~= "w_engine" or not providers.w_engine.available or not providers.w_engine.adapter_status then
         return
     end
-    local output = knownOutputName(fields[2])
+    local output = wallInOne.knownOutputName(fields[2])
     local id = tostring(fields[3] or "")
     if output == nil then
         return
     end
     if id == "" or id == "-" then
         providers.w_engine.current[output] = nil
-    elseif id:match("^%d+$") ~= nil then
+    elseif wallInOne.validWorkshopId(id) then
         local changed = tostring(providers.w_engine.current[output] or "") ~= id
         providers.w_engine.current[output] = id
-        if changed and settingBool("auto_capture", false) then
-            requestRenderedCapture(output, id, settingBool("pair_static", true), false)
+        if changed and wallInOne.settingBool("auto_capture", true) then
+            wallInOne.requestRenderedCapture(output, id, true, false, true)
         end
     else
         return
@@ -3706,12 +8479,12 @@ local function receiveProviderCurrent(payload)
     providers.w_engine.adapter_seen_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
     providers.w_engine.adapter_seen_ms = noctalia.nowMs()
     providers.w_engine.adapter_probe_ms = 0
-    persistRuntimeIfChanged(true)
-    publishStatus()
+    wallInOne.persistRuntimeIfChanged(false)
+    wallInOne.publishStatus()
 end
 
-local function receiveCaptureResult(payload)
-    local fields = tabFields(payload)
+function wallInOne.receiveCaptureResult(payload)
+    local fields = wallInOne.tabFields(payload)
     local requestId = tostring(fields[1] or "")
     local resultStatus = tostring(fields[2] or "")
     local value = tostring(fields[3] or "")
@@ -3728,27 +8501,27 @@ local function receiveCaptureResult(payload)
         return
     end
     if not providers.w_engine.allowed then
-        finishCapture(key, request, false, noctalia.tr("errors.w_engine_forced_off"))
+        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_forced_off"))
         return
     end
     if resultStatus ~= "ok" then
-        finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter", { detail = boundedDetail(value) }))
+        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter", { detail = wallInOne.boundedDetail(value) }))
         return
     end
     local stagedInfo = value ~= "" and value == request.staging_path and noctalia.fileInfo(value) or nil
     if type(stagedInfo) ~= "table" or stagedInfo.isDir == true or (tonumber(stagedInfo.size) or 0) <= 0 then
-        finishCapture(key, request, false, noctalia.tr("errors.capture_failed"))
+        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.capture_failed"))
         return
     end
     -- The adapter owns only this request-specific plugin-data staging path.
     -- The helper decodes it, then atomically promotes it to the known-good
     -- destination without ever exposing a partial image in the wallpaper tree.
-    releaseCaptureSlot(key)
+    wallInOne.releaseCaptureSlot(key)
     request.spec = { mode = "copy", source = value, value = "", method = "w-engine-adapter-v1" }
-    runCapture(request)
+    wallInOne.runCapture(request)
 end
 
-local function handleCommand(request)
+function wallInOne.handleCommand(request)
     if type(request) ~= "table" then
         return
     end
@@ -3761,55 +8534,162 @@ local function handleCommand(request)
 
     local kind = tostring(request.kind or "")
     if (not configValid or not runtimeValid) and kind ~= "action" and kind ~= "gesture" and kind ~= "probe" then
-        setActionError(noctalia.tr("errors.storage_disabled"), "storage")
+        wallInOne.setActionError(noctalia.tr("errors.storage_disabled"), "storage")
         return
     end
     if kind == "gesture" then
         local gestures = type(config.gestures) == "table" and config.gestures or {}
-        dispatchAction(request, tostring(gestures[tostring(request.button or "")] or ""))
+        wallInOne.dispatchAction(request, tostring(gestures[tostring(request.button or "")] or ""))
     elseif kind == "action" then
-        dispatchAction(request, tostring(request.action or ""))
+        wallInOne.dispatchAction(request, tostring(request.action or ""))
     elseif kind == "set_mapping" then
-        setMapping(tostring(request.button or ""), tostring(request.action or ""))
+        wallInOne.setMapping(tostring(request.button or ""), tostring(request.action or ""))
+    elseif kind == "playlist_create" then
+        wallInOne.createPlaylist(request.name, request.output, false)
+    elseif kind == "playlist_rename" then
+        wallInOne.renamePlaylist(request.playlist_id, request.name)
+    elseif kind == "playlist_duplicate" then
+        wallInOne.duplicatePlaylist(request.playlist_id, request.name, request.output)
+    elseif kind == "playlist_delete" then
+        wallInOne.deletePlaylist(request.playlist_id)
+    elseif kind == "playlist_assign" then
+        wallInOne.setOutputFallback(request.output, request.playlist_id)
+    elseif kind == "playlist_options" then
+        wallInOne.setPlaylistOptions(request.playlist_id, request.interval_seconds, request.order)
+    elseif kind == "output_options" then
+        wallInOne.setOutputPlaylistOptions(
+            request.output,
+            request.interval_seconds,
+            request.order,
+            request.inherit == true
+        )
+    elseif kind == "pairing_save" then
+        wallInOne.savePairing(request.pairing)
+    elseif kind == "pairing_delete" then
+        wallInOne.deletePairing(request.pairing_id)
+    elseif kind == "playlist_add_pairing" then
+        wallInOne.addPairingToPlaylist(
+            request.output,
+            request.playlist_id,
+            request.pairing_id,
+            request.before_id
+        )
+    elseif kind == "playlist_add_entry" then
+        wallInOne.addPlaylistEntry(request.output, request.playlist_id, request.entry)
+    elseif kind == "playlist_save_entry" then
+        wallInOne.savePlaylistEntry(request.playlist_id, request.entry)
+    elseif kind == "playlist_remove_entry" then
+        wallInOne.removePlaylistEntry(request.playlist_id, request.entry_id)
+    elseif kind == "playlist_move_entry" then
+        wallInOne.movePlaylistEntry(request.playlist_id, request.entry_id, request.direction)
+    elseif kind == "playlist_place_entry" then
+        wallInOne.placePlaylistEntry(
+            request.playlist_id,
+            request.entry_id,
+            request.anchor_id,
+            request.placement
+        )
+    elseif kind == "playlist_apply_entry" then
+        wallInOne.applyPlaylistEntryById(request.output, request.playlist_id, request.entry_id)
+    elseif kind == "playlist_action" then
+        local action = tostring(request.action or "")
+        if action == "next" or action == "previous" or action == "random" then
+            wallInOne.advancePlaylist(request.output, request.playlist_id, action, { notify = true })
+        else
+            wallInOne.setPlaylistRunState(request.output, request.playlist_id, action, request.manual_pin ~= false)
+        end
+    elseif kind == "schedule_save" then
+        wallInOne.upsertSchedule(request.output, request.schedule)
+    elseif kind == "schedule_delete" then
+        wallInOne.deleteSchedule(request.output, request.schedule_id)
+    elseif kind == "schedule_place" then
+        wallInOne.placeSchedule(
+            request.output,
+            request.schedule_id,
+            request.anchor_id,
+            request.placement
+        )
+    elseif kind == "schedule_resume" then
+        wallInOne.resumeOutputSchedule(request.output)
     elseif kind == "cycle_add_entry" then
-        addReelEntry(request.output, request.entry)
+        wallInOne.addPlaylistEntry(request.output, nil, request.entry)
     elseif kind == "cycle_remove_entry" then
-        removeReelEntry(request.output, request.index)
+        local playlist, playlistId = wallInOne.playlistForOutput(request.output, nil)
+        local index = math.floor(tonumber(request.index) or (type(playlist) == "table" and #playlist.entries or 0))
+        local entry = type(playlist) == "table" and playlist.entries[index] or nil
+        if playlistId ~= nil and type(entry) == "table" then
+            wallInOne.removePlaylistEntry(playlistId, entry.id)
+        end
     elseif kind == "cycle_options" then
-        setReelOptions(request.output, request.interval_seconds, request.order)
+        local _playlist, playlistId = wallInOne.playlistForOutput(request.output, nil)
+        if playlistId ~= nil then
+            local order = if tostring(request.order or "") == "sequential" then "rotate" else request.order
+            wallInOne.setPlaylistOptions(playlistId, request.interval_seconds, order)
+        end
     elseif kind == "apply_entry" then
-        applyManualEntry(request.output, request.entry, true)
+        wallInOne.applyManualEntry(request.output, request.entry, true)
+    elseif kind == "palettes_refresh" then
+        wallInOne.refreshPaletteInventory(request.force == true)
+    elseif kind == "palette_preview" then
+        wallInOne.requestPalettePreview(request)
+    elseif kind == "wallhaven_search" then
+        wallInOne.sendWallhavenCommand(request, "search")
+    elseif kind == "wallhaven_detail" then
+        wallInOne.sendWallhavenCommand(request, "detail")
+    elseif kind == "wallhaven_download" then
+        wallInOne.sendWallhavenCommand(request, "download")
+    elseif kind == "wallhaven_clear" then
+        wallInOne.sendWallhavenCommand(request, "clear")
     elseif kind == "motionbgs_search" then
-        sendMotionBgsCommand(request, "search")
+        wallInOne.sendMotionBgsCommand(request, "search")
     elseif kind == "motionbgs_details" then
-        sendMotionBgsCommand(request, "details")
+        wallInOne.sendMotionBgsCommand(request, "details")
     elseif kind == "motionbgs_download" then
-        sendMotionBgsCommand(request, "download")
+        wallInOne.sendMotionBgsCommand(request, "download")
     elseif kind == "motionbgs_clear" then
-        sendMotionBgsCommand(request, "clear")
+        wallInOne.sendMotionBgsCommand(request, "clear")
     elseif kind == "library_refresh" then
-        refreshLibrary()
-        publishStatus()
+        wallInOne.refreshLibrary()
+        wallInOne.publishStatus()
+    elseif kind == "library_delete" then
+        wallInOne.deleteManagedLibraryItem(request.item_id)
     elseif kind == "probe" then
-        probeProviders()
+        wallInOne.probeProviders()
     end
 end
 
+-- Noctalia lifecycle --------------------------------------------------------
+
 function update()
     noctalia.setUpdateInterval(UPDATE_INTERVAL_MS)
-    local now = nowSeconds()
-    if stepLibraryScan() then
-        publishStatus()
+    wallInOne.drainPostApplyQueue()
+    if libraryRefreshPending then
+        -- Directory enumeration is deliberately isolated from
+        -- onConfigChanged(), whose VM has a strict callback CPU budget.
+        libraryRefreshPending = false
+        local managedReady, managedError = wallInOne.ensureImageManagedDirectories()
+        managedDirectoryError = if managedReady then "" else tostring(managedError or "")
+        wallInOne.refreshLibrary()
+        wallInOne.publishStatus()
+        return
+    end
+    -- Renderer commands are never retried. A modest read-only reconciliation
+    -- against the versioned snapshot keeps lifecycle ordering convergent
+    -- without adding state-bus writes or regressing to an older revision.
+    wallInOne.adoptRendererStatus(noctalia.state.get(RENDERER_STATUS_KEY))
+    local now = wallInOne.nowSeconds()
+    if wallInOne.stepLibraryScan() then
+        wallInOne.publishStatus()
     end
     if lastProviderProbeAt == 0 or now == 0 or now - lastProviderProbeAt >= PROVIDER_PROBE_SECONDS then
-        probeProviders()
+        wallInOne.probeProviders()
     end
     for key, capture in pairs(captureInFlight) do
         local deadline = tonumber(capture.deadline) or 0
         if deadline > 0 and now > deadline then
             local request = pendingAdapterCaptures[key]
             if type(request) == "table" then
-                finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter_timeout"))
+                wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter_timeout"))
             end
         end
     end
@@ -3821,8 +8701,8 @@ function update()
     end
     for _, nonce in ipairs(timedOutRendererCommands) do
         local timeoutError = noctalia.tr("errors.renderer_ack_timeout")
-        setActionError(timeoutError, "renderer")
-        finishRendererPending(nonce, false, timeoutError)
+        wallInOne.setActionError(timeoutError, "renderer")
+        wallInOne.finishRendererPending(nonce, false, timeoutError)
     end
     local adapterProbeMs = tonumber(providers.w_engine.adapter_probe_ms) or 0
     if
@@ -3830,22 +8710,114 @@ function update()
         and noctalia.nowMs() - adapterProbeMs >= ADAPTER_PROBE_GRACE_MS
         and (tonumber(providers.w_engine.adapter_seen_ms) or 0) < adapterProbeMs
     then
-        clearAdapterState()
-        persistRuntimeIfChanged(true)
-        publishStatus()
+        wallInOne.clearAdapterState()
+        wallInOne.persistRuntimeIfChanged(true)
+        wallInOne.publishStatus()
     end
-    for output, value in pairs(runtime.cycles) do
-        local state = type(value) == "table" and cycleState(output) or nil
-        if
-            type(state) == "table"
-            and state.running == true
-            and state.paused ~= true
-            and knownOutputName(output) ~= nil
-            and not cycleApplying[output]
-            and (tonumber(state.next_due) or 0) <= now
-        then
-            advanceCycle(output, "next")
+    local clockSignature = noctalia.formatTime("%Y-%m-%d %H:%M")
+    local scheduledStarts = {}
+    if clockSignature ~= scheduleClockSignature and not scheduledBatchActive then
+        scheduleClockSignature = clockSignature
+        local scheduledOutputs = {}
+        for output in pairs(config.outputs) do
+            table.insert(scheduledOutputs, output)
         end
+        table.sort(scheduledOutputs)
+        for _, output in ipairs(scheduledOutputs) do
+            local _changed, playlistId = wallInOne.reevaluateOutputSchedule(output, false, true)
+            if playlistId ~= nil then
+                table.insert(scheduledStarts, { output = output, playlist_id = playlistId })
+            end
+        end
+    end
+    local dueOutputs = {}
+    local dueByOutput = {}
+    for _, due in ipairs(scheduledStarts) do
+        table.insert(dueOutputs, due)
+        dueByOutput[due.output] = true
+    end
+    for _, restore in ipairs(startupRestoreQueue) do
+        if dueByOutput[restore.output] ~= true then
+            table.insert(dueOutputs, restore)
+            dueByOutput[restore.output] = true
+        end
+    end
+    startupRestoreQueue = {}
+    for output, state in pairs(runtime.output_states) do
+        local playlistId = type(state) == "table" and tostring(state.active_playlist or "") or ""
+        local outputRuns = runtime.runs[output]
+        local run = type(outputRuns) == "table" and outputRuns[playlistId] or nil
+        if
+            playlistId ~= ""
+            and config.playlists[playlistId] ~= nil
+            and type(run) == "table"
+            and run.running == true
+            and run.paused ~= true
+            and wallInOne.knownOutputName(output) ~= nil
+            and not cycleApplying[output]
+            and dueByOutput[output] ~= true
+            and (tonumber(run.next_due) or 0) <= now
+        then
+            table.insert(dueOutputs, { output = output, playlist_id = playlistId })
+            dueByOutput[output] = true
+        end
+    end
+    if #dueOutputs > 0 and not scheduledBatchActive then
+        local authority = wallInOne.resolvedPaletteAuthority(nil)
+        local configuredAuthority = wallInOne.settingString("palette_output", "")
+        local paletteWinner = nil
+        for _, due in ipairs(dueOutputs) do
+            if due.output == authority then
+                paletteWinner = authority
+                break
+            end
+        end
+        if configuredAuthority == "" and paletteWinner == nil then
+            table.sort(dueOutputs, function(left, right)
+                return left.output < right.output
+            end)
+            paletteWinner = dueOutputs[#dueOutputs].output
+        end
+        table.sort(dueOutputs, function(left, right)
+            if left.output == paletteWinner then
+                return false
+            elseif right.output == paletteWinner then
+                return true
+            end
+            return left.output < right.output
+        end)
+
+        scheduledBatchActive = true
+        local index = 0
+        local function finishBatch()
+            if paletteWinner == nil and configuredAuthority ~= "" then
+                wallInOne.reassertPaletteAuthority(function(ok, errorMessage)
+                    if ok ~= true then
+                        wallInOne.setActionError(errorMessage, "palette-authority")
+                    end
+                    scheduledBatchActive = false
+                end)
+            else
+                scheduledBatchActive = false
+            end
+        end
+        local function applyNext()
+            index += 1
+            local due = dueOutputs[index]
+            if due == nil then
+                finishBatch()
+                return
+            end
+            local started = wallInOne.advancePlaylist(due.output, due.playlist_id, "next", {
+                palette_allowed = due.output == paletteWinner,
+                restore_current = due.restore_current == true,
+                on_complete = applyNext,
+            })
+            if not started then
+                applyNext()
+            end
+        end
+        applyNext()
     end
 end
 
@@ -3858,24 +8830,30 @@ function onConfigChanged()
         applyingOutputs[output] = true
     end
     for output in pairs(applyingOutputs) do
-        invalidateCycleIntent(output, false)
+        wallInOne.invalidateCycleIntent(output, false)
     end
-    applyIntegrationPolicy()
-    reconcileRendererOwnership()
-    refreshExtraProvider({})
-    providerSignature = ""
-    probeProviders()
-    probeColorScheme()
-    refreshLibrary()
-    publishStatus()
+    wallInOne.applyIntegrationPolicy()
+    -- Preserve the last discovered plugin identity while applying the new
+    -- force-off/panel policy. The asynchronous probe below refreshes discovery.
+    wallInOne.refreshExtraProvider(nil)
+    local nextLibraryRootsSignature = wallInOne.currentLibraryRootsSignature()
+    if nextLibraryRootsSignature ~= libraryRootsSignature then
+        libraryRootsSignature = nextLibraryRootsSignature
+        libraryRefreshPending = true
+    end
+    wallInOne.probeProviders()
+    wallInOne.reconcilePaletteAuthority(true)
+    -- Plugin settings live on the bounded lifecycle snapshot. The persisted
+    -- config domain is dirtied only by saveConfig(), when its document changes.
+    wallInOne.publishStatus()
 end
 
 function onOutputsChanged()
     local owned = type(rendererStatus) == "table" and type(rendererStatus.outputs) == "table" and rendererStatus.outputs
         or {}
     for output in pairs(owned) do
-        if knownOutputName(output) == nil then
-            invalidateCycleIntent(output, true)
+        if wallInOne.knownOutputName(output) == nil then
+            wallInOne.invalidateCycleIntent(output, true)
         end
     end
     local candidates = {}
@@ -3885,87 +8863,170 @@ function onOutputsChanged()
     for output in pairs(captureInFlight) do
         candidates[output] = true
     end
-    for output in pairs(runtime.cycles) do
+    for output in pairs(runtime.runs) do
         candidates[output] = true
     end
     for output in pairs(applyGeneration) do
         candidates[output] = true
     end
     for output in pairs(candidates) do
-        if output ~= "all" and knownOutputName(output) == nil then
-            invalidateCycleIntent(output, false)
+        if output ~= "all" and wallInOne.knownOutputName(output) == nil then
+            wallInOne.invalidateCycleIntent(output, false)
         end
     end
-    publishStatus()
+    wallInOne.reconcilePaletteAuthority(true)
+    wallInOne.publishStatus()
 end
 
 function onIpc(event, payload)
-    local output = targetOutput(nil)
+    local output = wallInOne.targetOutput(nil)
     if event == "status" or event == "probe" then
-        probeProviders()
+        wallInOne.probeProviders()
     elseif event == "provider-capabilities-v1" then
-        receiveProviderCapabilities(payload)
+        wallInOne.receiveProviderCapabilities(payload)
     elseif event == "provider-current-v1" then
-        receiveProviderCurrent(payload)
+        wallInOne.receiveProviderCurrent(payload)
     elseif event == "capture-result-v1" then
-        receiveCaptureResult(payload)
+        wallInOne.receiveCaptureResult(payload)
     elseif event == "gesture" then
         local gestures = type(config.gestures) == "table" and config.gestures or {}
-        dispatchAction(
-            { sequence = nowSeconds(), producer = "ipc", output = output },
+        wallInOne.dispatchAction(
+            { sequence = wallInOne.nowSeconds(), producer = "ipc", output = output },
             tostring(gestures[tostring(payload or "")] or "")
         )
     elseif event == "next" or event == "previous" or event == "random" then
-        dispatchAction({ producer = "ipc", output = output }, "native_" .. event)
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "native_" .. event)
     elseif event == "capture" then
-        captureCurrent(output, true, false, true)
+        wallInOne.captureCurrent(output, true, false, true)
     elseif event == "capture-backing" then
-        captureCurrentBacking(output, true, true)
+        wallInOne.captureCurrentBacking(output, true, true)
     elseif event == "capture-pair" then
-        captureCurrent(output, true, true, true)
+        wallInOne.captureCurrent(output, true, true, true)
     elseif event == "capture-video" then
-        captureConfiguredVideo(output, true, false, true)
+        wallInOne.captureConfiguredVideo(output, true, false, true)
     elseif event == "capture-video-pair" then
-        captureConfiguredVideo(output, true, true, true)
+        wallInOne.captureConfiguredVideo(output, true, true, true)
     elseif event == "apply-video-pair" then
-        applyManualEntry(output, { kind = "video", source = configuredVideoSource() }, true)
+        wallInOne.applyManualEntry(output, { kind = "video", source = wallInOne.configuredVideoSource() }, true)
     elseif event == "apply-workshop-pair" then
-        applyManualEntry(output, { kind = "workshop", source = configuredWorkshopId() }, true)
+        wallInOne.applyManualEntry(output, { kind = "workshop", source = wallInOne.configuredWorkshopId() }, true)
     elseif event == "pair-manual" then
-        pairConfiguredStill(output, true)
+        wallInOne.pairConfiguredStill(output, true)
     elseif event == "capture-id" or event == "capture-id-pair" then
         local id, requestedOutput = tostring(payload or ""):match("^%s*(%d+)%s*(%S*)%s*$")
-        captureWorkshopFallback(
-            if requestedOutput ~= nil and requestedOutput ~= "" then requestedOutput else output,
-            id,
-            true,
-            event == "capture-id-pair",
-            true
-        )
+        local selectedOutput = if requestedOutput ~= nil and requestedOutput ~= "" then requestedOutput else output
+        if providers.w_engine.effective_backend == "internal" then
+            selectedOutput = wallInOne.targetOutput(selectedOutput)
+            local owned = selectedOutput ~= nil
+                    and type(rendererStatus.outputs) == "table"
+                    and rendererStatus.outputs[selectedOutput]
+                or nil
+            local sameActive = type(owned) == "table"
+                and owned.backend == "w-engine"
+                and (owned.state == "running" or owned.state == "paused")
+                and tostring(owned.workshop_id or "") == tostring(id or "")
+            local sameCapturing = type(owned) == "table"
+                and owned.backend == "w-engine"
+                and owned.state == "capturing"
+                and tostring(owned.workshop_id or "") == tostring(id or "")
+            if sameCapturing then
+                return
+            else
+                local backendToken = backendGeneration.w_engine
+                local applyToken = selectedOutput ~= nil and (tonumber(applyGeneration[selectedOutput]) or 0) or 0
+                if selectedOutput ~= nil then
+                    applyGeneration[selectedOutput] = applyToken
+                end
+                local function captureStillCurrent()
+                    return selectedOutput ~= nil
+                        and backendGeneration.w_engine == backendToken
+                        and tonumber(applyGeneration[selectedOutput]) == applyToken
+                        and providers.w_engine.effective_backend == "internal"
+                        and providers.w_engine.apply_available == true
+                        and wallInOne.knownOutputName(selectedOutput) ~= nil
+                end
+                if type(owned) == "table" and not sameActive then
+                    wallInOne.captureWorkshopFallback({
+                        output = selectedOutput,
+                        id = id,
+                        force = true,
+                        pair = event == "capture-id-pair",
+                        notify = true,
+                        should_apply = captureStillCurrent,
+                    })
+                    return
+                end
+                wallInOne.requestInternalCapture({
+                    output = selectedOutput,
+                    id = id,
+                    pair = event == "capture-id-pair",
+                    notify = true,
+                    should_apply = captureStillCurrent,
+                    start_after = sameActive,
+                    restore_on_failure = sameActive,
+                    restore_paused = sameActive and owned.state == "paused",
+                    managed_auto = false,
+                })
+            end
+        else
+            wallInOne.captureWorkshopFallback({
+                output = selectedOutput,
+                id = id,
+                force = true,
+                pair = event == "capture-id-pair",
+                notify = true,
+            })
+        end
     elseif event == "w-engine-next" then
-        dispatchAction({ producer = "ipc", output = output }, "w_engine_next")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "w_engine_next")
     elseif event == "w-engine-cycle-stop" or event == "w-engine-pause" then
-        dispatchAction({ producer = "ipc", output = output }, "w_engine_cycle_stop")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "w_engine_cycle_stop")
     elseif event == "w-engine-stop" then
-        dispatchAction({ producer = "ipc", output = output }, "w_engine_stop")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "w_engine_stop")
     elseif event == "mpvpaper-pause" then
-        dispatchAction({ producer = "ipc", output = output }, "mpvpaper_pause")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_pause")
     elseif event == "mpvpaper-resume" then
-        dispatchAction({ producer = "ipc", output = output }, "mpvpaper_resume")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_resume")
     elseif event == "mpvpaper-toggle" then
-        dispatchAction({ producer = "ipc", output = output }, "mpvpaper_toggle")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_toggle")
     elseif event == "mpvpaper-clear" then
-        dispatchAction({ producer = "ipc", output = output }, "mpvpaper_clear")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_clear")
     elseif event == "mpvpaper-clear-all" then
-        dispatchAction({ producer = "ipc", output = output }, "mpvpaper_clear_all")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_clear_all")
+    elseif
+        event == "playback-pause"
+        or event == "playback-resume"
+        or event == "playback-toggle"
+        or event == "playback-stop"
+        or event == "playback-stop-all"
+        or event == "audio-mute"
+        or event == "audio-unmute"
+        or event == "audio-toggle"
+        or event == "audio-volume-up"
+        or event == "audio-volume-down"
+    then
+        local selectedOutput = wallInOne.knownOutputName(noctalia.string.trim(tostring(payload or ""))) or output
+        wallInOne.dispatchAction({ producer = "ipc", output = selectedOutput }, event:gsub("%-", "_"))
+    elseif event == "audio-volume" then
+        local volume, requestedOutput = tostring(payload or ""):match("^%s*(%d+)%s*(%S*)%s*$")
+        local numericVolume = tonumber(volume)
+        if numericVolume == nil or numericVolume < 0 or numericVolume > 100 then
+            wallInOne.setActionError(noctalia.tr("errors.audio_volume"), "renderer-control")
+        else
+            local selectedOutput = wallInOne.knownOutputName(requestedOutput) or output
+            wallInOne.dispatchAction(
+                { producer = "ipc", output = selectedOutput, volume = numericVolume },
+                "audio_set_volume"
+            )
+        end
     elseif event == "motionbgs-open" then
-        dispatchAction({ producer = "ipc", output = output }, "motionbgs_open")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, "motionbgs_open")
     elseif event == "cycle-start" or event == "cycle-stop" or event == "cycle-pause" or event == "cycle-resume" then
         local action = event:gsub("%-", "_")
-        dispatchAction({ producer = "ipc", output = output }, action)
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, action)
     elseif event == "cycle-next" or event == "cycle-previous" or event == "cycle-random" then
         local action = event:gsub("%-", "_")
-        dispatchAction({ producer = "ipc", output = output }, action)
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, action)
     elseif event == "open-provider" then
         local aliases = {
             native = "native_open",
@@ -3976,141 +9037,353 @@ function onIpc(event, payload)
             extra = "extra_provider_open",
             hub = "hub_open",
         }
-        dispatchAction({ producer = "ipc", output = output }, aliases[tostring(payload or "")] or "")
+        wallInOne.dispatchAction({ producer = "ipc", output = output }, aliases[tostring(payload or "")] or "")
     else
         noctalia.log("wall-in-one: unknown IPC event '" .. tostring(event) .. "'")
     end
 end
 
-cleanupOwnedStaging()
-loadStorage()
-local initialRendererStatus = noctalia.state.get(RENDERER_STATUS_KEY)
-if type(initialRendererStatus) == "table" then
-    rendererStatus = initialRendererStatus
-end
-local initialMotionBgsStatus = noctalia.state.get(MOTIONBGS_STATUS_KEY)
-if type(initialMotionBgsStatus) == "table" then
-    motionBgsStatus = initialMotionBgsStatus
-    lastMotionDownloadPath = type(initialMotionBgsStatus.last_download) == "table"
-            and tostring(initialMotionBgsStatus.last_download.path or "")
-        or ""
-end
-local initialMotionBgsResults = noctalia.state.get(MOTIONBGS_RESULTS_KEY)
-if type(initialMotionBgsResults) == "table" then
-    motionBgsResults = initialMotionBgsResults
-end
-refreshBackendPolicy()
-refreshLibrary()
-if settingBool("cycle_start_on_load", false) then
-    for output, reel in pairs(config.reels) do
-        if type(reel) == "table" and type(reel.entries) == "table" and #reel.entries > 0 then
-            local state = cycleState(output)
-            state.running = true
-            state.paused = false
-            state.next_due = nowSeconds()
+function wallInOne.rendererSnapshotSignature(candidate)
+    local outputTokens = {}
+    local outputs = type(candidate.outputs) == "table" and candidate.outputs or {}
+    for output, owned in pairs(outputs) do
+        if type(owned) == "table" then
+            table.insert(
+                outputTokens,
+                table.concat({
+                    tostring(output),
+                    tostring(owned.backend or ""),
+                    tostring(owned.state or ""),
+                    tostring(owned.nonce or ""),
+                    tostring(owned.workshop_id or ""),
+                    tostring(owned.layer or ""),
+                }, ":")
+            )
         end
     end
-    persistRuntimeIfChanged(true)
-else
-    -- Persisted runtime describes the last session, not permission to resume
-    -- playback. Unless explicitly opted in, every reload starts disarmed.
-    for output, value in pairs(runtime.cycles) do
-        if type(value) == "table" then
-            local state = cycleState(output)
-            state.running = false
-            state.paused = false
-            state.next_due = 0
-        end
+    table.sort(outputTokens)
+    return table.concat({
+        tostring(candidate.ready == true),
+        tostring(candidate.last_nonce or ""),
+        tostring(candidate.last_event_nonce or ""),
+        tostring(candidate.last_event or ""),
+        tostring(candidate.last_error or ""),
+        table.concat(outputTokens, ","),
+    }, "|")
+end
+
+function wallInOne.activePlaylistRunAndEntry(output)
+    local outputRuntime = runtime.output_states[output]
+    local playlistId = type(outputRuntime) == "table" and tostring(outputRuntime.active_playlist or "") or ""
+    local playlist = config.playlists[playlistId]
+    local outputRuns = runtime.runs[output]
+    local run = type(outputRuns) == "table" and outputRuns[playlistId] or nil
+    local entryIndex = type(run) == "table" and type(playlist) == "table"
+            and wallInOne.entryIndexById(playlist, tostring(run.current_entry or ""))
+        or nil
+    local entry = entryIndex ~= nil
+            and wallInOne.materializedPlaylistEntry(playlist.entries[entryIndex], config.pairings)
+        or nil
+    return run, entry
+end
+
+wallInOne.adoptRendererStatus = function(nextStatus, initializing)
+    -- Always prefer the persistent bus value. A queued watch callback can be
+    -- older than a snapshot already observed by update().
+    local sharedStatus = noctalia.state.get(RENDERER_STATUS_KEY)
+    if type(sharedStatus) == "table" then
+        nextStatus = sharedStatus
     end
-    persistRuntimeIfChanged(true)
-end
-local previousAck = noctalia.state.get(COMMAND_ACK_KEY)
-if type(previousAck) == "table" then
-    lastCommandSequence = tonumber(previousAck.sequence) or 0
-end
-noctalia.state.watch(COMMAND_KEY, handleCommand)
-noctalia.state.watch(RENDERER_STATUS_KEY, function(nextStatus)
+    local candidate = if type(nextStatus) == "table"
+        then nextStatus
+        else { ready = false, outputs = {}, last_error = noctalia.tr("errors.renderer_unavailable") }
+
+    local instance = tostring(candidate.instance_id or "")
+    local revision = tonumber(candidate.status_revision)
+    local versioned = instance ~= "" and revision ~= nil and revision >= 0 and revision == math.floor(revision)
+    local instanceChanged = false
+
+    if versioned then
+        if instance == rendererStatusInstance and revision <= rendererStatusRevision then
+            return false
+        end
+        instanceChanged = rendererStatusInstance ~= "" and instance ~= rendererStatusInstance
+        rendererStatusInstance = instance
+        rendererStatusRevision = revision
+        rendererLegacySignature = ""
+    else
+        local signature = wallInOne.rendererSnapshotSignature(candidate)
+        if rendererStatusInstance == "" and signature == rendererLegacySignature then
+            return false
+        end
+        instanceChanged = rendererStatusInstance ~= ""
+        rendererStatusInstance = ""
+        rendererStatusRevision = -1
+        rendererLegacySignature = signature
+    end
+
     local wasReady = type(rendererStatus) == "table" and rendererStatus.ready == true
     local previousOutputs = type(rendererStatus) == "table"
             and type(rendererStatus.outputs) == "table"
             and rendererStatus.outputs
         or {}
-    if type(nextStatus) == "table" then
-        rendererStatus = nextStatus
-    else
-        rendererStatus = { ready = false, outputs = {}, last_error = noctalia.tr("errors.renderer_unavailable") }
+    rendererStatus = candidate
+    if initializing == true then
+        return true
     end
-    resolveRendererAcknowledgements(rendererStatus)
-    refreshBackendPolicy()
-    reconcileRendererOwnership()
+
+    if instanceChanged then
+        wallInOne.failAllRendererPending(noctalia.tr("errors.renderer_unavailable"))
+        wasReady = false
+        previousOutputs = {}
+    end
     local nextOutputs = type(rendererStatus.outputs) == "table" and rendererStatus.outputs or {}
+    if tostring(rendererStatus.last_event or "") == "started" then
+        local eventNonce = tostring(rendererStatus.last_event_nonce or "")
+        for output, owned in pairs(nextOutputs) do
+            if
+                type(owned) == "table"
+                and tostring(owned.state or "") ~= "capturing"
+                and tostring(owned.nonce or "") == eventNonce
+            then
+                wallInOne.noteRendererStarted(output, eventNonce)
+            end
+        end
+    end
+    wallInOne.synchronizeInternalWorkshops(rendererStatus)
+    wallInOne.resolveRendererAcknowledgements(rendererStatus)
+    wallInOne.refreshBackendPolicy()
+    wallInOne.reconcileRendererOwnership()
+    local runtimeChanged = false
     for output in pairs(rendererStopping) do
         if type(nextOutputs[output]) ~= "table" then
             rendererStopping[output] = nil
         end
     end
     if not wasReady and rendererStatus.ready == true then
-        for output, value in pairs(runtime.cycles) do
-            local state = type(value) == "table" and cycleState(output) or nil
-            local entry = type(state) == "table" and type(state.last_entry) == "table" and state.last_entry or nil
+        local now = wallInOne.nowSeconds()
+        for output in pairs(runtime.output_states) do
+            local state, entry = wallInOne.activePlaylistRunAndEntry(output)
+            local media = type(entry) == "table" and type(entry.media) == "table" and entry.media or nil
             if
                 type(state) == "table"
                 and state.running == true
                 and state.paused ~= true
-                and type(entry) == "table"
-                and (entry.kind == "video" or entry.kind == "workshop")
+                and type(media) == "table"
+                and (media.kind == "video" or media.kind == "workshop")
                 and type(nextOutputs[output]) ~= "table"
             then
-                state.next_due = nowSeconds()
+                state.next_due = math.max(now, wallInOne.rendererRetryFloor(output))
+                runtimeChanged = true
             end
         end
     elseif tostring(rendererStatus.last_event or "") == "exited" then
+        local now = wallInOne.nowSeconds()
+        local eventNonce = tostring(rendererStatus.last_event_nonce or "")
         for output in pairs(previousOutputs) do
-            local state = type(runtime.cycles[output]) == "table" and cycleState(output) or nil
-            local entry = type(state) == "table" and type(state.last_entry) == "table" and state.last_entry or nil
+            local state, entry = wallInOne.activePlaylistRunAndEntry(output)
+            local media = type(entry) == "table" and type(entry.media) == "table" and entry.media or nil
             if
                 type(nextOutputs[output]) ~= "table"
                 and rendererStopping[output] ~= true
                 and type(state) == "table"
                 and state.running == true
                 and state.paused ~= true
-                and type(entry) == "table"
-                and (entry.kind == "video" or entry.kind == "workshop")
+                and type(media) == "table"
+                and (media.kind == "video" or media.kind == "workshop")
             then
-                state.next_due = nowSeconds()
+                state.next_due = wallInOne.noteUnexpectedRendererExit(output, eventNonce, now)
+                local rendererError = wallInOne.boundedDetail(rendererStatus.last_error)
+                state.last_error = if rendererError ~= ""
+                    then rendererError
+                    else noctalia.tr("errors.renderer_unavailable")
+                runtimeChanged = true
             end
         end
     end
-    persistRuntimeIfChanged(false)
-    publishStatus()
-end)
+    wallInOne.persistRuntimeIfChanged(runtimeChanged)
+    wallInOne.publishStatus()
+    return true
+end
+
+wallInOne.cleanupOwnedStaging()
+wallInOne.loadStorage()
+wallInOne.reconcilePaletteAuthority(false)
+do
+    local initialRendererStatus = noctalia.state.get(RENDERER_STATUS_KEY)
+    wallInOne.adoptRendererStatus(initialRendererStatus, true)
+end
+wallInOne.synchronizeInternalWorkshops(rendererStatus)
+do
+    local initialMotionBgsStatus = noctalia.state.get(MOTIONBGS_STATUS_KEY)
+    if type(initialMotionBgsStatus) == "table" then
+        motionBgsStatus = initialMotionBgsStatus
+        lastMotionDownloadFingerprint = wallInOne.completedDownloadFingerprint(initialMotionBgsStatus)
+    end
+end
+do
+    local initialMotionBgsResults = noctalia.state.get(MOTIONBGS_RESULTS_KEY)
+    if type(initialMotionBgsResults) == "table" then
+        motionBgsResults = initialMotionBgsResults
+    end
+end
+do
+    local initialPalettesStatus = noctalia.state.get(PALETTES_STATUS_KEY)
+    if type(initialPalettesStatus) == "table" then
+        palettesStatus = initialPalettesStatus
+    end
+end
+do
+    local initialWallhavenStatus = noctalia.state.get(WALLHAVEN_STATUS_KEY)
+    if type(initialWallhavenStatus) == "table" then
+        wallhavenStatus = initialWallhavenStatus
+        lastWallhavenDownloadFingerprint = wallInOne.completedDownloadFingerprint(initialWallhavenStatus)
+    end
+    local initialWallhavenResults = noctalia.state.get(WALLHAVEN_RESULTS_KEY)
+    if type(initialWallhavenResults) == "table" then
+        wallhavenResults = initialWallhavenResults
+    end
+end
+wallInOne.refreshBackendPolicy()
+libraryRootsSignature = wallInOne.currentLibraryRootsSignature()
+do
+    local managedReady, managedError = wallInOne.ensureImageManagedDirectories()
+    managedDirectoryError = if managedReady then "" else tostring(managedError or "")
+end
+wallInOne.refreshLibrary()
+if wallInOne.settingBool("cycle_start_on_load", false) then
+    local resumedAt = wallInOne.nowSeconds()
+    for output, outputConfig in pairs(config.outputs) do
+        local outputRuntime = wallInOne.outputState(output)
+        local playlistId = tostring(outputRuntime.active_playlist or "")
+        local playlist = config.playlists[playlistId]
+        local outputRuns = runtime.runs[output]
+        local run = type(outputRuns) == "table" and outputRuns[playlistId] or nil
+        if type(playlist) ~= "table" or #playlist.entries == 0 or type(run) ~= "table" then
+            playlistId = type(outputConfig) == "table" and tostring(outputConfig.fallback_playlist or "") or ""
+            playlist = config.playlists[playlistId]
+            run = type(playlist) == "table" and wallInOne.playlistRunState(output, playlistId) or nil
+        end
+        if wallInOne.knownOutputName(output) ~= nil and type(playlist) == "table" and #playlist.entries > 0 then
+            wallInOne.disarmOtherPlaylistRuns(output, playlistId)
+            outputRuntime.active_playlist = playlistId
+            run = wallInOne.playlistRunState(output, playlistId)
+            -- A one-entry run is armed only long enough for update() to apply
+            -- it once; advancePlaylist parks it after the successful switch.
+            run.running = true
+            run.paused = false
+            run.parked = false
+            local savedDue = math.max(0, math.floor(tonumber(run.next_due) or 0))
+            local currentIndex = wallInOne.entryIndexById(playlist, tostring(run.current_entry or ""))
+            if #playlist.entries > 1 and currentIndex ~= nil and savedDue > resumedAt then
+                run.next_due = savedDue
+                table.insert(startupRestoreQueue, {
+                    output = output,
+                    playlist_id = playlistId,
+                    restore_current = true,
+                })
+            else
+                run.next_due = resumedAt
+            end
+        end
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+else
+    -- Persisted runtime describes the last session, not permission to resume
+    -- playback. Unless explicitly opted in, every reload starts disarmed.
+    for _, outputRuns in pairs(runtime.runs) do
+        if type(outputRuns) == "table" then
+            for _, run in pairs(outputRuns) do
+                if type(run) == "table" then
+                    run.running = false
+                    run.paused = false
+                    run.next_due = 0
+                end
+            end
+        end
+    end
+    wallInOne.persistRuntimeIfChanged(true)
+end
+-- The first update performs the initial schedule evaluation through the same
+-- sorted, palette-aware batch used for minute boundaries. Avoid launching one
+-- asynchronous global-theme writer per output during service construction.
+do
+    local previousAck = noctalia.state.get(COMMAND_ACK_KEY)
+    if type(previousAck) == "table" then
+        lastCommandSequence = tonumber(previousAck.sequence) or 0
+    end
+end
+noctalia.state.watch(COMMAND_KEY, wallInOne.handleCommand)
+noctalia.state.watch(RENDERER_STATUS_KEY, wallInOne.adoptRendererStatus)
 noctalia.state.watch(MOTIONBGS_STATUS_KEY, function(nextStatus)
     if type(nextStatus) == "table" then
         motionBgsStatus = nextStatus
     else
         motionBgsStatus = { available = false, busy = false, last_error = noctalia.tr("errors.motionbgs_unavailable") }
     end
-    local downloadPath = type(motionBgsStatus.last_download) == "table"
-            and tostring(motionBgsStatus.last_download.path or "")
-        or ""
-    if downloadPath ~= "" and downloadPath ~= lastMotionDownloadPath then
-        lastMotionDownloadPath = downloadPath
-        refreshLibrary()
+    local downloadFingerprint, downloadPath = wallInOne.completedDownloadFingerprint(motionBgsStatus)
+    if downloadPath ~= "" and downloadFingerprint ~= lastMotionDownloadFingerprint then
+        lastMotionDownloadFingerprint = downloadFingerprint
+        wallInOne.refreshLibrary()
     end
-    refreshBackendPolicy()
-    persistRuntimeIfChanged(false)
-    publishStatus()
+    wallInOne.refreshBackendPolicy()
+    wallInOne.persistRuntimeIfChanged(false)
+    wallInOne.publishStatus()
 end)
 noctalia.state.watch(MOTIONBGS_RESULTS_KEY, function(nextResults)
     motionBgsResults = if type(nextResults) == "table" then nextResults else { items = {}, selected = {} }
-    publishStatus()
 end)
-handleCommand(noctalia.state.get(COMMAND_KEY))
-publishStatus()
-probeProviders()
+noctalia.state.watch(PALETTES_STATUS_KEY, function(nextStatus)
+    palettesStatus = if type(nextStatus) == "table" then nextStatus else {
+        ready = false,
+        busy = false,
+        builtin = {},
+        wallpaper = {},
+        community = {},
+        custom = {},
+        last_error = noctalia.tr("errors.palettes_unavailable"),
+    }
+end)
+noctalia.state.watch(WALLHAVEN_STATUS_KEY, function(nextStatus)
+    wallhavenStatus = if type(nextStatus) == "table"
+        then nextStatus
+        else { ready = false, available = false, busy = false, last_error = noctalia.tr("errors.wallhaven_unavailable") }
+    local downloadFingerprint, downloadPath = wallInOne.completedDownloadFingerprint(wallhavenStatus)
+    if downloadPath ~= "" and downloadFingerprint ~= lastWallhavenDownloadFingerprint then
+        lastWallhavenDownloadFingerprint = downloadFingerprint
+        wallInOne.refreshLibrary()
+        wallInOne.publishStatus()
+    end
+end)
+noctalia.state.watch(WALLHAVEN_RESULTS_KEY, function(nextResults)
+    wallhavenResults = if type(nextResults) == "table" then nextResults else { items = {}, selected = {} }
+end)
+wallInOne.handleCommand(noctalia.state.get(COMMAND_KEY))
+wallInOne.publishStatus()
+wallInOne.probeProviders()
 
 function onExit(_signal, _reason)
     for _, request in pairs(pendingAdapterCaptures) do
+        if
+            type(request) == "table"
+            and type(request.staging_path) == "string"
+            and request.staging_path ~= ""
+            and noctalia.fileExists(request.staging_path)
+        then
+            noctalia.removeFile(request.staging_path)
+        end
+    end
+    for _, request in pairs(pendingInternalCaptures) do
+        if
+            type(request) == "table"
+            and type(request.staging_path) == "string"
+            and request.staging_path ~= ""
+            and noctalia.fileExists(request.staging_path)
+        then
+            noctalia.removeFile(request.staging_path)
+        end
+    end
+    for _, request in pairs(internalCaptureQueued) do
         if
             type(request) == "table"
             and type(request.staging_path) == "string"
@@ -4140,5 +9413,16 @@ function onExit(_signal, _reason)
             noctalia.removeFile(request.staging_path)
         end
     end
-    noctalia.state.set(STATUS_KEY, { ready = false })
+    statusSequence += 1
+    noctalia.state.set(STATUS_KEY, {
+        protocol = 4,
+        instance_id = SERVICE_NONCE,
+        sequence = statusSequence,
+        ready = false,
+        domains = {
+            config = { key = CONFIG_STATE_KEY, revision = domainPublications.config.revision },
+            runtime = { key = RUNTIME_STATE_KEY, revision = domainPublications.runtime.revision },
+            library = { key = LIBRARY_STATE_KEY, revision = domainPublications.library.revision },
+        },
+    })
 end
