@@ -1,14 +1,14 @@
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "0.4.0"
+version = "0.5.0"
 plugin_api = 17
 author = "goober"
 license = "MIT"
 icon = "library-photo"
-description = "Pair static, video, and Workshop wallpapers, synchronize colors, and run one mixed scheduler."
+description = "Build reusable wallpaper pairings and playlists with live media, schedules, and exact Noctalia palette previews."
 deprecated = false
 tags = ["wallpaper", "bar", "panel", "shortcut", "theming", "video", "service", "utility"]
-dependencies = ["bash"]
+dependencies = ["bash", "curl", "sha256sum"]
 
 [[setting]]
 key = "use_wallhaven"
@@ -16,6 +16,15 @@ type = "bool"
 label_key = "settings.use_wallhaven.label"
 description_key = "settings.use_wallhaven.description"
 default = true
+
+[[setting]]
+key = "wallhaven_api_key"
+type = "string"
+label_key = "settings.wallhaven_api_key.label"
+description_key = "settings.wallhaven_api_key.description"
+default = ""
+visible_when = { key = "use_wallhaven", values = ["true"] }
+advanced = true
 
 [[setting]]
 key = "use_w_engine"
@@ -63,6 +72,18 @@ options = [
   { value = "external", label_key = "settings.backends.options.external" },
   { value = "internal", label_key = "settings.backends.options.internal" },
 ]
+
+[[setting]]
+key = "internal_renderer_layer"
+type = "select"
+label_key = "settings.internal_renderer_layer.label"
+description_key = "settings.internal_renderer_layer.description"
+default = "bottom"
+options = [
+  { value = "bottom", label_key = "settings.internal_renderer_layer.options.bottom" },
+  { value = "background", label_key = "settings.internal_renderer_layer.options.background" },
+]
+advanced = true
 
 [[setting]]
 key = "use_extra_provider"
@@ -144,13 +165,6 @@ key = "auto_capture"
 type = "bool"
 label_key = "settings.auto_capture.label"
 description_key = "settings.auto_capture.description"
-default = false
-
-[[setting]]
-key = "pair_static"
-type = "bool"
-label_key = "settings.pair_static.label"
-description_key = "settings.pair_static.description"
 default = true
 
 [[setting]]
@@ -186,7 +200,6 @@ type = "string"
 label_key = "settings.palette_output.label"
 description_key = "settings.palette_output.description"
 default = ""
-visible_when = { key = "sync_colors", values = ["true"] }
 advanced = true
 
 [[setting]]
@@ -238,6 +251,7 @@ description_key = "settings.scene_screenshot_delay.description"
 default = 15
 min = 1
 max = 120
+visible_when = { key = "use_w_engine", values = ["true"] }
 advanced = true
 
 [[setting]]
@@ -385,6 +399,7 @@ visible_when = { key = "mpv_auto_pause", values = ["true"] }
 options = [
   { value = "FULL", label_key = "settings.mpv_auto_pause_mode.options.full" },
   { value = "MAX", label_key = "settings.mpv_auto_pause_mode.options.max" },
+  { value = "ACTIVE", label_key = "settings.mpv_auto_pause_mode.options.active" },
 ]
 advanced = true
 
@@ -414,7 +429,6 @@ default = "sequential"
 options = [
   { value = "sequential", label_key = "settings.cycle_order.options.sequential" },
   { value = "shuffle", label_key = "settings.cycle_order.options.shuffle" },
-  { value = "random", label_key = "settings.cycle_order.options.random" },
 ]
 
 [[setting]]
@@ -443,6 +457,14 @@ entry = "renderer.luau"
 [[service]]
 id = "motionbgs"
 entry = "motionbgs.luau"
+
+[[service]]
+id = "palettes"
+entry = "palettes.luau"
+
+[[service]]
+id = "wallhaven"
+entry = "wallhaven.luau"
 
 [[widget]]
 id = "wall-in-one"
@@ -483,8 +505,8 @@ entry = "widget.luau"
 [[panel]]
 id = "hub"
 entry = "panel.luau"
-width = 600
-height = 760
+width = 820
+height = 780
 placement = "attached"
 position = "auto"
 open_near_click = true

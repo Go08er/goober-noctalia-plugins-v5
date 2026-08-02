@@ -10,7 +10,7 @@ set -uo pipefail
 
 readonly protocol='WIO-MBG1'
 readonly origin='https://motionbgs.com'
-readonly user_agent='Wall-in-One/0.4 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
+readonly user_agent='Wall-in-One/0.5 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
 readonly html_limit=$((1024 * 1024))
 readonly html_timeout=20
 readonly max_redirects=3
@@ -119,7 +119,7 @@ atomic_fetch() {
     status=$(
       (
         ulimit -f "$(((max_bytes + 1023) / 1024))" 2>/dev/null || exit 70
-        exec curl \
+        exec curl --disable \
           --silent --show-error \
           --request GET \
           --connect-timeout 10 \
@@ -269,7 +269,9 @@ download_video() {
     set -e
     printf '{\n'
     printf '  "schema": 1,\n'
+    printf '  "plugin": "goober/wall-in-one",\n'
     printf '  "provider": "MotionBGS",\n'
+    printf '  "path": "%s",\n' "$(json_escape "$final")"
     printf '  "title": "%s",\n' "$(json_escape "$title")"
     printf '  "source_page": "%s",\n' "$(json_escape "$source_page")"
     printf '  "download_url": "%s",\n' "$(json_escape "$effective_url")"
