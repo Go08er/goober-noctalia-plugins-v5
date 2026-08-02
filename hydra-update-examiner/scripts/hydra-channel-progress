@@ -1,8 +1,28 @@
 #!/usr/bin/env bash
 set -u
 
+LC_ALL=C
+export LC_ALL
+
+readonly CACHE_SCHEMA=2
+readonly MAX_CACHE_BYTES=65536
+# These lifetimes reflect the endpoints' actual volatility: channel revisions
+# roll only around publication, candidate ids change less often than evaluation
+# counts, and gate/constituent data sits between those two rates.
+readonly CHANNEL_TTL_SECONDS=21600
+readonly PASSED_GATE_CHANNEL_TTL_SECONDS=60
+readonly IDENTITY_TTL_SECONDS=3600
+readonly PAUSED_IDENTITY_TTL_SECONDS=300
+readonly PROGRESS_TTL_SECONDS=60
+readonly GATE_TTL_SECONDS=7200
+readonly HOT_GATE_TTL_SECONDS=300
+readonly CONSTITUENTS_TTL_SECONDS=21600
+readonly HOT_CONSTITUENTS_TTL_SECONDS=900
+readonly PROVISIONAL_DISCOVERY_TTL_SECONDS=86400
+
 base_url="https://hydra.nixos.org"
-channel="nixos-unstable"
+configured_channel="nixos-unstable"
+channel="$configured_channel"
 running_color="secondary"
 stalled_color="error"
 close_color="tertiary"
@@ -23,10 +43,19 @@ channel_revision_status="unknown"
 evals_url=""
 eval_id=""
 eval_url=""
-eval_short_rev=""
-eval_html=""
-eval_json=""
-transport_error=""
+now=0
+channel_key=""
+cache_root=""
+cache_dir=""
+cache_file=""
+lock_file=""
+cache_enabled=0
+entry_json='{}'
+original_entry_json='{}'
+refresh_error=""
+cache_tmp=""
+force_refresh=0
+gate_changed=0
 
 usage() {
   cat <<'EOF'
@@ -43,6 +72,7 @@ Options:
   --close-icon NAME          Icon name for close-to-ready states.
   --launched-icon NAME       Icon name for published/latest state.
   --close-threshold 1..100   Percent where the close state begins.
+  --force-refresh            Bypass live-data TTLs for a user refresh.
   -h, --help                 Show this help.
 
 Supported channels:
@@ -116,6 +146,254 @@ emit() {
     '{state: $state, text: $text, icon: $icon, tooltip: $tooltip, iconColor: $iconColor, textColor: $textColor, url: $url, channel: $channel}'
 }
 
+emit_payload() {
+  local raw_state="$1"
+  local presentation_state="$2"
+  local text="$3"
+  local icon="$4"
+  local tooltip="$5"
+  local icon_color="$6"
+  local text_color="$7"
+  local url="$8"
+  local emitted_channel="$9"
+  local stale="${10:-false}"
+  local stale_age="${11:-0}"
+  local observed_at="${12:-0}"
+  local error="${13:-}"
+  local last_good_tooltip="${14:-$tooltip}"
+
+  jq -cn \
+    --arg state "$raw_state" \
+    --arg presentationState "$presentation_state" \
+    --arg pollState "$raw_state" \
+    --arg text "$text" \
+    --arg icon "$icon" \
+    --arg tooltip "$tooltip" \
+    --arg iconColor "$icon_color" \
+    --arg textColor "$text_color" \
+    --arg url "$url" \
+    --arg channel "$emitted_channel" \
+    --argjson stale "$stale" \
+    --argjson staleAgeSeconds "$stale_age" \
+    --argjson observedAt "$observed_at" \
+    --arg error "$error" \
+    --arg lastGoodTooltip "$last_good_tooltip" \
+    '{
+      state: $state,
+      presentationState: $presentationState,
+      pollState: $pollState,
+      text: $text,
+      icon: $icon,
+      tooltip: $tooltip,
+      iconColor: $iconColor,
+      textColor: $textColor,
+      url: $url,
+      channel: $channel,
+      stale: $stale,
+      staleAgeSeconds: $staleAgeSeconds,
+      observedAt: $observedAt,
+      error: $error,
+      lastGoodTooltip: $lastGoodTooltip
+    }'
+}
+
+epoch_now() {
+  local value
+  value="$(date +%s 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf '0'
+  fi
+}
+
+age_is_due() {
+  local timestamp="${1:-0}"
+  local ttl="$2"
+  [[ "$timestamp" =~ ^[0-9]+$ ]] || return 0
+  (( timestamp <= 0 || now < timestamp || now - timestamp >= ttl ))
+}
+
+fetch_url() {
+  local timeout_seconds="$1"
+  local accept="$2"
+  local url="$3"
+  local body
+  local -a args=(-fsSL)
+
+  if [[ -n "$accept" ]]; then
+    args+=(-H "Accept: $accept")
+  fi
+  if ! body="$(timeout "${timeout_seconds}s" curl "${args[@]}" "$url" 2>/dev/null)"; then
+    refresh_error="Request failed: $url"
+    return 1
+  fi
+  printf '%s' "$body"
+}
+
+# Fetch JSON while preserving the distinction between an expected missing
+# resource (HTTP 404) and a transport/server failure. Return 0 for a 2xx body,
+# 1 for 404, and 2 for every other failure.
+fetch_optional_url() {
+  local timeout_seconds="$1"
+  local accept="$2"
+  local url="$3"
+  local response status body
+  local -a args=(-sSL -w $'\n%{http_code}')
+
+  if [[ -n "$accept" ]]; then
+    args+=(-H "Accept: $accept")
+  fi
+  if ! response="$(timeout "${timeout_seconds}s" curl "${args[@]}" "$url" 2>/dev/null)"; then
+    return 2
+  fi
+  status="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+  case "$status" in
+    2??)
+      printf '%s' "$body"
+      return 0
+      ;;
+    404)
+      return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+cache_key_for_channel() {
+  local requested="$1"
+  local year month yy prev_year prev_yy slot=""
+  case "$requested" in
+    nixos-stable|nixos-stable-small)
+      year="$(date +%Y)"
+      month="$(date +%m)"
+      yy=$((10#$year % 100))
+      prev_year=$((10#$year - 1))
+      prev_yy=$((prev_year % 100))
+      if (( 10#$month >= 11 )); then
+        printf -v slot '%02d.11' "$yy"
+      elif (( 10#$month >= 5 )); then
+        printf -v slot '%02d.05' "$yy"
+      else
+        printf -v slot '%02d.11' "$prev_yy"
+      fi
+      printf '%s@%s' "$requested" "$slot"
+      ;;
+    *)
+      printf '%s' "$requested"
+      ;;
+  esac
+}
+
+setup_cache() {
+  if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+    cache_root="$XDG_CACHE_HOME"
+  elif [[ -n "${HOME:-}" ]]; then
+    cache_root="$HOME/.cache"
+  else
+    return 0
+  fi
+  cache_dir="$cache_root/hydra-update-examiner"
+  cache_file="$cache_dir/state.json"
+  lock_file="$cache_dir/state.lock"
+  if ! mkdir -p "$cache_dir" 2>/dev/null; then
+    return 0
+  fi
+  cache_enabled=1
+}
+
+read_cache() {
+  local raw=""
+  entry_json='{}'
+  (( cache_enabled == 1 )) || return 1
+  [[ -r "$cache_file" ]] || return 1
+
+  IFS= read -r -N "$((MAX_CACHE_BYTES + 1))" raw < "$cache_file" || true
+  (( ${#raw} > 0 && ${#raw} <= MAX_CACHE_BYTES )) || return 1
+  if ! jq -e \
+    --argjson schema "$CACHE_SCHEMA" \
+    --arg channelKey "$channel_key" \
+    'type == "object"
+      and .schema == $schema
+      and .channelKey == $channelKey
+      and (.entry | type == "object")' \
+    >/dev/null 2>&1 <<< "$raw"; then
+    return 1
+  fi
+  entry_json="$(jq -c '.entry' <<< "$raw")"
+  return 0
+}
+
+write_cache() {
+  local payload
+  (( cache_enabled == 1 )) || return 0
+  if ! payload="$(jq -cn \
+    --argjson schema "$CACHE_SCHEMA" \
+    --arg channelKey "$channel_key" \
+    --argjson entry "$entry_json" \
+    '{schema: $schema, channelKey: $channelKey, entry: $entry}')"; then
+    return 1
+  fi
+  # LC_ALL=C makes Bash's character count a byte count for this ceiling.
+  (( ${#payload} <= MAX_CACHE_BYTES )) || return 1
+
+  cache_tmp="$cache_file.tmp.$$"
+  umask 077
+  if ! printf '%s' "$payload" > "$cache_tmp" 2>/dev/null; then
+    rm -f "$cache_tmp" 2>/dev/null || true
+    cache_tmp=""
+    return 1
+  fi
+  if ! mv -f "$cache_tmp" "$cache_file" 2>/dev/null; then
+    rm -f "$cache_tmp" 2>/dev/null || true
+    cache_tmp=""
+    return 1
+  fi
+  cache_tmp=""
+}
+
+cleanup_cache_tmp() {
+  if [[ -n "$cache_tmp" ]]; then
+    rm -f "$cache_tmp" 2>/dev/null || true
+    cache_tmp=""
+  fi
+}
+
+trap cleanup_cache_tmp EXIT
+trap 'cleanup_cache_tmp; exit 130' HUP INT TERM
+
+cache_has_progress() {
+  jq -e '
+    (.candidate.id | type == "number")
+      and (.progress.total | type == "number")
+      and .progress.total > 0
+      and (.discovery.evalsUrl | type == "string")
+  ' >/dev/null 2>&1 <<< "$entry_json"
+}
+
+acquire_single_flight() {
+  (( cache_enabled == 1 )) || return 0
+  if ! { exec 9>"$lock_file"; } 2>/dev/null; then
+    cache_enabled=0
+    return 0
+  fi
+  if flock -n 9; then
+    return 0
+  fi
+  if cache_has_progress; then
+    return 1
+  fi
+  # Preserve enough of the service's 55-second outer deadline for a cold fetch.
+  if flock -w 20 9; then
+    read_cache || true
+    return 0
+  fi
+  return 1
+}
+
 get_count() {
   local label="$1"
   local source="$2"
@@ -168,20 +446,15 @@ status_is_blocked() {
 channel_exists() {
   local candidate="$1"
   local fetched_rev
-  transport_error=""
-  fetched_rev="$(timeout 8s curl -fsSL "https://channels.nixos.org/$candidate/git-revision" 2>/dev/null || true)"
+  fetched_rev="$(fetch_url 8 "" "https://channels.nixos.org/$candidate/git-revision" || true)"
   if [[ "$fetched_rev" =~ ^[0-9a-f]{40}$ ]]; then
-    channel_rev="$fetched_rev"
-    channel_short_rev="${channel_rev:0:12}"
-    channel_revision_status="known"
     return 0
   fi
-  transport_error="Could not fetch a valid git revision from channels.nixos.org for $candidate."
   return 1
 }
 
 fetch_channel_listing() {
-  timeout 8s curl -fsSL "https://nix-channels.s3.amazonaws.com/?delimiter=/" 2>/dev/null || true
+  fetch_url 8 "" "https://nix-channels.s3.amazonaws.com/?delimiter=/" || true
 }
 
 channel_in_listing() {
@@ -246,18 +519,60 @@ resolve_stable_alias_by_date() {
 }
 
 resolve_channel() {
+  local cached_configured cached_resolved cached_provisional cached_checked
+  local expected_channel="" discovery_provisional=false small_suffix=""
+  cached_configured="$(jq -r '.discovery.configured // empty' <<< "$entry_json" 2>/dev/null || true)"
+  cached_resolved="$(jq -r '.discovery.resolvedChannel // empty' <<< "$entry_json" 2>/dev/null || true)"
+  cached_provisional="$(jq -r '.discovery.provisional // false' <<< "$entry_json" 2>/dev/null || true)"
+  cached_checked="$(entry_number '.discovery.checkedAt')"
+  if [[ "$cached_configured" == "$configured_channel" && -n "$cached_resolved" ]]; then
+    # At the start of a May/November release slot the new channel may not yet
+    # exist. A fallback is provisional and retried daily until the expected
+    # channel appears; a current resolution remains effectively indefinite.
+    if [[ "$cached_provisional" != "true" ]] \
+      || ! age_is_due "$cached_checked" "$PROVISIONAL_DISCOVERY_TTL_SECONDS"; then
+      channel="$cached_resolved"
+      project="$(jq -r '.discovery.project' <<< "$entry_json")"
+      jobset="$(jq -r '.discovery.jobset' <<< "$entry_json")"
+      gate_job="$(jq -r '.discovery.gateJob' <<< "$entry_json")"
+      gate_label="$(jq -r '.discovery.gateLabel' <<< "$entry_json")"
+      channel_rev_url="$(jq -r '.discovery.channelRevUrl' <<< "$entry_json")"
+      evals_url="$(jq -r '.discovery.evalsUrl' <<< "$entry_json")"
+      return 0
+    fi
+  fi
+
+  channel="$configured_channel"
   case "$channel" in
     nixos-stable)
+      small_suffix=""
+      expected_channel="$(stable_alias_candidates "$small_suffix" | head -n1)"
       channel="$(resolve_stable_alias_from_listing "" || resolve_stable_alias_by_date "" || true)"
       ;;
     nixos-stable-small)
+      small_suffix="-small"
+      expected_channel="$(stable_alias_candidates "$small_suffix" | head -n1)"
       channel="$(resolve_stable_alias_from_listing "-small" || resolve_stable_alias_by_date "-small" || true)"
       ;;
   esac
 
   if [[ -z "$channel" ]]; then
-    emit "ERR" "$stalled_icon" "Could not resolve the current stable NixOS channel from channels.nixos.org." "$stalled_color" "$stalled_color"
-    exit 0
+    if [[ "$cached_configured" == "$configured_channel" && -n "$cached_resolved" ]]; then
+      # A provisional fallback remains usable during a discovery outage. Keep
+      # its old checkedAt so the next invocation retries instead of pinning it.
+      channel="$cached_resolved"
+      project="$(jq -r '.discovery.project' <<< "$entry_json")"
+      jobset="$(jq -r '.discovery.jobset' <<< "$entry_json")"
+      gate_job="$(jq -r '.discovery.gateJob' <<< "$entry_json")"
+      gate_label="$(jq -r '.discovery.gateLabel' <<< "$entry_json")"
+      channel_rev_url="$(jq -r '.discovery.channelRevUrl' <<< "$entry_json")"
+      evals_url="$(jq -r '.discovery.evalsUrl' <<< "$entry_json")"
+      return 0
+    fi
+    fail_json "Could not resolve the current stable NixOS channel from channels.nixos.org."
+  fi
+  if [[ -n "$expected_channel" && "$channel" != "$expected_channel" ]]; then
+    discovery_provisional=true
   fi
 
   channel_rev_url="https://channels.nixos.org/$channel/git-revision"
@@ -291,22 +606,567 @@ resolve_channel() {
       fail_json "Unsupported channel: $channel\nUse nixos-unstable, nixos-unstable-small, nixos-stable, nixos-stable-small, nixos-YY.MM, nixos-YY.MM-small, or nixpkgs-unstable."
       ;;
   esac
+  evals_url="$base_url/jobset/$project/$jobset/evals"
+  entry_json="$(jq -cn \
+    --arg configured "$configured_channel" \
+    --arg resolvedChannel "$channel" \
+    --arg project "$project" \
+    --arg jobset "$jobset" \
+    --arg gateJob "$gate_job" \
+    --arg gateLabel "$gate_label" \
+    --arg channelRevUrl "$channel_rev_url" \
+    --arg evalsUrl "$evals_url" \
+    --argjson checkedAt "$now" \
+    --argjson provisional "$discovery_provisional" \
+    '{
+      discovery: {
+        configured: $configured,
+        resolvedChannel: $resolvedChannel,
+        project: $project,
+        jobset: $jobset,
+        gateJob: $gateJob,
+        gateLabel: $gateLabel,
+        channelRevUrl: $channelRevUrl,
+        evalsUrl: $evalsUrl,
+        checkedAt: $checkedAt,
+        provisional: $provisional
+      }
+    }')"
+}
 
-  if ! channel_exists "$channel"; then
-    if [[ -n "$transport_error" ]]; then
-      fail_json "$transport_error\nValidation URL: $channel_rev_url"
-    fi
-    fail_json "Invalid or unsupported channel: $channel\nValidation URL returned 404: $channel_rev_url"
+entry_number() {
+  local query="$1"
+  local fallback="${2:-0}"
+  local value
+  value="$(jq -r "$query // empty" <<< "$entry_json" 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+entry_string() {
+  local query="$1"
+  jq -r "$query // empty" <<< "$entry_json" 2>/dev/null || true
+}
+
+gate_data_is_hot() {
+  local total still_succeed still_fail now_succeed now_fail aborted completed status
+  total="$(entry_number '.progress.total')"
+  (( total > 0 )) || return 1
+  still_succeed="$(entry_number '.progress.stillSucceed')"
+  still_fail="$(entry_number '.progress.stillFail')"
+  now_succeed="$(entry_number '.progress.nowSucceed')"
+  now_fail="$(entry_number '.progress.nowFail')"
+  aborted="$(entry_number '.progress.aborted')"
+  completed=$((still_succeed + still_fail + now_succeed + now_fail + aborted))
+  status="$(entry_string '.gate.status')"
+  status_is_blocked "$status" && return 0
+  (( completed * 100 >= total * close_threshold ))
+}
+
+extract_eval_revision() {
+  local identity_json="$1"
+  local html="$2"
+  local revision
+  revision="$(jq -r '
+    .evals[0].jobsetevalinputs.nixpkgs.revision
+      // .evals[0].inputs.nixpkgs.revision
+      // .evals[0].jobsetevalinputs[]?.revision
+      // .[0].jobsetevalinputs.nixpkgs.revision
+      // .[0].inputs.nixpkgs.revision
+      // empty
+  ' <<< "$identity_json" 2>/dev/null || true)"
+  if [[ "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s' "$revision"
+    return 0
+  fi
+  revision="$(
+    printf '%s\n' "$html" |
+      perl -0777 -ne '
+        if (m{(?:nixpkgs.{0,2000}?revision|revision.{0,2000}?nixpkgs)[^0-9a-f]+([0-9a-f]{40})}si) {
+          print $1;
+        } elsif (m{(?:nixos|nixpkgs)-[^<\s]*?\.([0-9a-f]{12})}s) {
+          print $1;
+        }
+      '
+  )"
+  if [[ "$revision" =~ ^[0-9a-f]{12}([0-9a-f]{28})?$ ]]; then
+    printf '%s' "$revision"
+  fi
+}
+
+revisions_match() {
+  local published="$1"
+  local candidate="$2"
+  [[ "$published" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ "$candidate" =~ ^[0-9a-f]{12}([0-9a-f]{28})?$ ]] || return 1
+  [[ "$published" == "$candidate"* || "$candidate" == "$published"* ]]
+}
+
+refresh_channel_revision() {
+  local checked revision ttl="$CHANNEL_TTL_SECONDS"
+  checked="$(entry_number '.channel.checkedAt')"
+  revision="$(entry_string '.channel.revision')"
+  if [[ "$(entry_string '.gate.terminal')" == "true" \
+    && "$(entry_string '.gate.status')" == "Succeeded" \
+    && "$(entry_string '.candidate.published')" != "true" ]]; then
+    ttl="$PASSED_GATE_CHANNEL_TTL_SECONDS"
+  fi
+  if (( force_refresh == 0 )) \
+    && [[ "$revision" =~ ^[0-9a-f]{40}$ ]] \
+    && ! age_is_due "$checked" "$ttl"; then
+    return 0
   fi
 
-  evals_url="$base_url/jobset/$project/$jobset/evals"
+  if ! revision="$(fetch_url 8 "" "$channel_rev_url")"; then
+    refresh_error="Could not fetch a valid git revision from channels.nixos.org for $channel."
+    return 1
+  fi
+  if ! [[ "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+    refresh_error="Could not fetch a valid git revision from channels.nixos.org for $channel."
+    return 1
+  fi
+  entry_json="$(jq -c --arg revision "$revision" --argjson checkedAt "$now" '
+    .channel = {revision: $revision, checkedAt: $checkedAt}
+  ' <<< "$entry_json")"
+  refresh_performed=1
+}
+
+refresh_candidate_identity() {
+  local checked old_id identity_html new_id revision ttl="$IDENTITY_TTL_SECONDS"
+  checked="$(entry_number '.candidate.checkedAt')"
+  old_id="$(entry_number '.candidate.id')"
+  if [[ "$(entry_string '.candidate.published')" == "true" \
+    || "$(entry_string '.gate.terminal')" == "true" ]]; then
+    ttl="$PAUSED_IDENTITY_TTL_SECONDS"
+  fi
+  if (( force_refresh == 0 && old_id > 0 )) && ! age_is_due "$checked" "$ttl"; then
+    return 0
+  fi
+
+  # Hydra's JSON eval list embeds every build id for 20 evaluations (about
+  # 31 MB for nixos:unstable as measured on 2026-08-02).  The HTML view is
+  # about 31 KB and lists the same newest evaluation first.  latest-eval is
+  # not a substitute: it redirects to the latest *completed* evaluation and
+  # can lag the active candidate that this widget has always tracked.
+  if ! identity_html="$(fetch_url 20 "text/html" "$evals_url")"; then
+    refresh_error="Could not find the latest $project:$jobset evaluation."
+    return 1
+  fi
+  new_id="$(
+    printf '%s\n' "$identity_html" |
+      grep -Eo '/eval/[0-9]+' |
+      head -n1 |
+      tr -cd '0-9'
+  )"
+  if ! [[ "$new_id" =~ ^[0-9]+$ ]]; then
+    refresh_error="Could not find the latest $project:$jobset evaluation."
+    return 1
+  fi
+  revision=""
+  if [[ "$new_id" != "$old_id" ]]; then
+    entry_json="$(jq -c \
+      --argjson id "$new_id" \
+      --arg revision "$revision" \
+      --argjson checkedAt "$now" '
+        .candidate = {id: $id, revision: $revision, checkedAt: $checkedAt, published: false}
+        | del(.progress, .gate)
+      ' <<< "$entry_json")"
+  else
+    entry_json="$(jq -c \
+      --arg revision "$revision" \
+      --argjson checkedAt "$now" '
+        .candidate.checkedAt = $checkedAt
+        | if $revision != "" then .candidate.revision = $revision else . end
+      ' <<< "$entry_json")"
+  fi
+  identity_response='{}'
+  refresh_performed=1
+}
+
+refresh_eval_progress() {
+  local id checked published terminal html summary revision
+  local q ss sf ns nf ab nj parsed_total
+  id="$(entry_number '.candidate.id')"
+  checked="$(entry_number '.progress.checkedAt')"
+  published="$(entry_string '.candidate.published')"
+  terminal="$(entry_string '.gate.terminal')"
+  if [[ "$published" == "true" || "$terminal" == "true" ]]; then
+    return 0
+  fi
+  if (( force_refresh == 0 && checked > 0 )) && ! age_is_due "$checked" "$PROGRESS_TTL_SECONDS"; then
+    return 0
+  fi
+
+  eval_url="$base_url/eval/$id"
+  if ! html="$(fetch_url 20 "" "$eval_url")"; then
+    refresh_error="Could not refresh Hydra evaluation #$id progress."
+    return 1
+  fi
+  summary="$(
+    printf '%s\n' "$html" |
+      sed -n '/<ul class="nav nav-tabs"/,/<div class="tab-content">/p; /<div class="tab-content">/q' || true
+  )"
+  q="$(get_count "Queued Jobs" "$summary")"
+  ss="$(get_count "Still Succeeding Jobs" "$summary")"
+  sf="$(get_count "Still Failing Jobs" "$summary")"
+  ns="$(get_count "Newly Succeeding Jobs" "$summary")"
+  nf="$(get_count "Newly Failing Jobs" "$summary")"
+  ab="$(get_count "Aborted / Timed out Jobs" "$summary")"
+  nj="$(get_count "New Jobs" "$summary")"
+  q="${q:-0}"; ss="${ss:-0}"; sf="${sf:-0}"; ns="${ns:-0}"
+  nf="${nf:-0}"; ab="${ab:-0}"; nj="${nj:-0}"
+  parsed_total=$((q + ss + sf + ns + nf + ab + nj))
+  if (( parsed_total <= 0 )); then
+    refresh_error="Found eval $id, but could not parse job counts."
+    return 1
+  fi
+  revision="$(extract_eval_revision "${identity_response:-{}}" "$html")"
+  if [[ -z "$revision" ]]; then
+    revision="$(entry_string '.candidate.revision')"
+  fi
+  entry_json="$(jq -c \
+    --arg revision "$revision" \
+    --argjson checkedAt "$now" \
+    --argjson queued "$q" \
+    --argjson stillSucceed "$ss" \
+    --argjson stillFail "$sf" \
+    --argjson nowSucceed "$ns" \
+    --argjson nowFail "$nf" \
+    --argjson aborted "$ab" \
+    --argjson newJobs "$nj" \
+    --argjson total "$parsed_total" '
+      .candidate.revision = $revision
+      | .progress = {
+          checkedAt: $checkedAt, queued: $queued, stillSucceed: $stillSucceed,
+          stillFail: $stillFail, nowSucceed: $nowSucceed, nowFail: $nowFail,
+          aborted: $aborted, newJobs: $newJobs, total: $total
+        }
+    ' <<< "$entry_json")"
+  refresh_performed=1
+}
+
+mark_published_candidate() {
+  local channel_revision candidate_revision
+  channel_revision="$(entry_string '.channel.revision')"
+  candidate_revision="$(entry_string '.candidate.revision')"
+  if revisions_match "$channel_revision" "$candidate_revision"; then
+    entry_json="$(jq -c '.candidate.published = true' <<< "$entry_json")"
+  else
+    entry_json="$(jq -c '.candidate.published = false' <<< "$entry_json")"
+  fi
+}
+
+refresh_gate() {
+  local published terminal checked id json build_id build_finished build_status starttime status nixname gate_rev
+  local old_id old_finished old_status fetch_status=0 ttl="$GATE_TTL_SECONDS"
+  published="$(entry_string '.candidate.published')"
+  terminal="$(entry_string '.gate.terminal')"
+  [[ "$published" == "true" || "$terminal" == "true" || -z "$gate_job" ]] && return 0
+  checked="$(entry_number '.gate.checkedAt')"
+  if gate_data_is_hot; then
+    ttl="$HOT_GATE_TTL_SECONDS"
+  fi
+  if (( force_refresh == 0 && checked > 0 )) && ! age_is_due "$checked" "$ttl"; then
+    return 0
+  fi
+  old_id="$(entry_number '.gate.id')"
+  old_finished="$(entry_number '.gate.finished')"
+  old_status="$(entry_string '.gate.status')"
+  id="$(entry_number '.candidate.id')"
+  eval_url="$base_url/eval/$id"
+  json="$(fetch_optional_url 20 "application/json" "$eval_url/job/$gate_job")" || fetch_status=$?
+  if (( fetch_status == 1 )); then
+    if (( checked <= 0 || old_id != 0 )) || [[ "$old_status" != "Queued" ]]; then
+      gate_changed=1
+    fi
+    entry_json="$(jq -c --argjson checkedAt "$now" '
+      .gate = {
+        checkedAt: $checkedAt, id: 0, finished: 0, buildStatus: "",
+        starttime: 0, status: "Queued", nixname: "", gateRevision: "",
+        terminal: false
+      }
+    ' <<< "$entry_json")"
+    refresh_performed=1
+    return 0
+  fi
+  if (( fetch_status != 0 )); then
+    refresh_error="Could not refresh the $gate_label gate for eval #$id."
+    return 1
+  fi
+  build_id="$(jq -r '.id // empty' <<< "$json" 2>/dev/null || true)"
+  build_finished="$(jq -r '.finished // 0' <<< "$json" 2>/dev/null || true)"
+  build_status="$(jq -r '.buildstatus // empty' <<< "$json" 2>/dev/null || true)"
+  starttime="$(jq -r '.starttime // 0' <<< "$json" 2>/dev/null || true)"
+  nixname="$(jq -r '.nixname // empty' <<< "$json" 2>/dev/null || true)"
+  [[ "$build_id" =~ ^[0-9]+$ ]] || build_id=0
+  case "$build_finished" in
+    1|true) build_finished=1 ;;
+    0|false) build_finished=0 ;;
+    *) build_finished=0 ;;
+  esac
+  [[ "$starttime" =~ ^[0-9]+$ ]] || starttime=0
+  status="$(build_status_label "$build_finished" "$build_status" "$starttime")"
+  gate_rev=""
+  if [[ "$nixname" =~ \.([0-9a-f]{12}) ]]; then
+    gate_rev="${BASH_REMATCH[1]}"
+  fi
+  if (( checked <= 0 )) \
+    || [[ "$build_id" != "$old_id" || "$build_finished" != "$old_finished" || "$status" != "$old_status" ]]; then
+    gate_changed=1
+  fi
+  entry_json="$(jq -c \
+    --argjson checkedAt "$now" \
+    --argjson id "$build_id" \
+    --argjson finished "$build_finished" \
+    --arg buildStatus "$build_status" \
+    --argjson starttime "$starttime" \
+    --arg status "$status" \
+    --arg nixname "$nixname" \
+    --arg gateRevision "$gate_rev" '
+      .gate = ((.gate // {}) + {
+        checkedAt: $checkedAt, id: $id, finished: $finished,
+        buildStatus: $buildStatus, starttime: $starttime, status: $status,
+        nixname: $nixname, gateRevision: $gateRevision,
+        terminal: ($finished == 1)
+      })
+      | if $gateRevision != "" then .candidate.revision = $gateRevision else . end
+    ' <<< "$entry_json")"
+  refresh_performed=1
+}
+
+refresh_constituents() {
+  local published terminal gate_id checked json counts failed_count total_count pending_count
+  local ttl="$CONSTITUENTS_TTL_SECONDS"
+  published="$(entry_string '.candidate.published')"
+  terminal="$(entry_string '.gate.terminal')"
+  [[ "$published" == "true" ]] && return 0
+  gate_id="$(entry_number '.gate.id')"
+  (( gate_id > 0 )) || return 0
+  checked="$(entry_number '.gate.constituentsCheckedAt')"
+  # A terminal gate may enrich its final snapshot once, but it is never polled
+  # again. Failure of that optional enrichment must not discard terminal state.
+  if [[ "$terminal" == "true" && "$checked" -gt 0 ]]; then
+    return 0
+  fi
+  if gate_data_is_hot; then
+    ttl="$HOT_CONSTITUENTS_TTL_SECONDS"
+  fi
+  if (( force_refresh == 0 && gate_changed == 0 && checked > 0 )) \
+    && ! age_is_due "$checked" "$ttl"; then
+    return 0
+  fi
+  if ! json="$(fetch_url 20 "application/json" "$base_url/build/$gate_id/constituents")"; then
+    if [[ "$terminal" == "true" ]]; then
+      entry_json="$(jq -c --argjson checkedAt "$now" '
+        .gate.constituentsCheckedAt = $checkedAt
+      ' <<< "$entry_json")"
+      refresh_performed=1
+      return 0
+    fi
+    refresh_error="Could not refresh blocker constituents for gate build $gate_id."
+    return 1
+  fi
+  counts="$(jq -r '
+    [
+      (map(select(((.finished == 1) or (.finished == true)) and (.buildstatus // 0) != 0)) | length),
+      length,
+      (map(select((.finished != 1) and (.finished != true))) | length)
+    ] | @tsv
+  ' <<< "$json" 2>/dev/null || true)"
+  IFS=$'\t' read -r failed_count total_count pending_count <<< "$counts"
+  if ! [[ "$failed_count" =~ ^[0-9]+$ && "$total_count" =~ ^[0-9]+$ && "$pending_count" =~ ^[0-9]+$ ]]; then
+    if [[ "$terminal" == "true" ]]; then
+      entry_json="$(jq -c --argjson checkedAt "$now" '
+        .gate.constituentsCheckedAt = $checkedAt
+      ' <<< "$entry_json")"
+      refresh_performed=1
+      return 0
+    fi
+    refresh_error="Could not parse blocker constituents for gate build $gate_id."
+    return 1
+  fi
+  entry_json="$(jq -c \
+    --argjson checkedAt "$now" \
+    --argjson failed "$failed_count" \
+    --argjson total "$total_count" \
+    --argjson pending "$pending_count" '
+      .gate.constituentsCheckedAt = $checkedAt
+      | .gate.failed = $failed
+      | .gate.total = $total
+      | .gate.pending = $pending
+      | .gate.terminal = (.gate.finished == 1)
+    ' <<< "$entry_json")"
+  refresh_performed=1
+}
+
+render_status() {
+  local stale_mode="${1:-0}"
+  local failure_message="${2:-}"
+  local queued still_succeed still_fail now_succeed now_fail aborted new_jobs
+  local total succeeded failed pending finished percent_precise eval_progress_score health_score
+  local tested_status tested_build_id gate_total gate_failed gate_pending gate_score=""
+  local channel_rev candidate_rev channel_short_rev eval_short_rev channel_revision_status
+  local readiness readiness_detail launched readiness_number color icon tooltip last_good_tooltip
+  local raw_state presentation_state observed_at stale_age=0 age_minutes=0
+
+  channel="$(entry_string '.discovery.resolvedChannel')"
+  project="$(entry_string '.discovery.project')"
+  jobset="$(entry_string '.discovery.jobset')"
+  gate_job="$(entry_string '.discovery.gateJob')"
+  gate_label="$(entry_string '.discovery.gateLabel')"
+  evals_url="$(entry_string '.discovery.evalsUrl')"
+  eval_id="$(entry_number '.candidate.id')"
+  queued="$(entry_number '.progress.queued')"
+  still_succeed="$(entry_number '.progress.stillSucceed')"
+  still_fail="$(entry_number '.progress.stillFail')"
+  now_succeed="$(entry_number '.progress.nowSucceed')"
+  now_fail="$(entry_number '.progress.nowFail')"
+  aborted="$(entry_number '.progress.aborted')"
+  new_jobs="$(entry_number '.progress.newJobs')"
+  total="$(entry_number '.progress.total')"
+  if (( total <= 0 )); then
+    fail_json "Hydra status unavailable\nNo cached progress is available for $configured_channel."
+  fi
+  succeeded=$((still_succeed + now_succeed))
+  failed=$((still_fail + now_fail + aborted))
+  pending=$((queued + new_jobs))
+  finished=$((succeeded + failed))
+  percent_precise="$(awk -v f="$finished" -v t="$total" 'BEGIN { printf "%.1f%%", (f / t) * 100 }')"
+  eval_progress_score="$(awk -v f="$finished" -v t="$total" 'BEGIN { printf "%.0f", (f / t) * 100 }')"
+  health_score="$(awk -v f="$finished" -v t="$total" -v bad="$failed" '
+    BEGIN {
+      raw = (f / t) * 100; drag = (bad / t) * 400;
+      if (drag > 30) drag = 30; score = raw - drag;
+      if (score < 0) score = 0; printf "%.0f", score;
+    }')"
+
+  tested_status="$(entry_string '.gate.status')"; tested_status="${tested_status:-not used}"
+  tested_build_id="$(entry_number '.gate.id')"; (( tested_build_id > 0 )) || tested_build_id=""
+  gate_total="$(entry_string '.gate.total')"
+  gate_failed="$(entry_string '.gate.failed')"
+  gate_pending="$(entry_string '.gate.pending')"
+  if [[ "$gate_total" =~ ^[0-9]+$ && "$gate_total" -gt 0 ]]; then
+    gate_score="$(awk -v total="$gate_total" -v failed="${gate_failed:-0}" -v pending="${gate_pending:-0}" '
+      BEGIN {
+        done = total - pending; if (done < 0) done = 0;
+        progress = (done / total) * 100; drag = (failed / total) * 800;
+        if (drag > 45) drag = 45; score = progress - drag;
+        if (score < 0) score = 0; printf "%.0f", score;
+      }')"
+  fi
+
+  channel_rev="$(entry_string '.channel.revision')"
+  candidate_rev="$(entry_string '.candidate.revision')"
+  channel_short_rev="unknown"; channel_revision_status="unavailable"
+  if [[ "$channel_rev" =~ ^[0-9a-f]{40}$ ]]; then
+    channel_short_rev="${channel_rev:0:12}"; channel_revision_status="known"
+  fi
+  eval_short_rev="unknown"
+  [[ "$candidate_rev" =~ ^[0-9a-f]{12}([0-9a-f]{28})?$ ]] && eval_short_rev="${candidate_rev:0:12}"
+
+  readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 98) s = 98; printf "%.0f%%", s }')"
+  readiness_detail="waiting for eval completion"
+  launched=0
+  if [[ "$(entry_string '.candidate.published')" == "true" ]]; then
+    readiness="Launched"
+    readiness_detail="launched: latest visible eval is published; update now"
+    launched=1
+  elif [[ "${gate_failed:-0}" =~ ^[0-9]+$ && "${gate_failed:-0}" -gt 0 ]]; then
+    if [[ -n "$gate_score" ]]; then
+      readiness="$(awk -v s="$gate_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+    else
+      readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+    fi
+    readiness_detail="blocked: $gate_label gate has $gate_failed failed blocker constituents"
+  elif status_is_blocked "$tested_status"; then
+    if [[ -n "$gate_score" ]]; then
+      readiness="$(awk -v s="$gate_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+      readiness_detail="blocked: $gate_label gate is $tested_status; blocker failures present"
+    else
+      readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
+      readiness_detail="blocked: $gate_label gate is $tested_status"
+    fi
+  elif [[ "$tested_status" == "Succeeded" ]]; then
+    if (( pending == 0 )); then
+      readiness="100%"; readiness_detail="imminent: channel gate passed; waiting for channel publication"
+    else
+      readiness="$(awk -v s="$eval_progress_score" 'BEGIN { if (s > 99) s = 99; printf "%.0f%%", s }')"
+      readiness_detail="close: channel gate passed; candidate eval queue still draining"
+    fi
+  elif [[ -n "$gate_score" ]]; then
+    readiness="$(awk -v g="$gate_score" -v e="$eval_progress_score" 'BEGIN { s = (g * .70) + (e * .30); if (s > 98) s = 98; printf "%.0f%%", s }')"
+    readiness_detail="waiting for $gate_label gate: $tested_status"
+  elif [[ -n "$gate_job" ]]; then
+    readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 70) s = 70; printf "%.0f%%", s }')"
+    readiness_detail="$gate_label gate unresolved: $tested_status"
+  fi
+
+  if [[ "$readiness" =~ ^[0-9]+%$ ]]; then readiness_number="${readiness%%%}"; else readiness_number=100; fi
+  color="$running_color"; icon="$running_icon"
+  if (( launched == 1 )); then color="$launched_color"; icon="$launched_icon"
+  elif [[ "$readiness_detail" == blocked:* ]]; then color="$stalled_color"; icon="$stalled_icon"
+  elif (( readiness_number >= close_threshold )); then color="$close_color"; icon="$close_icon"; fi
+
+  tooltip="$channel: $readiness
+$readiness_detail
+
+Hydra eval: $project:$jobset #$eval_id
+Gate ($gate_label): $tested_status, build ${tested_build_id:-unknown}
+Gate blockers: ${gate_failed:-unknown} failed, ${gate_pending:-unknown} pending / ${gate_total:-unknown}
+
+Candidate progress: $percent_precise
+Pending jobs: $pending / $total
+Failed/aborted: $failed
+
+Eval revision: $eval_short_rev
+Channel revision: $channel_short_rev ($channel_revision_status)
+
+Left click refreshes. Right click opens Hydra."
+  last_good_tooltip="$tooltip"
+  presentation_state="running"
+  if (( launched == 1 )); then presentation_state="launched"
+  elif [[ "$readiness_detail" == blocked:* ]]; then presentation_state="stalled"
+  elif (( readiness_number >= close_threshold )); then presentation_state="close"; fi
+  raw_state="$presentation_state"
+  if [[ "$(entry_string '.candidate.published')" == "true" ]]; then
+    raw_state="published-paused"
+  elif [[ "$(entry_string '.gate.terminal')" == "true" ]]; then
+    raw_state="paused"
+  fi
+  observed_at="$(entry_number '.observedAt')"
+  if (( stale_mode == 1 )); then
+    stale_age=$((now > observed_at ? now - observed_at : 0))
+    age_minutes=$((stale_age / 60))
+    tooltip="$tooltip
+
+Last known status: $age_minutes minute(s) old.
+Refresh failed: $failure_message"
+    raw_state="stale"
+    emit_payload "$raw_state" "$presentation_state" "$readiness" "$icon" "$tooltip" "$color" "$color" "$evals_url" "$channel" true "$stale_age" "$observed_at" "$failure_message" "$last_good_tooltip"
+  else
+    emit_payload "$raw_state" "$presentation_state" "$readiness" "$icon" "$tooltip" "$color" "$color" "$evals_url" "$channel" false 0 "$observed_at" "" "$last_good_tooltip"
+  fi
+}
+
+handle_refresh_failure() {
+  local message="$1"
+  if jq -e '(.candidate.id | type == "number") and (.progress.total // 0) > 0' >/dev/null 2>&1 <<< "$original_entry_json"; then
+    entry_json="$original_entry_json"
+    render_status 1 "$message"
+    exit 0
+  fi
+  fail_json "Hydra status unavailable\n$message"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --channel)
       require_arg "$1" "${2:-}"
-      channel="${2:-}"
+      configured_channel="${2:-}"
+      channel="$configured_channel"
       shift 2
       ;;
     --running-color)
@@ -354,6 +1214,10 @@ while [[ $# -gt 0 ]]; do
       close_threshold="${2:-$close_threshold}"
       shift 2
       ;;
+    --force-refresh)
+      force_refresh=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -375,7 +1239,7 @@ launched_icon="$(safe_icon "$launched_icon" "rocket")"
 if ! command -v jq >/dev/null 2>&1; then
   emit_without_jq
 fi
-for cmd in curl timeout perl grep awk sed head tr cut date cat; do
+for cmd in curl timeout perl grep awk sed head tr date cat flock mkdir mv rm; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     fail_json "Missing required command: $cmd"
   fi
@@ -384,227 +1248,65 @@ if ! [[ "$close_threshold" =~ ^[0-9]+$ ]] || (( close_threshold < 1 || close_thr
   close_threshold="90"
 fi
 
-resolve_channel
+now="$(epoch_now)"
+channel_key="$(cache_key_for_channel "$configured_channel")"
+identity_response='{}'
+refresh_performed=0
 
-evals_html="$(timeout 20s curl -fsSL "$evals_url" 2>/dev/null || true)"
-eval_id="$(printf '%s\n' "$evals_html" | grep -Eo '/eval/[0-9]+' | head -n1 | cut -d/ -f3)"
+setup_cache
+read_cache || true
+original_entry_json="$entry_json"
 
-if [[ -z "$eval_id" ]]; then
-  emit "HYD" "$stalled_icon" "Hydra status unavailable\nCould not find the latest $project:$jobset evaluation." "$stalled_color" "$stalled_color"
-  exit 0
-fi
-
-eval_url="$base_url/eval/$eval_id"
-
-eval_json="$(timeout 20s curl -fsSL -H 'Accept: application/json' "$eval_url" 2>/dev/null || true)"
-eval_full_rev="$(printf '%s\n' "$eval_json" | jq -r '.jobsetevalinputs.nixpkgs.revision // empty' 2>/dev/null || true)"
-if [[ -n "$eval_full_rev" && "$eval_full_rev" != "null" ]]; then
-  eval_short_rev="${eval_full_rev:0:12}"
-fi
-
-eval_html="$(timeout 20s curl -fsSL "$eval_url" 2>/dev/null || true)"
-if [[ -z "$eval_short_rev" ]]; then
-  eval_short_rev="$(
-    printf '%s\n' "$eval_html" |
-      perl -0777 -ne 'if (m{(?:nixos|nixpkgs)-[^<\s]*?\.([0-9a-f]{12})}s) { print $1 }'
-  )"
-fi
-
-summary="$(
-  printf '%s\n' "$eval_html" |
-    sed -n '/<ul class="nav nav-tabs"/,/<div class="tab-content">/p; /<div class="tab-content">/q' ||
-    true
-)"
-
-queued="$(get_count "Queued Jobs" "$summary")"
-still_succeed="$(get_count "Still Succeeding Jobs" "$summary")"
-still_fail="$(get_count "Still Failing Jobs" "$summary")"
-now_succeed="$(get_count "Newly Succeeding Jobs" "$summary")"
-now_fail="$(get_count "Newly Failing Jobs" "$summary")"
-aborted="$(get_count "Aborted / Timed out Jobs" "$summary")"
-new_jobs="$(get_count "New Jobs" "$summary")"
-
-queued="${queued:-0}"
-still_succeed="${still_succeed:-0}"
-still_fail="${still_fail:-0}"
-now_succeed="${now_succeed:-0}"
-now_fail="${now_fail:-0}"
-aborted="${aborted:-0}"
-new_jobs="${new_jobs:-0}"
-
-total=$((queued + still_succeed + still_fail + now_succeed + now_fail + aborted + new_jobs))
-succeeded=$((still_succeed + now_succeed))
-failed=$((still_fail + now_fail + aborted))
-pending=$((queued + new_jobs))
-finished=$((succeeded + failed))
-
-if (( total <= 0 )); then
-  emit "HYD" "$stalled_icon" "Hydra status unavailable\nFound eval $eval_id, but could not parse job counts." "$stalled_color" "$stalled_color"
-  exit 0
-fi
-
-percent_precise="$(awk -v f="$finished" -v t="$total" 'BEGIN { printf "%.1f%%", (f / t) * 100 }')"
-eval_progress_score="$(awk -v f="$finished" -v t="$total" 'BEGIN { printf "%.0f", (f / t) * 100 }')"
-health_score="$(
-  awk -v f="$finished" -v t="$total" -v bad="$failed" '
-    BEGIN {
-      raw = (f / t) * 100;
-      drag = (bad / t) * 400;
-      if (drag > 30) drag = 30;
-      score = raw - drag;
-      if (score < 0) score = 0;
-      printf "%.0f", score;
-    }'
-)"
-
-tested_status="not used"
-tested_build_id=""
-gate_total=""
-gate_failed=""
-gate_pending=""
-gate_score=""
-
-if [[ -n "$gate_job" ]]; then
-  tested_build_json="$(timeout 20s curl -fsSL -H 'Accept: application/json' "$eval_url/job/$gate_job" 2>/dev/null || true)"
-  tested_build_id="$(printf '%s\n' "$tested_build_json" | jq -r '.id // empty' 2>/dev/null || true)"
-  tested_finished="$(printf '%s\n' "$tested_build_json" | jq -r '.finished // 0' 2>/dev/null || true)"
-  tested_buildstatus="$(printf '%s\n' "$tested_build_json" | jq -r '.buildstatus // empty' 2>/dev/null || true)"
-  tested_starttime="$(printf '%s\n' "$tested_build_json" | jq -r '.starttime // 0' 2>/dev/null || true)"
-  tested_status="$(build_status_label "$tested_finished" "$tested_buildstatus" "$tested_starttime")"
-  gate_nixname="$(printf '%s\n' "$tested_build_json" | jq -r '.nixname // empty' 2>/dev/null || true)"
-  gate_rev=""
-  if [[ "$gate_nixname" =~ \.([0-9a-f]{12}) ]]; then
-    gate_rev="${BASH_REMATCH[1]}"
-  fi
-  if [[ -n "$gate_rev" ]]; then
-    eval_short_rev="$gate_rev"
-  fi
-  tested_status="${tested_status:-unknown}"
-  tested_build_id="${tested_build_id:-}"
-fi
-
-if [[ -n "$tested_build_id" ]]; then
-  gate_counts="$(
-    timeout 20s curl -fsSL -H 'Accept: application/json' "$base_url/build/$tested_build_id/constituents" 2>/dev/null |
-      jq -r '
-        [
-          (map(select((.finished // 0) == 1 and (.buildstatus // 0) != 0)) | length),
-          length,
-          (map(select((.finished // 0) != 1)) | length)
-        ] | @tsv
-      ' 2>/dev/null || true
-  )"
-  IFS=$'\t' read -r gate_failed gate_total gate_pending <<< "$gate_counts"
-  gate_failed="${gate_failed:-0}"
-  gate_pending="${gate_pending:-0}"
-  if [[ -n "$gate_total" && "$gate_total" =~ ^[0-9]+$ && "$gate_total" -gt 0 ]]; then
-    gate_score="$(
-      awk -v total="$gate_total" -v failed="$gate_failed" -v pending="$gate_pending" '
-        BEGIN {
-          done = total - pending;
-          if (done < 0) done = 0;
-          progress = (done / total) * 100;
-          drag = (failed / total) * 800;
-          if (drag > 45) drag = 45;
-          score = progress - drag;
-          if (score < 0) score = 0;
-          printf "%.0f", score;
-        }'
-    )"
-  fi
-fi
-
-if [[ -z "$channel_rev" ]]; then
-  channel_revision_status="unavailable"
-  channel_short_rev="unknown"
-fi
-
-readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 98) s = 98; printf "%.0f%%", s }')"
-readiness_detail="waiting for eval completion"
-launched=0
-
-if [[ "${gate_failed:-0}" =~ ^[0-9]+$ && "${gate_failed:-0}" -gt 0 ]]; then
-  if [[ -n "$gate_score" ]]; then
-    readiness="$(awk -v s="$gate_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
-  else
-    readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
-  fi
-  readiness_detail="blocked: $gate_label gate has $gate_failed failed blocker constituents"
-elif status_is_blocked "$tested_status"; then
-  if [[ -n "$gate_score" ]]; then
-    readiness="$(awk -v s="$gate_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
-    readiness_detail="blocked: $gate_label gate is $tested_status; blocker failures present"
-  else
-    readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 85) s = 85; printf "%.0f%%", s }')"
-    readiness_detail="blocked: $gate_label gate is $tested_status"
-  fi
-elif [[ -n "$eval_short_rev" && -n "$channel_rev" && "$channel_rev" == "$eval_short_rev"* ]]; then
-  readiness="Launched"
-  readiness_detail="launched: latest visible eval is published; update now"
-  launched=1
-elif [[ "$tested_status" == "Succeeded" ]]; then
-  if (( pending == 0 )); then
-    if [[ "$channel_revision_status" == "known" ]]; then
-      readiness="100%"
+if ! acquire_single_flight; then
+  if cache_has_progress; then
+    if age_is_due "$(entry_number '.progress.checkedAt')" "$PROGRESS_TTL_SECONDS"; then
+      render_status 1 "Another refresh is already in progress."
     else
-      readiness="99%"
+      render_status
     fi
-    readiness_detail="imminent: channel gate passed; waiting for channel publication"
-  else
-    readiness="$(
-      awk -v s="$eval_progress_score" '
-        BEGIN {
-          if (s > 99) s = 99;
-          printf "%.0f%%", s;
-        }'
-    )"
-    readiness_detail="close: channel gate passed; candidate eval queue still draining"
+    exit 0
   fi
-elif [[ -n "$gate_score" ]]; then
-  readiness="$(awk -v g="$gate_score" -v e="$eval_progress_score" 'BEGIN { s = (g * 0.70) + (e * 0.30); if (s > 98) s = 98; printf "%.0f%%", s }')"
-  readiness_detail="waiting for $gate_label gate: $tested_status"
-elif [[ -n "$gate_job" ]]; then
-  readiness="$(awk -v s="$health_score" 'BEGIN { if (s > 70) s = 70; printf "%.0f%%", s }')"
-  readiness_detail="$gate_label gate unresolved: $tested_status"
+  fail_json "Hydra status unavailable\nAnother refresh is still in progress and no cached status is available."
 fi
 
-if [[ "$channel_revision_status" != "known" && "$readiness" == "100%" ]]; then
-  readiness="99%"
-  readiness_detail="$readiness_detail; published revision unknown"
+# The lock winner rereads in acquire_single_flight after waiting for another
+# process. Treat that snapshot as the fallback for every subsequent request.
+original_entry_json="$entry_json"
+
+if ! resolve_channel; then
+  handle_refresh_failure "$refresh_error"
+fi
+if ! refresh_channel_revision; then
+  if ! jq -e '(.candidate.id | type == "number") and (.progress.total // 0) > 0' \
+    >/dev/null 2>&1 <<< "$original_entry_json"; then
+    evals_url=""
+    fail_json "$refresh_error\nValidation URL: $channel_rev_url"
+  fi
+  handle_refresh_failure "$refresh_error"
+fi
+if ! refresh_candidate_identity; then
+  handle_refresh_failure "$refresh_error"
+fi
+if ! refresh_eval_progress; then
+  handle_refresh_failure "$refresh_error"
 fi
 
-if [[ "$readiness" =~ ^[0-9]+%$ ]]; then
-  readiness_number="${readiness%%%}"
-else
-  readiness_number=100
+# Publication is deliberately checked before the expensive gate chain. A
+# published candidate cannot become more useful by fetching its constituents.
+mark_published_candidate
+if ! refresh_gate; then
+  handle_refresh_failure "$refresh_error"
 fi
-color="$running_color"
-icon="$running_icon"
-if (( launched == 1 )); then
-  color="$launched_color"
-  icon="$launched_icon"
-elif [[ "$readiness_detail" == blocked:* ]]; then
-  color="$stalled_color"
-  icon="$stalled_icon"
-elif (( readiness_number >= close_threshold )); then
-  color="$close_color"
-  icon="$close_icon"
+mark_published_candidate
+if ! refresh_constituents; then
+  handle_refresh_failure "$refresh_error"
 fi
 
-tooltip="$channel: $readiness
-$readiness_detail
-
-Hydra eval: $project:$jobset #$eval_id
-Gate ($gate_label): $tested_status, build ${tested_build_id:-unknown}
-Gate blockers: ${gate_failed:-unknown} failed, ${gate_pending:-unknown} pending / ${gate_total:-unknown}
-
-Candidate progress: $percent_precise
-Pending jobs: $pending / $total
-Failed/aborted: $failed
-
-Eval revision: ${eval_short_rev:-unknown}
-Channel revision: $channel_short_rev ($channel_revision_status)
-
-Left click refreshes. Right click opens Hydra."
-
-emit "$readiness" "$icon" "$tooltip" "$color" "$color" "$evals_url" "$channel"
+if ! cache_has_progress; then
+  handle_refresh_failure "No coherent Hydra progress snapshot was produced."
+fi
+if (( refresh_performed == 1 )) || [[ "$(entry_number '.observedAt')" == "0" ]]; then
+  entry_json="$(jq -c --argjson observedAt "$now" '.observedAt = $observedAt' <<< "$entry_json")"
+fi
+write_cache || true
+render_status

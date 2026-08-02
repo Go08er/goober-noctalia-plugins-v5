@@ -11,7 +11,7 @@ description = "Shows NixOS and Nixpkgs channel readiness from Hydra gate status.
 deprecated = false
 plugin_api = 15
 tags = ["bar", "indicator", "nixos", "system"]
-dependencies = ["bash", "curl", "jq", "perl", "grep", "awk", "sed", "head", "tr", "cut", "date", "cat", "timeout", "xdg-open"]
+dependencies = ["bash", "curl", "jq", "perl", "grep", "awk", "sed", "head", "tr", "date", "cat", "flock", "mkdir", "mv", "rm", "timeout", "xdg-open"]
 
 [[plugin]]
 id = "goober/nocvox"

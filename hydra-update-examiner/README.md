@@ -42,8 +42,7 @@ when a channel will advance.
 - `widget.luau` is a thin bar client watching the shared status channel.
 - `panel.luau` is the native attached action surface opened by right click.
 - `plugin.toml` generates native settings UI; there is no QML settings page.
-- `scripts/hydra-channel-progress` is the retained v4 backend for this first
-  port milestone.
+- `scripts/hydra-channel-progress` is the request-budgeted shell backend.
 
 One service feeds every widget placement, avoiding duplicate requests when the
 widget appears on multiple bars or monitors. Failed refreshes keep the last
@@ -134,6 +133,9 @@ noctalia msg plugin goober/hydra-update-examiner:status all refresh
 noctalia msg plugin goober/hydra-update-examiner:status all force-refresh
 noctalia msg plugin goober/hydra-update-examiner:status all open
 ```
+
+Both refresh IPC actions bypass the network-data TTLs; `force-refresh` also
+bypasses the 30-second click cooldown. Scheduled polls continue to use cache.
 
 The actions panel is also addressable for testing or automation:
 
@@ -247,14 +249,18 @@ on `PATH`:
 - `sed`
 - `head`
 - `tr`
-- `cut`
 - `date`
 - `cat`
+- `flock`
+- `mkdir`
+- `mv`
+- `rm`
 - `timeout`
 - `xdg-open` for the right-click action
 
-On typical Linux systems, `head`, `tr`, `cut`, `date`, and `cat` are supplied
-by GNU coreutils.
+On typical Linux systems, `head`, `tr`, `date`, `cat`, `mkdir`, `mv`,
+and `rm` are supplied by GNU coreutils. The `flock` command is supplied by
+util-linux.
 
 On NixOS, a minimal explicit addition for commonly missing tools is:
 
@@ -262,6 +268,7 @@ On NixOS, a minimal explicit addition for commonly missing tools is:
 environment.systemPackages = with pkgs; [
   curl
   jq
+  util-linux
   xdg-utils
 ];
 ```
@@ -270,19 +277,43 @@ The helper can be checked independently:
 
 ```bash
 ./scripts/hydra-channel-progress --channel nixos-unstable
+python3 tests/test_request_budget.py
 ```
 
 ## Network behavior and limitations
 
 The backend makes read-only public requests to `channels.nixos.org`,
 `nix-channels.s3.amazonaws.com` for stable alias discovery, and
-`hydra.nixos.org`. It uses Hydra JSON where practical and still reads Hydra HTML
-for grouped evaluation counts. Public services receive normal connection
-metadata such as IP address and user agent.
+`hydra.nixos.org`. It uses Hydra JSON for build data and the compact HTML eval
+list for candidate identity; Hydra's JSON eval list embeds millions of build
+IDs and is not suitable for a 55-second widget backend. The eval page supplies
+the grouped counts and revision in one response. Public services receive normal
+connection metadata such as IP address and user agent.
 
-There is a single in-process polling service and a click cooldown, but no
-persistent cache or cross-process lock yet. The backend has a 55-second overall
-deadline. Temporary Hydra outages can therefore produce a stale or error state.
+There is a single in-process polling service and a click cooldown. A bounded,
+single-entry cache and cross-process `flock` prevent overlapping helper
+invocations from stampeding Hydra. The backend has a 55-second overall
+deadline. Temporary Hydra outages keep the last known result visible with a
+stale age when a cached result exists, or produce an error before the first
+successful observation.
+
+The fixed-slot cache is
+`$XDG_CACHE_HOME/hydra-update-examiner/state.json`, falling back to
+`~/.cache/hydra-update-examiner/state.json`. Schema 2 has a 64 KiB ceiling on
+both reads and writes and stores only the current configured channel. It is safe
+to delete this file while troubleshooting; the helper recreates it atomically.
+
+Discovery is cached for the configured channel. Normal TTLs are six hours for
+the channel revision, one hour for candidate identity, one minute for eval
+counts, two hours for gate status, and six hours for constituents. Once eval
+progress reaches the configured close threshold (or a gate is blocked), gate
+and constituent TTLs tighten to five and fifteen minutes. A changed gate also
+refreshes constituents immediately. A passed terminal gate checks the channel
+revision every minute, while paused candidates check for a replacement eval
+every five minutes. Conditional validators are not assumed for Hydra's dynamic
+responses. Stable aliases normally keep their resolved release indefinitely;
+if the expected May/November release does not exist yet, the cached fallback is
+marked provisional and discovery retries once per day until it appears.
 
 ## Development note
 
@@ -293,7 +324,8 @@ Noctalia catalog. The native beta.7/API 15 integration gate passed on
 attached panel, its documentation and scoped-settings actions, hot reload, and
 clean shutdown. The v0.3.0 harness additionally captures the widget settings
 surface and opens Noctalia's native searchable **Pick a Glyph** menu. V0.4.0
-streamlines the settings scopes without changing the polling protocol.
+streamlined the settings scopes; the request-budget refactor retains that
+presentation while replacing the backend polling lifecycle.
 
 ## License
 
