@@ -231,12 +231,13 @@ trap cancelled HUP INT TERM
 
 if [[ $profile == wallhaven-api ]]; then
   if [[ $credential != - ]]; then
-    valid_absolute_path "$credential" \
+    if ! { valid_absolute_path "$credential" \
       && [[ ${credential%/*} == "$output_dir" ]] \
       && [[ ${credential##*/} =~ ^\.wall-in-one-secret-[A-Za-z0-9._-]{1,160}$ ]] \
       && [[ -f $credential && ! -L $credential ]] \
-      && [[ $(stat -c '%u' -- "$credential" 2>/dev/null) == "$(id -u)" ]] \
-      || die credential 0 'private Wallhaven header path is unsafe' 65
+      && [[ $(stat -c '%u' -- "$credential" 2>/dev/null) == "$(id -u)" ]]; }; then
+      die credential 0 'private Wallhaven header path is unsafe' 65
+    fi
     credential_cleanup=$credential
   fi
   validate_credential "$credential" "$output_dir" \
