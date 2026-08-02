@@ -5,19 +5,18 @@ runtime. Noctalia can import it directly from
 <https://github.com/Go08er/goober-noctalia-plugins-v5>. This tree is
 intentionally separate from the Quickshell-based v4.7 repository.
 
-The v5 plugin API is currently beta. Manifests and runtime APIs can still
-change before Noctalia v5 is stable, so this source should be treated as a
-beta test source rather than a stable plugin feed. It is not included in
-Noctalia's built-in official or community catalogs; add it as a custom Git
-source using one of the methods below.
+This repository pins Noctalia tag `v5.0.0-beta.7`, whose project/runtime
+version is `5.0.0`. These plugin builds remain a beta test source rather than a
+stable feed. It is not included in Noctalia's built-in official or community
+catalogs; add it as a custom Git source using one of the methods below.
 
 ## Available plugins
 
 | Plugin | Version | Status |
 | --- | --- | --- |
-| `goober/hydra-update-examiner` | `0.4.0` | Beta.7/API 15, streamlined v5 settings |
-| `goober/nocvox` | `0.3.0` | Beta.7/API 17 focused control companion |
-| `goober/wall-in-one` | `0.4.0` | Beta.7/API 17 mixed wallpaper staging |
+| `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
+| `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
+| `goober/wall-in-one` | `0.5.0` | v5.0.0/API 17 mixed wallpaper staging |
 
 ## Repository layout
 
@@ -47,11 +46,14 @@ wall-in-one/
   service.luau
   renderer.luau
   motionbgs.luau
+  palettes.luau
+  wallhaven.luau
   panel.luau
   widget.luau
   shortcut.luau
   translations/en.json
   scripts/capture-still
+  scripts/bounded-fetch
   scripts/renderer-supervisor
   scripts/motionbgs-provider
 tools/validate.py
@@ -62,10 +64,10 @@ tests/vm/
 
 Noctalia v5 discovers Git sources through `catalog.toml`. Each plugin lives in
 a root directory matching the plugin part of its `author/plugin` id. Hydra
-targets API 15. The two service-backed MVPs target API 17 so enabling them on
-beta.7 starts their singleton services immediately and exposes lifecycle
-reasons. The pinned v5.0.0-beta.7 host accepts cumulative plugin API levels
-through 20.
+targets API 15. The two larger service-backed plugins target API 17, so enabling
+them on the pinned `v5.0.0-beta.7` source (project/runtime version `5.0.0`)
+starts their singleton services immediately and exposes lifecycle reasons. That
+host accepts cumulative plugin API levels 3 through 20.
 
 ## Install from GitHub
 
@@ -122,7 +124,7 @@ enabled = [
   "goober/nocvox",
   "goober/wall-in-one",
 ]
-auto_update = true
+auto_update = false
 
 [[plugins.source]]
 name = "goober-v5"
@@ -158,8 +160,10 @@ request a background update from the CLI:
 noctalia msg plugins update goober-v5
 ```
 
-With `plugins.auto_update = true`, Noctalia also refreshes enabled Git sources
-automatically. To uninstall the plugin and remove this custom source:
+Keep `plugins.auto_update = false` while testing a known checkout. After you
+choose to track the repository tip, setting it to `true` lets Noctalia refresh
+enabled Git sources automatically. To uninstall the plugin and remove this
+custom source:
 
 ```bash
 noctalia msg plugins disable goober/hydra-update-examiner
@@ -205,44 +209,24 @@ boundary.
 
 ### Wall-in-One coordination and pairing
 
-Wall-in-One `0.4.0` combines Noctalia stills and palette controls, the official
-Wallhaven browser, local video/mpvpaper, MotionBGS search and download, and the
-Steam Wallpaper Engine cache in one attached hub. Every live source receives a
-real persisted still for the lock-screen fallback, wallpaper hooks, color
-generation, overview/backdrop, and compositor blur or xray consumers.
+Wall-in-One `0.5.0` coordinates Noctalia stills and palettes, local video,
+Wallpaper Engine projects, Wallhaven, and bounded MotionBGS browsing in one
+hub. Reusable pairings bind each source to a real static representative and a
+complete theme policy. Named rotate/shuffle playlists can mix all media types,
+run independently per output, and select lower-listed month/weekday/time rules
+when schedules overlap.
 
-Its per-output scheduler can mix static paths, downloaded/local videos, and
-numeric Workshop projects. It persists interval and sequential, shuffle-bag,
-or random order plus start/stop/pause/resume/next/previous controls. Generated
-video and Workshop frames default to Noctalia's wallpaper directory.
+Wall-in-One starts only renderers it owns and switches them by exact PID. The
+last pairing's static backing, theme mode, and palette remain configured when a
+dynamic renderer stops or the plugin is disabled, so Noctalia has a persisted
+desktop and color state on its next start. Disable Noctalia's independent
+wallpaper slideshow on outputs controlled by Wall-in-One to avoid two writers.
 
-Auto backend mode prefers an enabled external W Engine or mpvpaper plugin.
-Apply-by-source and mixed live cycling use Wall-in-One's internal owner only
-after that external plugin is disabled, preventing competing renderers. Owned
-children stay in one cancellable `runStream` process group on the safe bottom
-layer; Noctalia's static surface remains enabled and teardown needs no queued
-restoration call.
-
-MotionBGS has no versioned API, so the scraper is bounded, rate-limited, and
-best effort. The hub always retains a direct MotionBGS browser link. A scraper
-failure never affects downloaded videos, paired stills, or saved cycles. Every
-download is installed atomically with a provenance sidecar; wallpaper rights
-remain with their respective creators, and the plugin's MIT license does not
-grant redistribution rights. WaifuX's public GPL-3.0 profile was used only to
-cross-check factual site routes and selectors; no WaifuX implementation code
-was copied.
-
-Noctalia still has one global palette, not one per output. Color sync and the
-optional palette-leader connector remain explicit settings; an independent
-lock-screen image remains untouched.
-
-Open the hub directly with
-`noctalia msg panel-toggle goober/wall-in-one:hub`, then assign **Open
-Wall-in-One** to a gesture if you want a permanent UI route. The Wall-in-One
-bar glyph and NocVox's idle, active, stopped, and unknown-state glyphs use
-Noctalia's native per-placement searchable selector. See
-[`wall-in-one/README.md`](wall-in-one/README.md) for renderer ownership,
-provider fallbacks, provenance, and the full capability matrix.
+Open the hub with
+`noctalia msg panel-toggle goober/wall-in-one:hub`. See
+[`wall-in-one/README.md`](wall-in-one/README.md) for user-facing behavior and
+ownership boundaries, [ADAPTERS.md](wall-in-one/ADAPTERS.md) for provider
+protocols, and [TESTING.md](wall-in-one/TESTING.md) for validation coverage.
 
 ### Hydra Update Examiner customization
 
@@ -268,20 +252,26 @@ python3 nocvox/tests/check.py
 python3 wall-in-one/tests/test_contract.py
 ```
 
+`tools/validate.py` mirrors the official plugin-file, README, translation, and
+tag contracts. This custom-source repository additionally requires a
+per-plugin `LICENSE`, checks `catalog.toml` against every manifest, and validates
+runtime translation/config references; those are deliberate local policies,
+not extra upstream submission requirements.
+
 Run the native v5 integration test in a disposable NixOS VM with:
 
 ```bash
-nix build -L .#vm-test
-nix build -L .#vm-test-nocvox
-nix build -L .#vm-test-wall-in-one
+nix build -L path:.#vm-test
+nix build -L path:.#vm-test-nocvox
+nix build -L path:.#vm-test-wall-in-one
 ```
 
-The VM harnesses are pinned to the exact beta.7 host revision. They use
-in-guest sources, headless Sway, software rendering, and deterministic command
-fixtures without touching the host Noctalia session or configuration. The
-original `vm-test` retains Hydra's render and glyph-picker coverage; the two
-isolated checks exercise the companion/coordinator services, failure
-boundaries, capture/pairing policy, and process-ownership rules. See
+The VM harnesses pin Noctalia tag `v5.0.0-beta.7`, whose project/runtime version
+is `5.0.0`. They use in-guest sources, headless Sway, software rendering, and
+deterministic command fixtures without touching the host Noctalia session or
+configuration. The original `vm-test` retains Hydra's render and glyph-picker
+coverage; the two isolated targets exercise the companion/coordinator services,
+failure boundaries, capture/pairing policy, and process-ownership rules. See
 `tests/vm/README.md` for details.
 
 ## Editor setup
@@ -290,16 +280,18 @@ The included `.luaurc` matches Noctalia's nonstrict plugin runtime. For host API
 autocomplete and typo diagnostics, configure `luau-lsp` to use the current
 [`noctalia.d.luau`](https://github.com/noctalia-dev/official-plugins/blob/main/noctalia.d.luau)
 from the official plugin repository as a definition file. It is intentionally
-not vendored here while the beta API is changing quickly.
+not vendored here while these beta plugin implementations are changing quickly.
 
 ## Publication status
 
 This repository is a directly importable custom Git source for native v5
-testing. Hydra Update Examiner and NocVox are ready for direct testing here; the
-next Wall-in-One revision remains local staging work until its own publication
-step. None of the plugins has been submitted to, accepted into, or registered
-with Noctalia's built-in official or community catalogs. See `PORTING.md` and
-each plugin README for migration decisions and remaining work.
+testing. Hydra Update Examiner and NocVox are ready for direct testing here. The
+Wall-in-One 0.5 staging tree passes its expanded offline contract and full
+NixOS VM gate; the disposable-desktop gate remains pending, so it should not yet
+be treated as unattended daily-driver software. None of the
+plugins has been submitted to, accepted into, or registered with Noctalia's
+built-in official or community catalogs. See each plugin README for its
+supported behavior, requirements, and remaining test boundaries.
 
 ## License
 

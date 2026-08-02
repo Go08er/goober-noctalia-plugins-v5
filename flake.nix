@@ -2,7 +2,7 @@
   description = "Noctalia v5 plugin source and isolated VM tests";
 
   inputs = {
-    # Match the Nixpkgs snapshot used by the tagged beta.7 host.
+    # Match the Nixpkgs snapshot used by the pinned Noctalia 5.0.0 host.
     nixpkgs.url =
       "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1040357.e2587caef70c/nixexprs.tar.xz";
 

@@ -2,6 +2,17 @@
 
 All notable staging changes will be recorded here.
 
+## Repository validation
+
+- Mirror the official v5 README, required-file, translation-segment, and tag
+  contracts locally; keep per-plugin `LICENSE` files as an explicit additional
+  repository policy rather than presenting them as an upstream requirement.
+- Remove the artificial plugin-API ceiling so future positive API levels are
+  accepted while capability-specific minimums remain enforced.
+- Restructure the NocVox and Wall-in-One READMEs around the published Plugin,
+  Usage, Requirements, and Settings sections, and document why Wall-in-One's
+  isolated Luau entries cannot be split into ordinary imported modules yet.
+
 ## Hydra Update Examiner 0.4.0 - Native v5 settings scopes
 
 - Keep the shared channel, poll interval, and readiness threshold in the plugin
@@ -19,6 +30,121 @@ All notable staging changes will be recorded here.
   toggles recording, right opens details, and middle opens widget settings.
 - Remove the now-empty plugin-settings button from the details panel and point
   users to the exact per-placement editor instead.
+
+## Unreleased — Wall-in-One 0.5.0 staging
+
+- Remove write-only renderer metadata arrays so every shipped shell helper is
+  clean under ShellCheck 0.11.0, and make the offline socket fixture explicit
+  when a restricted test sandbox forbids AF_UNIX `bind()`.
+- Enforce one-to-one manifest-setting translation coverage, remove the retired
+  random-order label, and keep persisted playlist order limited to Rotate or
+  Shuffle with Random as an explicit navigation action.
+- Refactor late panel presentation/navigation helpers into bounded namespaces
+  so the complete hub compiles below Luau's 200-local-register limit; make the
+  VM compile, open, render, screenshot, and exercise IPC through the real hub.
+- Add bounded exponential restart backoff for an owned renderer that exits
+  after its startup probe, with exact acknowledgement/state resolution and a
+  stable-run reset instead of an immediate playlist restart loop.
+- Keep the last pairing's Noctalia static backing, theme mode, and palette
+  selection configured when Wall-in-One stops. The VM now compares all three
+  values across disable and verifies bounded palette teardown plus exact-PID
+  child cleanup.
+- Add a six-page attached-hub router with inset playlist/display routes,
+  reusable still/video/Workshop pairing drawers, panel drag/drop with explicit
+  button fallbacks, and per-screen default, playback, and calendar controls.
+- Add config-schema-4 reusable pairings. Playlist occurrences retain stable
+  IDs and safe bundle snapshots, follow catalog edits while linked, and detach
+  without data loss when their source catalog card is deleted.
+- Replace numeric schedule priority with visible list precedence, add month
+  filters and overnight prior-date semantics, and add per-output rotate/shuffle
+  and interval overrides with an explicit inherit state.
+- Preview built-in, community, and custom palette roles in pairing editors. For
+  wallpaper generators, call Noctalia's exact non-applying image palette CLI,
+  serialize work, identify sources by SHA-256, reject content changes before
+  accepting output, clean owned reload orphans, and keep a bounded cache.
+- Keep direct wallhaven.cc and MotionBGS links independent of their optional
+  integration paths, so users retain a wallpaper-focused browser fallback.
+- Split the coordinator's compact protocol-4 lifecycle snapshot from
+  revisioned config, runtime, and library domains. Publish large state only
+  when dirty, coalesce panel rendering, and retain a protocol-3 rolling-reload
+  fallback instead of repeatedly rebuilding the full hub from one shared key.
+- Keep heavy domain publication inside Noctalia's callback budget by trusting
+  explicit dirty marks, reusing already-normalized config documents, and using
+  native JSON only for exact delta suppression of the small lifecycle object.
+- Keep normalized plugin settings on the bounded lifecycle object so a settings
+  edit does not republish the unchanged pairing and playlist catalog.
+- Make library rescans path-sensitive and defer them out of Noctalia's bounded
+  settings callback; provider, playback, palette, and gesture edits no longer
+  enumerate unchanged media and Workshop roots.
+- Queue live-renderer continuation before observational status publication after
+  a paired still is applied, preventing callback-budget pressure from leaving a
+  dynamic entry with only its backing image.
+- Restore a previously running playlist's exact current entry after service
+  restart without consuming rotate history or shuffle state, while preserving
+  future due times and schedule precedence.
+- Route native Wallhaven and community-palette HTTPS ingress through a bundled
+  strict-origin bounded helper with redirects and ambient curl config disabled,
+  private header-file credentials, resource/file-size limits, cancellation
+  cleanup, response validation, and atomic no-replace installation.
+- Disable ambient curl configuration in the bounded MotionBGS helper so its
+  explicit same-origin redirect loop remains authoritative, and use bounded
+  regular-file reads consistently for transport responses and stored backups.
+- Keep managed roots authoritative when image/video roots overlap, require
+  exact provider sidecars before exposing deletion, refresh same-path provider
+  downloads by completion nonce, and give per-output renderer sockets
+  collision-free private names.
+- Centralize bounded Workshop-ID validation, separate parameterized IPC-only
+  actions from gesture settings, and expose the existing volume step controls
+  consistently in the hub and widget action pickers.
+- Make VM provider readiness probes one-shot, then use bounded read-only state
+  polling with focused fixture/call diagnostics instead of replaying requests
+  while a provider is still working.
+- Coalesce provider-inventory refresh bursts behind one active probe and one
+  boolean follow-up latch, so a hot-swap request is not lost without allowing
+  IPC events or subprocesses to accumulate.
+- Replace the legacy per-output reel/cycle model with named reusable playlists,
+  stable entry IDs, rotate/shuffle order, output-specific Quick Choice parking,
+  independent per-output run state, and ordered month/weekday/time schedules.
+- Bundle optional dynamic media, selected/automatic still policy, and a complete
+  Noctalia theme policy in each playlist entry. New entries created in the
+  editor default to adaptive wallpaper colors while preserving an explicit
+  **Keep Current** compatibility choice.
+- Add bounded built-in, wallpaper-generator, community, and custom palette
+  inventory plus missing-selection fallback diagnostics and global
+  palette-leader arbitration.
+- Add a native Wallhaven official-API browser with optional header-only API-key
+  authentication, bounded search/detail, validated managed JPG/PNG download,
+  provenance sidecars, and the separate official panel as a fallback.
+- Add one shared `bottom` or `background` layer setting for internally owned
+  mpvpaper and `linux-wallpaperengine` children, retaining `bottom` as the safe
+  default and documenting the compositor-specific niri backdrop use case.
+- Capture rendered Workshop PNGs through the exact owned
+  `linux-wallpaperengine --screenshot` path with private staging, stable-file
+  detection, atomic validation, and source-video/preview fallback. Preserve the
+  adapter's existing 1–120-frame setting while clamping only internal capture
+  to linux-wallpaperengine's five-frame maximum.
+- Serialize native capture with existing per-output ownership, restore only a
+  still-current displaced child, and reject stale callbacks after stop, hotplug,
+  backend change, reload, or disable without signalling a foreign renderer.
+- Allow internally owned mpvpaper and Wallpaper Engine children to coexist on
+  different outputs, with exact-PID break-before-make replacement on one output
+  and explicit external-provider ownership boundaries.
+- Add capability-driven playback IPC. mpvpaper uses a private socket for
+  pause/resume/toggle, mute/unmute, and volume; Wallpaper Engine exposes only
+  its supported signal controls. Commands are one-shot and idle heartbeats do
+  not publish unchanged state.
+- Add user-selected image/video roots, shared-root media classification, marked
+  managed MotionBGS and Automatic Stills children, sidecar-gated deletion, and
+  automatic cleanup of only the managed still belonging to an explicitly
+  deleted managed video. Add a marked native Wallhaven child while keeping files
+  owned by the separate official plugin outside Wall-in-One delete authority.
+- Enable automatic still creation/pairing by default, keep manual exports in
+  the user image root, make configured-manual pairing an immediate standalone
+  backing action, and add Steam launch plus Workshop links.
+- Carry the exact active Workshop ID and selected layer in renderer status and
+  migrate config/runtime storage to schema 4/6 with stable pairing/playlist state, a
+  bounded per-output `current_workshops` map, and recoverable two-document
+  migration from config schema 1/2/3 and runtime schema 1–5.
 
 ## Wall-in-One 0.4.0 - Unified live library and mixed scheduler
 
