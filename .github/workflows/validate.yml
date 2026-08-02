@@ -19,6 +19,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          # The Hydra request-budget suite compares against the pre-refactor
+          # helper read from an earlier revision, so the default shallow
+          # checkout is not enough.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -34,4 +39,5 @@ jobs:
         run: |
           python3 tools/validate.py --require-shellcheck
           python3 nocvox/tests/check.py
+          python3 hydra-update-examiner/tests/test_request_budget.py
           python3 wall-in-one/tests/test_contract.py
