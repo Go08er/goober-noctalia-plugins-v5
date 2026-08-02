@@ -19,8 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 PLUGIN_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*$")
 TRANSLATION_KEY_SEGMENT = re.compile(r"^[a-z0-9-][a-z0-9_-]*$")
-OLDEST_SUPPORTED_PLUGIN_API = 3
-CURRENT_RELEASED_PLUGIN_API = 20
 WIDGET_ACTIONS_PLUGIN_API = 14
 OPEN_SETTINGS_PLUGIN_API = 15
 DESCRIPTION_MAX_CHARS = 120
@@ -63,6 +61,8 @@ CATALOG_FIELDS = (
     "dependencies",
 )
 REQUIRED_MANIFEST_FIELDS = set(CATALOG_FIELDS) - {"deprecated"}
+# Public-catalog policy mirrored from noctalia-dev/official-plugins validator
+# blob 901a13bda26a6fa12188f7d5684015c28bd79392 (checked 2026-08-02).
 ALLOWED_TAGS = {
     "ai",
     "animation",
@@ -108,6 +108,30 @@ ALLOWED_TAGS = {
     "void",
     "wallpaper",
 }
+# Keep this fixed allowlist in parity with the official catalog validator.
+# New catalog tags need an upstream policy change; accepting arbitrary local
+# values would only defer the failure until submission.
+ROOT_FIELDS = set(CATALOG_FIELDS) | set(ENTRY_TYPES) | {"setting"}
+
+# These are the current upstream catalog requirements. LICENSE is an explicit
+# additional policy for this repository, not something the upstream validator
+# presently requires.
+UPSTREAM_REQUIRED_PLUGIN_FILES = ("README.md", "thumbnail.webp", "translations/en.json")
+LOCAL_REQUIRED_PLUGIN_FILES = ("LICENSE",)
+
+# Raw HTML is unsupported on catalog plugin pages. Markdown autolinks such as
+# <https://example.com> deliberately do not match this expression.
+HTML_RE = re.compile(
+    r"<!--|<\?|<!\[CDATA\[|<![A-Z]|"
+    r"</[A-Za-z][A-Za-z0-9-]*\s*>|"
+    r"<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*\s*/?>",
+    re.DOTALL,
+)
+INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", re.DOTALL)
+FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 TRANSLATION_CALL = re.compile(r'noctalia\.(?:tr|trp)\(\s*["\']([^"\']+)["\']')
 CONFIG_CALL = re.compile(
     r'(?:noctalia\.getConfig|\bcfg|\bwidgetCfg)\(\s*["\']([^"\']+)["\']'
@@ -179,6 +203,89 @@ def flatten_strings(value: Any, prefix: str = "") -> dict[str, str]:
     return flattened
 
 
+def is_non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def raw_html_line(markdown: str) -> int | None:
+    """Return the first raw-HTML line outside Markdown code, if present."""
+
+    visible: list[str] = []
+    fence_char = ""
+    fence_length = 0
+    for line in markdown.splitlines(keepends=True):
+        if fence_char:
+            closing = rf"^ {{0,3}}{re.escape(fence_char)}{{{fence_length},}}\s*$"
+            if re.match(closing, line.rstrip("\r\n")):
+                fence_char = ""
+                fence_length = 0
+            visible.append("\n" if line.endswith(("\n", "\r")) else "")
+            continue
+
+        opening = FENCE_OPEN_RE.match(line)
+        if opening:
+            fence = opening.group(1)
+            fence_char = fence[0]
+            fence_length = len(fence)
+            visible.append("\n" if line.endswith(("\n", "\r")) else "")
+            continue
+        visible.append(line)
+
+    text = "".join(visible)
+    text = INLINE_CODE_RE.sub(
+        lambda match: "".join("\n" if char == "\n" else " " for char in match.group(0)),
+        text,
+    )
+    match = HTML_RE.search(text)
+    if match is None:
+        return None
+    return text.count("\n", 0, match.start()) + 1
+
+
+def markdown_headings(markdown: str) -> list[tuple[int, str, int, int]]:
+    """Return ATX headings outside fenced code as level/title/start/end."""
+
+    headings: list[tuple[int, str, int, int]] = []
+    fence_char = ""
+    fence_length = 0
+    offset = 0
+    for line in markdown.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        if fence_char:
+            closing = rf"^ {{0,3}}{re.escape(fence_char)}{{{fence_length},}}\s*$"
+            if re.match(closing, stripped):
+                fence_char = ""
+                fence_length = 0
+            offset += len(line)
+            continue
+
+        opening = FENCE_OPEN_RE.match(line)
+        if opening:
+            fence = opening.group(1)
+            fence_char = fence[0]
+            fence_length = len(fence)
+            offset += len(line)
+            continue
+
+        match = ATX_HEADING_RE.match(stripped)
+        if match:
+            headings.append((len(match.group(1)), match.group(2).strip(), offset, offset + len(line)))
+        offset += len(line)
+    return headings
+
+
+def section_body(markdown: str, headings: list[tuple[int, str, int, int]], index: int) -> str:
+    """Return a heading body, including nested subsections."""
+
+    level, _title, _start, body_start = headings[index]
+    body_end = len(markdown)
+    for next_level, _next_title, next_start, _next_end in headings[index + 1 :]:
+        if next_level <= level:
+            body_end = next_start
+            break
+    return markdown[body_start:body_end].strip()
+
+
 def webp_dimensions(header: bytes) -> tuple[int, int] | None:
     """Read dimensions from the VP8X, VP8, or VP8L WebP header variants."""
     if len(header) < 16 or header[:4] != b"RIFF" or header[8:12] != b"WEBP":
@@ -219,6 +326,42 @@ def normalized_catalog_value(row: dict[str, Any], field: str) -> Any:
     if field in {"tags", "dependencies"}:
         return row.get(field, [])
     return row.get(field)
+
+
+def manifest_setting_translation_keys(manifest: dict[str, Any]) -> set[str]:
+    """Collect every translation key owned by a manifest setting surface."""
+
+    keys: set[str] = set()
+
+    def collect(settings: Any) -> None:
+        if not isinstance(settings, list):
+            return
+        for setting in settings:
+            if not isinstance(setting, dict):
+                continue
+            for field in ("label_key", "description_key"):
+                value = setting.get(field)
+                if isinstance(value, str) and value:
+                    keys.add(value)
+            options = setting.get("options")
+            if not isinstance(options, list):
+                continue
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                value = option.get("label_key")
+                if isinstance(value, str) and value:
+                    keys.add(value)
+
+    collect(manifest.get("setting"))
+    for entry_type in ENTRY_TYPES:
+        entries = manifest.get(entry_type)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                collect(entry.get("setting"))
+    return keys
 
 
 class Validator:
@@ -273,7 +416,6 @@ class Validator:
     def load_translations(self, plugin_dir: Path) -> dict[str, str]:
         english_path = plugin_dir / "translations" / "en.json"
         if not english_path.is_file():
-            self.error(plugin_dir, "missing translations/en.json")
             return {}
         try:
             english = flatten_strings(load_json(english_path))
@@ -507,6 +649,112 @@ class Validator:
                 f"noctalia.openSettings requires plugin_api >= {OPEN_SETTINGS_PLUGIN_API}",
             )
 
+    def validate_readme(self, plugin_dir: Path, manifest: dict[str, Any]) -> None:
+        """Mirror the public catalog's required plugin-page documentation."""
+
+        readme = plugin_dir / "README.md"
+        if not readme.is_file():
+            return
+        try:
+            contents = readme.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            self.error(readme, "must be UTF-8 text")
+            return
+
+        line = raw_html_line(contents)
+        if line is not None:
+            self.error(readme, f"raw HTML on line {line} is not allowed; use Markdown instead")
+
+        headings = markdown_headings(contents)
+        h1_indexes = [index for index, heading in enumerate(headings) if heading[0] == 1]
+        if not h1_indexes:
+            self.error(readme, "missing a level-one plugin title ('# Plugin Name')")
+        else:
+            h1_index = h1_indexes[0]
+            intro_start = headings[h1_index][3]
+            intro_end = headings[h1_index + 1][2] if h1_index + 1 < len(headings) else len(contents)
+            intro = contents[intro_start:intro_end]
+            intro_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'_-]*", intro)
+            if len(intro_words) < 8:
+                self.error(readme, "add a short introduction below the title explaining what the plugin does")
+
+        h2_by_name = {
+            title.casefold(): index
+            for index, (level, title, _start, _end) in enumerate(headings)
+            if level == 2
+        }
+        for section in ("Plugin", "Usage"):
+            index = h2_by_name.get(section.casefold())
+            if index is None:
+                self.error(readme, f"missing required '## {section}' section")
+            elif not section_body(contents, headings, index):
+                self.error(readme, f"'## {section}' section must not be empty")
+
+        plugin_section_index = h2_by_name.get("plugin")
+        plugin_section = (
+            section_body(contents, headings, plugin_section_index)
+            if plugin_section_index is not None
+            else ""
+        )
+        plugin_id = manifest.get("id")
+        if not is_non_empty_string(plugin_id):
+            return
+        documented_id = f"`{plugin_id}`"
+        if documented_id not in plugin_section:
+            self.error(readme, f"Plugin section must document the manifest id as {documented_id}")
+
+        for entry_type in ENTRY_TYPES:
+            entries = manifest.get(entry_type, [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or not is_non_empty_string(entry.get("id")):
+                    continue
+                entry_id = entry["id"]
+                documented_entry = f"`{entry_id}`"
+                if documented_entry not in plugin_section:
+                    self.error(
+                        readme,
+                        f"Plugin section must document {entry_type} entry '{entry_id}' as {documented_entry}",
+                    )
+                if entry_type == "panel":
+                    command = f"noctalia msg panel-toggle {plugin_id}:{entry_id}"
+                    if command not in contents:
+                        self.error(readme, f"missing panel IPC command; add: {command}")
+                if entry_type == "launcher_provider" and is_non_empty_string(entry.get("prefix")):
+                    prefix = f"`/{entry['prefix']}`"
+                    if prefix not in plugin_section:
+                        self.error(readme, f"missing launcher prefix {prefix} for entry '{entry_id}'")
+
+        dependencies = manifest.get("dependencies", [])
+        if isinstance(dependencies, list) and dependencies:
+            requirements_index = h2_by_name.get("requirements")
+            if requirements_index is None:
+                self.error(readme, "plugins with dependencies require a '## Requirements' section")
+                requirements = ""
+            else:
+                requirements = section_body(contents, headings, requirements_index)
+                if not requirements:
+                    self.error(readme, "'## Requirements' section must not be empty")
+            for dependency in dependencies:
+                if is_non_empty_string(dependency) and f"`{dependency}`" not in requirements:
+                    self.error(readme, f"Requirements must mention manifest dependency `{dependency}`")
+
+        has_settings = bool(manifest.get("setting"))
+        for entry_type in SETTING_OWNER_TYPES:
+            entries = manifest.get(entry_type, [])
+            if isinstance(entries, list) and any(
+                isinstance(entry, dict) and bool(entry.get("setting")) for entry in entries
+            ):
+                has_settings = True
+                break
+        if has_settings:
+            settings_index = h2_by_name.get("settings")
+            if settings_index is None:
+                self.error(readme, "plugins with settings require a '## Settings' section")
+            elif not section_body(contents, headings, settings_index):
+                self.error(readme, "'## Settings' section must not be empty")
+
     def validate_plugin(self, plugin_dir: Path) -> tuple[dict[str, Any], Path]:
         manifest_path = plugin_dir / "plugin.toml"
         try:
@@ -516,6 +764,16 @@ class Validator:
             return {}, manifest_path
 
         translations = self.load_translations(plugin_dir)
+        for field in sorted(set(manifest) - ROOT_FIELDS):
+            self.error(manifest_path, f"unknown root field '{field}'")
+        setting_translation_keys = manifest_setting_translation_keys(manifest)
+        for key in sorted(
+            key for key in translations if key.startswith("settings.") and key not in setting_translation_keys
+        ):
+            self.error(
+                plugin_dir / "translations" / "en.json",
+                f"orphan manifest-setting translation '{key}'",
+            )
         for field in REQUIRED_MANIFEST_FIELDS:
             self.require(field in manifest, manifest_path, f"missing publishing metadata '{field}'")
 
@@ -541,13 +799,10 @@ class Validator:
         plugin_api = manifest.get("plugin_api")
         if type(plugin_api) is not int or plugin_api <= 0:
             self.error(manifest_path, "plugin_api must be a positive integer")
-        else:
-            self.require(
-                OLDEST_SUPPORTED_PLUGIN_API <= plugin_api <= CURRENT_RELEASED_PLUGIN_API,
-                manifest_path,
-                f"plugin_api must be supported by the current released host "
-                f"({OLDEST_SUPPORTED_PLUGIN_API}..{CURRENT_RELEASED_PLUGIN_API})",
-            )
+        # Deliberately do not impose a local upper ceiling. The upstream
+        # official validator accepts any positive API level so a repository
+        # does not reject plugins written for a host released after the
+        # validator. Feature-specific minimum gates remain checked below.
         for field in ("tags", "dependencies"):
             value = manifest.get(field)
             self.require(
@@ -571,9 +826,20 @@ class Validator:
         if "deprecated" in manifest:
             self.require(type(manifest["deprecated"]) is bool, manifest_path, "deprecated must be a boolean")
 
-        for required_asset in ("README.md", "LICENSE", "thumbnail.webp"):
+        for required_asset in UPSTREAM_REQUIRED_PLUGIN_FILES:
             asset = plugin_dir / required_asset
-            self.require(asset.is_file() and asset.stat().st_size > 0, manifest_path, f"missing non-empty {required_asset}")
+            self.require(
+                asset.is_file() and asset.stat().st_size > 0,
+                manifest_path,
+                f"missing non-empty upstream-required {required_asset}",
+            )
+        for required_asset in LOCAL_REQUIRED_PLUGIN_FILES:
+            asset = plugin_dir / required_asset
+            self.require(
+                asset.is_file() and asset.stat().st_size > 0,
+                manifest_path,
+                f"missing non-empty {required_asset} (local repository policy; not required upstream)",
+            )
         thumbnail = plugin_dir / "thumbnail.webp"
         if thumbnail.is_file():
             size = thumbnail.stat().st_size
@@ -595,6 +861,8 @@ class Validator:
                 thumbnail,
                 f"thumbnail must be {THUMBNAIL_SIZE[0]}x{THUMBNAIL_SIZE[1]}",
             )
+
+        self.validate_readme(plugin_dir, manifest)
 
         root_settings = self.validate_settings(
             manifest_path,
