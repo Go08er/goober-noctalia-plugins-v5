@@ -231,11 +231,12 @@ the public NixOS/Nixpkgs channels mapped by the backend.
 
 ## Requirements
 
-The current test target is Noctalia `v5.0.0-beta.7`. The manifest targets plugin
-API level 15: API 14 provides overridable widget gesture defaults, and API 15
-provides the scoped plugin-settings action used by the attached panel. The
-beta.7 host supports cumulative API levels through 20. The port also needs
-these commands on `PATH`:
+The pinned test source is Noctalia tag `v5.0.0-beta.7`, whose project/runtime
+version is `5.0.0`. The manifest targets plugin API level 15: API 14 provides
+overridable widget gesture defaults, and API 15 provides the scoped
+plugin-settings action used by the attached panel. This host supports
+cumulative plugin API levels 3 through 20. The port also needs these commands
+on `PATH`:
 
 - `bash`
 - `curl`

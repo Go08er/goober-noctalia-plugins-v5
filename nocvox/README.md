@@ -30,20 +30,27 @@ voxtype status --follow --format json --extended --icon-theme text
 Noctalia owns that child and terminates it when the service entry reloads or is
 disabled. The plugin has no command that changes daemon lifecycle.
 
-## Entries
+## Plugin
 
-| Entry | ID | Responsibility |
-|---|---|---|
-| Service | `goober/nocvox:listener` | Owns the single status stream, state normalization, safe recording commands, and on-demand diagnostics. |
-| Widget | `goober/nocvox:nocvox` | Renders status and exposes native per-placement actions and presentation settings. |
-| Panel | `goober/nocvox:details` | Shows supported controls, live status details, and privacy-safe diagnostics. |
+Manifest ID: `goober/nocvox`.
+
+| Entry | Manifest entry ID | Routed ID | Responsibility |
+|---|---|---|---|
+| Service | `listener` | `goober/nocvox:listener` | Owns the single status stream, state normalization, safe recording commands, and on-demand diagnostics. |
+| Widget | `nocvox` | `goober/nocvox:nocvox` | Renders status and exposes native per-placement actions and presentation settings. |
+| Panel | `details` | `goober/nocvox:details` | Shows supported controls, live status details, and privacy-safe diagnostics. |
 
 Entries exchange plain state through `noctalia.state`; no widget placement owns
 another follower. This follows Noctalia's documented
 [shared-state and stream lifecycle](https://docs.noctalia.dev/v5/plugins/development/runtime-api/)
 model.
 
-## Controls and default actions
+## Requirements
+
+Install and configure VoxType independently, and ensure its `voxtype` command
+is available on `PATH`. NocVox does not install or manage that daemon.
+
+## Usage
 
 Recording operations are collected in the attached details panel: Start, Stop
 and transcribe, Cancel/discard, live status, and privacy-safe diagnostics. The
@@ -125,7 +132,7 @@ recommendation. **Copy safe summary** copies only those build facts plus current
 status metadata. It never includes speech, transcripts, audio, logs, or prior
 clipboard contents.
 
-## Installation and configuration
+## Settings
 
 Use Noctalia's normal source/plugin UI and then place the VoxType widget through
 the bar editor. Installing does not enable or place it automatically. The plugin
