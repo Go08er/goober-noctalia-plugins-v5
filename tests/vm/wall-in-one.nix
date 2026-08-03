@@ -1522,7 +1522,7 @@ pkgs.testers.runNixOSTest (
           result = []
           for line in machine.succeed("cat /tmp/wall-in-one-vm-noctalia-calls.log").splitlines():
               fields = shlex.split(line)
-              # Bash %q uses $'...\\t...' for the adapter's tab-delimited
+              # Bash %q uses $'...\\t...' for the wrapper's tab-delimited
               # payload. Python shlex removes the quotes but intentionally
               # leaves ANSI-C escapes untouched, so normalize that one form
               # before asserting the IPC field contract.
@@ -2825,11 +2825,11 @@ pkgs.testers.runNixOSTest (
       machine.fail("test -e " + motion_download + ".part")
       machine.fail("test -e " + motion_download + ".motionbgs.json.part")
 
-      # The explicit MotionBGS directory intentionally equals the user video
-      # root. Sidecar-proven downloads must still win ownership classification
-      # and remain deletable, while unrelated files in that root stay owned by
-      # the user. Re-downloading the same deterministic path must refresh the
-      # library from the completion nonce rather than the path alone.
+      # The managed MotionBGS directory is a dedicated child of the selected
+      # user video root. Sidecar-proven downloads in that child remain deletable,
+      # while unrelated files at the selected root stay owned by the user.
+      # Re-downloading the same deterministic path must refresh the library from
+      # the completion nonce rather than the path alone.
       wait_library(
           scanning=False,
           videos=7,
@@ -3361,7 +3361,7 @@ pkgs.testers.runNixOSTest (
           "grep -F 'noctalia msg wallpaper-set' ${materializedRoot}/service.luau"
       )
       machine.succeed(
-          "grep -F 'capture-v1' ${materializedRoot}/service.luau"
+          "grep -F 'action = \"capture_w_engine\"' ${materializedRoot}/service.luau"
       )
       machine.fail(
           "grep -F 'linux-wallpaperengine' ${materializedRoot}/scripts/capture-still"
