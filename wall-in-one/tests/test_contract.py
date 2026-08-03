@@ -4688,6 +4688,41 @@ def test_ui_and_documentation_surface() -> None:
         assert retired not in readme, f"README still advertises the retired preview limitation: {retired!r}"
 
 
+def test_declarative_ui_layout_contract() -> None:
+    """Reject silent v5 layout mistakes that the Luau compiler cannot type-check."""
+
+    panel = text("panel.luau")
+    assert 'variant = "danger"' not in panel, "Noctalia v5 calls the destructive button variant 'destructive'"
+    assert panel.count('variant = if deleteArmed then "destructive" else "ghost"') == 2
+
+    box_calls = re.findall(r"ui\.box\(\{(.*?)\}\)", panel, flags=re.DOTALL)
+    assert len(box_calls) == panel.count("ui.box({"), "ui.box must not receive a child table"
+    for properties in box_calls:
+        assert "align =" not in properties and "justify =" not in properties, (
+            "ui.box is decorative in Noctalia v5; use a row or column for child layout"
+        )
+
+    require_all(
+        panel,
+        (
+            "local BROWSER_GRID_COLUMNS = 4",
+            "function panelUi.appendExplicitGrid(children, items, visible, columns, cardBuilder)",
+            'preview.node("wallhaven", item, 216, 122, "photo")',
+            'preview.node("motionbgs", item, 216, 122, "movie")',
+            "panelUi.appendExplicitGrid(children, items, visible, BROWSER_GRID_COLUMNS",
+            "local firstWeekdays = {}",
+            "local secondWeekdays = {}",
+            "local firstMonthRow = {}",
+            "local secondMonthRow = {}",
+            "local thirdMonthRow = {}",
+        ),
+        "bounded explicit browser grids and split schedule controls",
+    )
+    assert panel.count("panelUi.appendExplicitGrid(") == 4, (
+        "the grid helper must serve Wallhaven, MotionBGS, and all three local libraries"
+    )
+
+
 def main() -> None:
     test_manifest_and_translations()
     test_schema_document_fixtures()
@@ -4708,6 +4743,7 @@ def main() -> None:
     test_renderer_supervisor()
     test_motionbgs_contract()
     test_ui_and_documentation_surface()
+    test_declarative_ui_layout_contract()
     print("Wall-in-One v0.6 offline contract passed.")
 
 

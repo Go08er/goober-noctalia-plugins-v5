@@ -17,6 +17,7 @@ local PROVIDER_RESULT_CHUNK = 12
 local LIBRARY_ENTRY_CHUNK = 8
 local PLAYLIST_ENTRY_CHUNK = 12
 local PAIRING_CARD_CHUNK = 12
+local BROWSER_GRID_COLUMNS = 4
 
 local status = nil
 local lifecycleStatus = nil
@@ -2001,6 +2002,23 @@ function panelUi.appendVisibilityControls(children, total, visible, chunkSize, s
     end
 end
 
+function panelUi.appendExplicitGrid(children, items, visible, columns, cardBuilder)
+    local limit = math.min(#items, math.max(0, math.floor(tonumber(visible) or 0)))
+    local columnCount = math.max(1, math.floor(tonumber(columns) or 1))
+    local index = 1
+    while index <= limit do
+        local cards = {}
+        for offset = 0, columnCount - 1 do
+            local itemIndex = index + offset
+            if itemIndex <= limit then
+                table.insert(cards, cardBuilder(items[itemIndex], itemIndex))
+            end
+        end
+        table.insert(children, ui.row({ gap = 8, align = "start", justify = "center" }, cards))
+        index += columnCount
+    end
+end
+
 function panelUi.actionButton(action, glyph, variant, grow)
     return ui.button({
         text = actionLabel(action),
@@ -2767,55 +2785,72 @@ local function wallhavenSection()
                 }),
             })
         )
-        for index = 1, math.min(#items, wallhavenVisibleResults) do
-            local item = items[index]
-            local resultItem = item
-            table.insert(
-                children,
-                ui.row({ gap = 7, align = "center", padding = 8, radius = 9, fill = "surface_variant/0.25" }, {
-                    preview.node("wallhaven", item, 112, 63, "photo"),
-                    ui.column({ gap = 1, flexGrow = 1 }, {
-                        ui.label({
-                            text = tostring(item.id or noctalia.tr("panel.wallhaven.default_name"))
-                                .. " · "
-                                .. tostring(item.resolution or ""),
-                            fontSize = 10,
-                            fontWeight = "bold",
-                        }),
-                        ui.label({
-                            text = noctalia.tr("panel.wallhaven.result_summary", {
-                                category = tostring(item.category or ""),
-                                purity = tostring(item.purity or ""),
-                                favorites = tostring(item.favorites or 0),
-                            }),
-                            fontSize = 8,
-                            color = "on_surface_variant",
-                            maxLines = 2,
-                        }),
+        panelUi.appendExplicitGrid(
+            children,
+            items,
+            wallhavenVisibleResults,
+            BROWSER_GRID_COLUMNS,
+            function(item)
+                local resultItem = item
+                local itemId = tostring(item.id or "")
+                local isSelected = itemId ~= "" and itemId == tostring(selected.id or "")
+                return ui.column({
+                    key = "wallhaven-result-" .. itemId,
+                    width = 232,
+                    gap = 5,
+                    padding = 8,
+                    radius = 10,
+                    fill = "surface_variant/0.25",
+                    border = if isSelected then "primary/0.65" else "outline/0.25",
+                    borderWidth = if isSelected then 2 else 1,
+                    align = "stretch",
+                }, {
+                    preview.node("wallhaven", item, 216, 122, "photo"),
+                    ui.label({
+                        text = tostring(item.id or noctalia.tr("panel.wallhaven.default_name"))
+                            .. " · "
+                            .. tostring(item.resolution or ""),
+                        fontSize = 10,
+                        fontWeight = "bold",
+                        maxWidth = 216,
+                        maxLines = 2,
                     }),
-                    ui.button({
-                        glyph = "info-circle",
-                        tooltip = noctalia.tr("panel.wallhaven.details"),
-                        variant = "ghost",
-                        controlSize = "sm",
-                        enabled = ready and not busy,
-                        onClick = function()
-                            send({ kind = "wallhaven_detail", id = tostring(resultItem.id or "") })
-                        end,
+                    ui.label({
+                        text = noctalia.tr("panel.wallhaven.result_summary", {
+                            category = tostring(item.category or ""),
+                            purity = tostring(item.purity or ""),
+                            favorites = tostring(item.favorites or 0),
+                        }),
+                        fontSize = 8,
+                        color = "on_surface_variant",
+                        maxWidth = 216,
+                        maxLines = 2,
                     }),
-                    ui.button({
-                        glyph = "download",
-                        tooltip = noctalia.tr("panel.wallhaven.download"),
-                        variant = "ghost",
-                        controlSize = "sm",
-                        enabled = ready and not busy,
-                        onClick = function()
-                            send({ kind = "wallhaven_download", id = tostring(resultItem.id or "") })
-                        end,
+                    ui.row({ gap = 4, align = "center", justify = "end" }, {
+                        ui.button({
+                            glyph = "info-circle",
+                            tooltip = noctalia.tr("panel.wallhaven.details"),
+                            variant = "ghost",
+                            controlSize = "sm",
+                            enabled = ready and not busy,
+                            onClick = function()
+                                send({ kind = "wallhaven_detail", id = tostring(resultItem.id or "") })
+                            end,
+                        }),
+                        ui.button({
+                            glyph = "download",
+                            tooltip = noctalia.tr("panel.wallhaven.download"),
+                            variant = "primary",
+                            controlSize = "sm",
+                            enabled = ready and not busy,
+                            onClick = function()
+                                send({ kind = "wallhaven_download", id = tostring(resultItem.id or "") })
+                            end,
+                        }),
                     }),
                 })
-            )
-        end
+            end
+        )
         panelUi.appendVisibilityControls(
             children,
             #items,
@@ -3233,50 +3268,65 @@ local function motionBgsSection()
                 })
             )
         end
-        for index = 1, math.min(#items, motionBgsVisibleResults) do
-            local item = items[index]
-            local slug = tostring(item.slug or "")
-            table.insert(
-                children,
-                ui.row({ gap = 7, align = "center", padding = 8, radius = 9, fill = "surface_variant/0.25" }, {
-                    preview.node("motionbgs", item, 112, 63, "movie"),
-                    ui.column({ gap = 1, flexGrow = 1 }, {
-                        ui.label({
-                            text = tostring(item.title or slug),
-                            fontSize = 11,
-                            fontWeight = "bold",
-                            maxLines = 2,
-                        }),
-                        ui.label({
-                            text = tostring(item.quality or "") .. " · " .. tostring(item.source_url or ""),
-                            fontSize = 9,
-                            color = "on_surface_variant",
-                            maxLines = 2,
-                        }),
+        panelUi.appendExplicitGrid(
+            children,
+            items,
+            motionBgsVisibleResults,
+            BROWSER_GRID_COLUMNS,
+            function(item)
+                local slug = tostring(item.slug or "")
+                local isSelected = slug ~= "" and slug == tostring(selected.slug or "")
+                return ui.column({
+                    key = "motionbgs-result-" .. slug,
+                    width = 232,
+                    gap = 5,
+                    padding = 8,
+                    radius = 10,
+                    fill = "surface_variant/0.25",
+                    border = if isSelected then "primary/0.65" else "outline/0.25",
+                    borderWidth = if isSelected then 2 else 1,
+                    align = "stretch",
+                }, {
+                    preview.node("motionbgs", item, 216, 122, "movie"),
+                    ui.label({
+                        text = tostring(item.title or slug),
+                        fontSize = 11,
+                        fontWeight = "bold",
+                        maxWidth = 216,
+                        maxLines = 2,
                     }),
-                    ui.button({
-                        glyph = "info-circle",
-                        tooltip = noctalia.tr("panel.motionbgs.details"),
-                        variant = "ghost",
-                        controlSize = "sm",
-                        enabled = integrationReady and not busy and slug ~= "",
-                        onClick = function()
-                            send({ kind = "motionbgs_details", slug = slug })
-                        end,
+                    ui.label({
+                        text = tostring(item.quality or "") .. " · " .. tostring(item.source_url or ""),
+                        fontSize = 9,
+                        color = "on_surface_variant",
+                        maxWidth = 216,
+                        maxLines = 2,
                     }),
-                    ui.button({
-                        glyph = "download",
-                        tooltip = noctalia.tr("panel.motionbgs.download_default", { quality = quality:upper() }),
-                        variant = "ghost",
-                        controlSize = "sm",
-                        enabled = integrationReady and not busy and slug ~= "",
-                        onClick = function()
-                            send({ kind = "motionbgs_download", slug = slug, quality = quality })
-                        end,
+                    ui.row({ gap = 4, align = "center", justify = "end" }, {
+                        ui.button({
+                            glyph = "info-circle",
+                            tooltip = noctalia.tr("panel.motionbgs.details"),
+                            variant = "ghost",
+                            controlSize = "sm",
+                            enabled = integrationReady and not busy and slug ~= "",
+                            onClick = function()
+                                send({ kind = "motionbgs_details", slug = slug })
+                            end,
+                        }),
+                        ui.button({
+                            glyph = "download",
+                            tooltip = noctalia.tr("panel.motionbgs.download_default", { quality = quality:upper() }),
+                            variant = "primary",
+                            controlSize = "sm",
+                            enabled = integrationReady and not busy and slug ~= "",
+                            onClick = function()
+                                send({ kind = "motionbgs_download", slug = slug, quality = quality })
+                            end,
+                        }),
                     }),
                 })
-            )
-        end
+            end
+        )
         panelUi.appendVisibilityControls(
             children,
             #items,
@@ -3402,7 +3452,7 @@ function panelUi.libraryThumbnail(kind, path, paired)
             borderWidth = if paired then 2 else 1,
         })
     end
-    return ui.box({
+    return ui.row({
         width = 216,
         height = 122,
         radius = 9,
@@ -3510,7 +3560,7 @@ function panelUi.libraryCard(item)
             tooltip = if managed
                 then noctalia.tr("panel.library.delete_managed")
                 else noctalia.tr("panel.pairings.delete"),
-            variant = if deleteArmed then "danger" else "ghost",
+            variant = if deleteArmed then "destructive" else "ghost",
             controlSize = "sm",
             enabled = storageValid(),
             onClick = function()
@@ -3644,15 +3694,9 @@ function panelUi.libraryItems(kind)
 end
 
 function panelUi.appendLibraryGrid(children, items, visible)
-    local index = 1
-    while index <= math.min(#items, visible) do
-        local cards = { panelUi.libraryCard(items[index]) }
-        if index + 1 <= math.min(#items, visible) then
-            table.insert(cards, panelUi.libraryCard(items[index + 1]))
-        end
-        table.insert(children, ui.row({ gap = 8, align = "start", justify = "center" }, cards))
-        index += 2
-    end
+    panelUi.appendExplicitGrid(children, items, visible, BROWSER_GRID_COLUMNS, function(item)
+        return panelUi.libraryCard(item)
+    end)
 end
 
 function panelUi.mediumSettingsSection(kind)
@@ -3912,7 +3956,7 @@ local function playlistEntryPreview(kind, stillPath, active)
             borderWidth = if active then 2 else 1,
         })
     end
-    return ui.box({
+    return ui.row({
         width = 58,
         height = 42,
         radius = 7,
@@ -4755,7 +4799,7 @@ local function pairingCatalogSection(kind)
                         then noctalia.tr("panel.pairings.confirm_delete")
                         else noctalia.tr("panel.pairings.delete"),
                     glyph = "trash",
-                    variant = if deleteArmed then "danger" else "ghost",
+                    variant = if deleteArmed then "destructive" else "ghost",
                     controlSize = "sm",
                     enabled = storageValid(),
                     onClick = function()
@@ -5035,10 +5079,11 @@ local function scheduleEditor(output, playlistId)
         noctalia.tr("panel.schedules.day_fri"),
         noctalia.tr("panel.schedules.day_sat"),
     }
-    local dayButtons = {}
+    local firstWeekdays = {}
+    local secondWeekdays = {}
     for index, name in ipairs(days) do
         local dayIndex = index
-        table.insert(dayButtons, ui.button({
+        local button = ui.button({
             text = name,
             variant = if scheduleWeekdaysDraft[index] then "primary" else "ghost",
             controlSize = "sm",
@@ -5047,7 +5092,8 @@ local function scheduleEditor(output, playlistId)
                 scheduleWeekdaysDraft[dayIndex] = not scheduleWeekdaysDraft[dayIndex]
                 render()
             end,
-        }))
+        })
+        table.insert(if index <= 4 then firstWeekdays else secondWeekdays, button)
     end
     local months = {
         noctalia.tr("panel.schedules.month_jan"),
@@ -5063,8 +5109,9 @@ local function scheduleEditor(output, playlistId)
         noctalia.tr("panel.schedules.month_nov"),
         noctalia.tr("panel.schedules.month_dec"),
     }
-    local firstHalfMonths = {}
-    local secondHalfMonths = {}
+    local firstMonthRow = {}
+    local secondMonthRow = {}
+    local thirdMonthRow = {}
     local allMonthsSelected = true
     for index, name in ipairs(months) do
         local monthIndex = index
@@ -5081,7 +5128,13 @@ local function scheduleEditor(output, playlistId)
                 render()
             end,
         })
-        table.insert(if index <= 6 then firstHalfMonths else secondHalfMonths, button)
+        if index <= 4 then
+            table.insert(firstMonthRow, button)
+        elseif index <= 8 then
+            table.insert(secondMonthRow, button)
+        else
+            table.insert(thirdMonthRow, button)
+        end
     end
     local children = {
         ui.label({
@@ -5114,7 +5167,8 @@ local function scheduleEditor(output, playlistId)
             fontSize = 9,
             color = "on_surface_variant",
         }),
-        ui.row({ gap = 5, align = "center" }, dayButtons),
+        ui.row({ gap = 5, align = "center" }, firstWeekdays),
+        ui.row({ gap = 5, align = "center" }, secondWeekdays),
         ui.row({ gap = 6, align = "center" }, {
             ui.label({
                 text = noctalia.tr("panel.schedules.months"),
@@ -5133,8 +5187,9 @@ local function scheduleEditor(output, playlistId)
                 end,
             }),
         }),
-        ui.row({ gap = 5, align = "center" }, firstHalfMonths),
-        ui.row({ gap = 5, align = "center" }, secondHalfMonths),
+        ui.row({ gap = 5, align = "center" }, firstMonthRow),
+        ui.row({ gap = 5, align = "center" }, secondMonthRow),
+        ui.row({ gap = 5, align = "center" }, thirdMonthRow),
         ui.row({ gap = 6, align = "center" }, {
             ui.button({
                 text = if scheduleEnabledDraft
@@ -5746,6 +5801,11 @@ local function playlistsSection(outputOverride)
                 state.running == true and state.paused ~= true,
                 false
             ),
+        })
+    )
+    table.insert(
+        children,
+        ui.row({ gap = 5, align = "center" }, {
             playlistActionButton(
                 "resume",
                 "player-track-next",

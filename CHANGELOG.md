@@ -37,6 +37,10 @@ All notable staging changes will be recorded here.
   Home; Displays with per-output Overview/Engines/Schedule; Library with
   Images/Videos/Wallpaper Engine; Shops with
   Wallhaven/MotionBGS/Steam Workshop; per-playlist routes; and Diagnostics.
+- Render local libraries and both provider stores as four-column still-led
+  browser grids on a 1280-pixel logical panel. Replace unsupported decorative
+  box layout and button-variant properties, and split weekday, month, and
+  playback controls into bounded rows instead of allowing them to overlap.
 - Present image, video, and Workshop inventory as still-led pairing cards with
   selected/automatic representative behavior and an adaptive wallpaper palette
   by default.
