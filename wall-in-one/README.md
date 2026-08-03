@@ -17,17 +17,21 @@ Wall-in-One has five coordinated layers:
    selector, use next/previous/random, persist a real still, then apply the
    entry's theme mode and `wallpaper`, `builtin`, `community`, or `custom`
    palette selection before live playback starts.
-2. **Wallhaven.** Search Wallhaven's official API with bounded filters, inspect
-   details, and save a validated JPG or PNG into Wall-in-One's marked managed
-   image directory. Public SFW search needs no key; an optional API key enables
-   content for which Wallhaven requires authentication. The separate official
-   `noctalia/wallhaven:browser` remains an optional panel fallback.
-3. **MotionBGS and local video.** Search the public MotionBGS site through a
-   bounded best-effort HTML provider, download an item into a marked managed
-   cache beneath the video root, generate a still with FFmpeg, and play it
-   through an internally owned mpvpaper process. A direct **Open MotionBGS**
-   link is always retained if the site's markup changes or the scraper is
-   unavailable.
+2. **Wallhaven.** Search Wallhaven's official API with its tag query, complete
+   category/purity masks, sort/order/top-list range, minimum or exact
+   resolution, ratio, color, and real previous/next page controls; inspect
+   local cached still previews and details, and save a validated JPG or PNG into
+   Wall-in-One's marked managed image directory. Public SFW search needs no key;
+   an optional API key enables content for which Wallhaven requires
+   authentication. The separate official `noctalia/wallhaven:browser` remains
+   an optional panel fallback.
+3. **MotionBGS and local video.** Search the public MotionBGS site or page
+   through its latest, genre/tag, and 4K catalogs with a bounded best-effort HTML
+   provider, inspect a cached thumbnail or poster still,
+   download an item into a marked managed cache beneath the video root, generate
+   a still with FFmpeg, and play it through an internally owned mpvpaper process.
+   A direct **Open MotionBGS** link is always retained if the site's markup
+   changes or the scraper is unavailable.
 4. **Wallpaper Engine.** Scan Steam's ordinary Workshop `content/431960`
    cache, show installed projects, capture a rendered PNG through an internally
    owned `linux-wallpaperengine --screenshot` process, retain source-video and
@@ -42,11 +46,18 @@ Wall-in-One has five coordinated layers:
    are evaluated in displayed list order, with the lower matching rule winning.
    A one-entry playlist applies once and parks.
 
-The v0.5 Wallhaven and MotionBGS panes are metadata browsers: they show bounded
-result details and source links but do not cache or render remote thumbnails in
-Noctalia yet. Use the source/site link to inspect an item visually before
-downloading it. A bounded, sidecar-owned thumbnail cache is intentionally left
-for a later refinement rather than loading remote image data into the shell.
+Wallhaven and MotionBGS results include still previews without handing remote
+URLs to Noctalia's image renderer. The attached hub uses its bounded helper to
+fetch the provider-validated Wallhaven `thumbs.large` image or MotionBGS
+thumbnail/poster, then exposes only a local file through `ui.image`. The
+panel-owned cache lives at
+`pluginDataDir()/provider-previews/v1`, is capped at 64 entries and 64 MiB in
+aggregate, and rejects any individual preview over 2 MiB. Fetches accept only
+the providers' strict image origins and never follow redirects. A missing,
+rejected, or failed preview leaves the normal image placeholder and all result,
+source-link, and download controls usable. MotionBGS previews are still images,
+not streamed or downloaded preview video; **Open MotionBGS** remains the backup
+path if its scraper or preview source changes.
 
 Direct **Apply** commands replace the selected output's one-entry **Quick Choice**
 playlist, so manual and scheduled application share the same executor and
@@ -276,6 +287,17 @@ no longer matches. **Open MotionBGS** remains available independently, and
 already downloaded files, stills, pairs, and playlists never depend on scraper
 health.
 
+The browser mirrors only routes the public site actually exposes. Text search
+returns one unpaged site result set; adding a page parameter does not change
+it. Latest, genre/tag, and 4K listings expose
+validated previous/next links and currently contain 36 cards per page, so
+Wall-in-One retains up to 48. The genre browser offers the site's current
+top-level genres as presets while retaining a free-form tag slug for every
+other public tag. HD is intentionally limited to page 1 because the
+site currently redirects its advertised HD page 2 into the unfiltered global
+catalog. MotionBGS exposes no stable combined genre-plus-resolution route.
+Wall-in-One never bulk-crawls pages to manufacture missing search pagination.
+
 The parsing design was independently implemented using the public site and the
 factual route/selector profile in WaifuX revision
 `ff44ecba11227ff965074ad3320096fa5827781c` as a compatibility reference.
@@ -301,8 +323,10 @@ official Wallhaven plugin remain user-owned because that plugin chooses and
 owns its own destination.
 
 The native Wallhaven provider uses only `https://wallhaven.cc/api/v1` and
-Wallhaven's documented CDN/thumbnail hosts. Searches accept query, category and
-purity masks, sort/order, minimum resolution, ratios, color, and page. At most
+Wallhaven's documented CDN/thumbnail hosts. Searches accept the API's tag/query
+syntax, every category and purity mask, sort/order, top-list range, minimum or
+exact resolutions, ratios, color, and page. Previous/next navigation preserves
+the returned seed for stable random pages. At most
 24 results and 512 KiB of JSON are accepted per response, API requests are
 serialized with a two-second minimum start interval, and downloads are capped
 at 64 MiB. A download must be an exact current result, match its advertised
@@ -407,7 +431,7 @@ MotionBGS settings are deliberately small and bounded:
 | Use MotionBGS | on | Independently disables scraper commands without removing local downloads |
 | Download directory | empty | Defaults to `Wall-in-One/MotionBGS` beneath an existing video root; an explicit override is accepted as-is |
 | Preferred quality | HD | HD or 4K; a missing preferred variant is reported rather than silently substituted |
-| Search result limit | 24 | 1–24 |
+| Search/page result limit | 48 | 1–48; the default retains all 36 cards currently exposed by a MotionBGS catalog page |
 | Cache lifetime | 30 minutes | 5–1,440 minutes |
 | Maximum download | 256 MiB | 16–512 MiB |
 

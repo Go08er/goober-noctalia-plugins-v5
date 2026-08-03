@@ -16,7 +16,7 @@ are deliberately separate states.
 | Wallhaven | Wall-in-One's bounded official-API search/detail/download service; optional `noctalia/wallhaven:browser` panel and independent `https://wallhaven.cc/` link fallbacks |
 | W Engine | Panel plus `next`, `cycle-stop`, and `stop` on `tadomika_ari/w-engine:start` |
 | mpvpaper | Picker plus `pause`, `resume`, `toggle`, `clear`, and `clear-all` on `noctalia/mpvpaper:service` |
-| MotionBGS | Wall-in-One's bounded public-page search/download service plus an independent direct-site link |
+| MotionBGS | Wall-in-One's bounded text-search and pageable latest/genre/4K public-page service plus an independent direct-site link |
 | Custom | A user-configured full `author/plugin:panel` ID, open-only |
 
 The current external W Engine and mpvpaper releases do not publicly report the
@@ -316,9 +316,11 @@ state plus bounded results on `wall_in_one_wallhaven_status_v1` and
 `wall_in_one_wallhaven_results_v1`.
 
 Supported actions are `search`, `detail`, `download`, and `clear`. Search
-accepts query, three-bit category/purity masks, documented sort/order values,
-minimum resolution, up to eight ratios, one documented color, and a bounded page
-number. It normalizes at most 24 results from a response no larger than 512 KiB,
+accepts query, three-bit category/purity masks, documented sort/order and
+top-list-range values, minimum or exact resolutions, up to eight ratios, one
+documented color, and a bounded page number. Stable random pagination carries
+Wallhaven's returned six-character seed. It normalizes at most 24 results from
+a response no larger than 512 KiB,
 serializes operations, and requires two seconds between API request starts.
 Public SFW search works without authentication. The optional API key is locally
 validated, sent only as `X-API-Key`, never placed in a URL/status payload, and
@@ -361,9 +363,20 @@ MotionBGS does not publish a stable, versioned API. The `motionbgs` service is
 therefore an unofficial, best-effort public-page adapter, not an assertion of
 partnership or API compatibility. It recognizes only these same-origin routes:
 
-- `/search?q=<query>` for a bounded result page;
+- `/search?q=<query>` for one bounded, unpaged text-search result set;
+- `/tag:<slug>/[page/]` for pageable genre/tag listings;
+- `/4k/[page/]` for pageable 4K listings;
+- `/hd/` for the first HD listing page only;
 - `/<slug>` for one wallpaper detail page; and
 - `/dl/hd/<numeric-id>/` or `/dl/4k/<numeric-id>/` for the selected MP4.
+
+These modes are separate because MotionBGS exposes no stable combined
+genre-plus-resolution route. Its text-search page has no previous/next links
+and ignores a page parameter. Genre/tag and 4K pages do expose same-family
+pagination; the service verifies those links and the final effective route.
+The site's advertised `/hd/2/` currently redirects to unfiltered `/2/`, so the
+adapter rejects HD pages after the first rather than presenting mislabeled
+results. It does not crawl unrelated pages to emulate missing search behavior.
 
 The parser looks for wallpaper-card anchors, `span.ttl` titles, same-origin
 images, and HD/4K download anchors. Unknown markup fails closed with a visible
@@ -381,8 +394,11 @@ fixed safeguards:
   loop and same-origin validation;
 - one serialized request queue, one-second spacing, and at most eight queued
   operations;
-- at most 24 results, 80 query bytes, eight cached searches, and 48 cached
+- at most 48 results, 80 query bytes, eight cached listing pages, and 48 cached
   detail records;
+- listing HTML is parsed incrementally one anchor per service tick, then
+  published atomically, so a complete 36-card page stays within Noctalia's
+  per-callback CPU budget;
 - one-MiB HTML responses, a 20-second HTML deadline, at most three redirects,
   and redirects that must stay on `https://motionbgs.com`;
 - download limits configurable only from 16 to 512 MiB, with a 45-second

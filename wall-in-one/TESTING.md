@@ -64,15 +64,15 @@ operator explicitly chooses a download.
 | Case | Expected result |
 | --- | --- |
 | No live renderer command | Noctalia still selection, manual static pairing, saved pairs, and direct MotionBGS link remain usable |
-| Native Wallhaven enabled, no API key | Official-API SFW search/detail and managed JPG/PNG download work; NSFW search is rejected locally |
+| Native Wallhaven enabled, no API key | Official-API SFW search/detail, local cached `thumbs.large` previews, and managed JPG/PNG download work; NSFW search is rejected locally |
 | Native Wallhaven enabled, valid API key | The key is header-only and authenticated purity choices may be requested |
 | Separate official Wallhaven plugin enabled | Its public browser remains an optional fallback; its downloads remain outside Wall-in-One ownership |
 | External W Engine or mpvpaper plugin enabled, backend `auto` | External plugin owns playback; its public panel/controls remain available and internal apply is refused |
 | Backend `internal`, external owner disabled | Wall-in-One starts only its own exact-PID child on the selected `bottom` or `background` layer and can apply a local video or numeric Workshop item |
 | Both internal renderer commands installed | Different outputs may use different backends; switching one output stops its exact old child before starting the replacement |
 | Matching provider force-disabled | Both its external routes and internal startup are disabled without disabling or signaling the provider itself |
-| MotionBGS enabled, curl/helper ready | Bounded search, detail, and download commands are available |
-| MotionBGS disabled or parser degraded | Scraper actions fail visibly; **Open MotionBGS** still opens `https://motionbgs.com/` when `xdg-open` is available |
+| MotionBGS enabled, curl/helper ready | Bounded text search, latest/genre/4K page browsing, genre presets plus custom tags, still-thumbnail/poster preview, detail, and download commands are available |
+| MotionBGS disabled or parser/preview degraded | Failed previews use placeholders and scraper actions fail visibly; **Open MotionBGS** still opens `https://motionbgs.com/` when `xdg-open` is available |
 | Custom panel configured | The panel opens only while its owning plugin is enabled; no controls or status are inferred |
 
 Before any playlist/schedule test, disable Noctalia's own wallpaper slideshow on
@@ -134,6 +134,14 @@ origins. Public SFW search must omit `X-API-Key`; authenticated requests must
 send one locally validated header through a private file, never process argv;
 NSFW purity must fail before transport when the key is blank.
 
+Search results use the API's validated `thumbs.large` value to populate the
+attached hub's preview cache at `pluginDataDir()/provider-previews/v1`. Assert
+that the panel gives `ui.image` only the resulting local path, never the remote
+URL; the cache remains at most 64 entries and 64 MiB total; each response is at
+most 2 MiB; and an invalid origin, redirect, oversized response, invalid image,
+or transport failure retains the ordinary placeholder without hiding metadata
+or actions.
+
 Detail and download must accept only an ID in the current result set. Download
 must reject a substituted URL/path, mismatched advertised size/type, non-JPG/PNG
 signature, files over 64 MiB, and every pre-existing target/staging/sidecar.
@@ -156,20 +164,30 @@ invalid-slug inputs. Static tests must also pin:
   `wall_in_one_motionbgs_results_v1`, all at schema 1;
 - monotonically increasing nonces and `search`, `details`, `download`, and
   `clear` actions;
-- query limit 80 bytes, result limit 1–24, queue limit eight, one-second
+- query limit 80 bytes, result limit 1–48, queue limit eight, one-second
   request spacing, and cache limits of eight searches and 48 details;
-- public routes `/search?q=...`, `/<slug>`, and only numeric
+- separate unpaged text search, pageable validated latest, genre/tag, and 4K routes,
+  first-page-only HD browsing, public detail route `/<slug>`, and only numeric
   `/dl/hd|4k/<id>/` downloads;
+- one-anchor-per-tick incremental listing parsing with one atomic result publication,
+  keeping a full 36-card page below Noctalia's callback CPU budget;
+- cache identity covering browse mode, selector, page, and limit; validated
+  same-family previous/next links; and rejection of cross-catalog redirects;
 - ambient curl configuration disabled, same-origin URL normalization, no
   challenge bypass, bounded errors, and a fail-closed `site-markup` state when
   cards or download anchors disappear;
+- still-preview selection from the search thumbnail or detail poster, with no
+  preview-video fetch, strict accepted image origins, no redirects, and only a
+  local cached path passed to `ui.image`;
 - one-MiB HTML cap, redirect cap three, configured 16–512 MiB MP4 cap,
   timeouts, content-type check, and MP4 `ftyp` signature validation; and
 - same-directory temporary writes, atomic final installation, unique output
   names, and atomic `.motionbgs.json` provenance sidecars.
 
 Search fixtures should contain at least two wallpaper-card anchors with a
-`span.ttl`, same-origin image, and distinct slug. Detail fixtures should include
+`span.ttl`, same-origin image, and distinct slug. A genre/4K page fixture should
+contain more than 24 cards plus validated previous/next links so the 48-card
+ceiling and page metadata are exercised. Detail fixtures should include
 both HD and 4K `/dl/<quality>/<numeric-id>/` anchors and JSON-LD duration. Add
 negative fixtures for an explicit empty result, unrecognized markup, a browser
 challenge, a cross-origin image/download, and a malformed ID. No fixture should
@@ -182,18 +200,36 @@ file. The sidecar must retain source page, resolved download URL, quality, byte
 count, timestamp, and SHA-256 when available. It records provenance, not a
 copyright license.
 
+## Provider preview manual checks
+
+1. Search each provider once and confirm result cards replace their placeholders
+   with still images from local files beneath
+   `pluginDataDir()/provider-previews/v1`.
+2. Close and reopen the hub, repeat the same searches, and confirm cached images
+   render without duplicate cache entries. Verify the cache stays within 64
+   entries, 64 MiB total, and 2 MiB per file.
+3. With the preview host blocked or a fixture returning a redirect, invalid
+   image, or oversized body, confirm cards retain their placeholders while
+   metadata, source/site links, and download actions remain usable.
+4. For MotionBGS, confirm only its thumbnail/poster still is fetched, not a
+   preview video, and that **Open MotionBGS** still opens
+   `https://motionbgs.com/` as the independent backup path.
+
 ## Optional live MotionBGS smoke test
 
 Use the hub rather than invoking undocumented endpoints directly:
 
-1. Configure an existing writable video directory and keep the 24-result,
+1. Configure an existing writable video directory and keep the 48-result,
    256-MiB defaults.
-2. Search once for a short ordinary term, open one result, and confirm the
-   service shows either valid detail data or a clear degraded/challenge state.
+2. Search once for a short ordinary term and confirm the UI states that the
+   provider returns one unpaged text-search set. Then browse Latest, a preset
+   and custom genre/tag, and a 4K page; use previous/next once, open one result, and confirm the
+   service shows a cached still preview plus valid detail data, or a placeholder
+   with a clear degraded/challenge state.
 3. If downloading is appropriate, choose one HD item. Confirm the MP4 and JSON
    sidecar land in `Wall-in-One/MotionBGS` beneath the video root (or the
    explicit advanced override), then add the local file to a playlist.
-4. Disable MotionBGS and verify the search controls stop while the downloaded
+4. Disable MotionBGS and verify the browser controls stop while the downloaded
    local file and direct-site link remain usable.
 
 The bounded 2026-08-01 transport smoke completed search, detail, and one HD

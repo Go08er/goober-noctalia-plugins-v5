@@ -394,6 +394,7 @@ local libraryScan = nil
 local managedDirectoryError = ""
 local libraryRefreshPending = false
 local libraryRootsSignature = ""
+local settingsStatusPublishPending = false
 
 local configValid = true
 local runtimeValid = true
@@ -440,6 +441,7 @@ local scheduleClockSignature = ""
 local paletteAuthorityOutput = ""
 local paletteAuthorityGeneration = 0
 local lastStatusSignature = ""
+local settingsSnapshotCache = nil
 local rendererPending = {}
 local rendererStopping = {}
 local rendererExitState = {}
@@ -768,7 +770,11 @@ function wallInOne.normalizedExtraPanel()
 end
 
 function wallInOne.settingsSnapshot()
-    return {
+    if type(settingsSnapshotCache) == "table" then
+        return settingsSnapshotCache
+    end
+    local extraPanel = wallInOne.normalizedExtraPanel()
+    local snapshot = {
         use_wallhaven = wallInOne.settingBool("use_wallhaven", true),
         use_w_engine = wallInOne.settingBool("use_w_engine", true),
         use_mpvpaper = wallInOne.settingBool("use_mpvpaper", true),
@@ -780,7 +786,7 @@ function wallInOne.settingsSnapshot()
         capture_directory = wallInOne.captureDirectory(),
         video_directory = wallInOne.videoDirectory(),
         motionbgs_download_directory = wallInOne.settingString("motionbgs_download_directory", ""),
-        motionbgs_result_limit = wallInOne.settingInt("motionbgs_result_limit", 24, 1, 24),
+        motionbgs_result_limit = wallInOne.settingInt("motionbgs_result_limit", 48, 1, 48),
         motionbgs_cache_minutes = wallInOne.settingInt("motionbgs_cache_minutes", 30, 5, 1440),
         motionbgs_max_download_mb = wallInOne.settingInt("motionbgs_max_download_mb", 256, 16, 512),
         motionbgs_quality = if wallInOne.settingString("motionbgs_quality", "hd") == "4k" then "4k" else "hd",
@@ -818,8 +824,10 @@ function wallInOne.settingsSnapshot()
         cycle_interval_minutes = wallInOne.settingInt("cycle_interval_minutes", 15, 1, 43200),
         cycle_order = wallInOne.configuredPlaylistOrder(),
         cycle_start_on_load = wallInOne.settingBool("cycle_start_on_load", false),
-        extra_provider_panel = providers.extra.panel,
+        extra_provider_panel = extraPanel,
     }
+    settingsSnapshotCache = snapshot
+    return snapshot
 end
 
 function wallInOne.storagePath(name)
@@ -8051,7 +8059,11 @@ function wallInOne.sendMotionBgsCommand(request, action)
     }
     if action == "search" then
         command.query = tostring(request.query or "")
-        command.limit = wallInOne.settingInt("motionbgs_result_limit", 24, 1, 24)
+        command.mode = tostring(request.mode or "search")
+        command.genre = tostring(request.genre or "")
+        command.quality = tostring(request.quality or "")
+        command.page = tonumber(request.page) or 1
+        command.limit = wallInOne.settingInt("motionbgs_result_limit", 48, 1, 48)
         command.force = request.force == true
     elseif action == "details" then
         command.slug = tostring(request.slug or "")
@@ -8171,8 +8183,11 @@ function wallInOne.sendWallhavenCommand(request, action)
             sorting = tostring(request.sorting or "date_added"),
             order = tostring(request.order or "desc"),
             atleast = tostring(request.atleast or ""),
+            resolutions = tostring(request.resolutions or ""),
             ratios = tostring(request.ratios or ""),
             colors = tostring(request.colors or ""),
+            top_range = tostring(request.top_range or "1M"),
+            seed = tostring(request.seed or ""),
             page = tonumber(request.page) or 1,
         }
     elseif action == "detail" then
@@ -8670,6 +8685,15 @@ function update()
         local managedReady, managedError = wallInOne.ensureImageManagedDirectories()
         managedDirectoryError = if managedReady then "" else tostring(managedError or "")
         wallInOne.refreshLibrary()
+        settingsStatusPublishPending = false
+        wallInOne.publishStatus()
+        return
+    end
+    if settingsStatusPublishPending then
+        -- A settings callback already performs provider-policy reconciliation.
+        -- Publish its settings snapshot on a clean tick so the accumulated
+        -- callback work cannot exhaust Noctalia's per-callback CPU budget.
+        settingsStatusPublishPending = false
         wallInOne.publishStatus()
         return
     end
@@ -8845,7 +8869,10 @@ function onConfigChanged()
     wallInOne.reconcilePaletteAuthority(true)
     -- Plugin settings live on the bounded lifecycle snapshot. The persisted
     -- config domain is dirtied only by saveConfig(), when its document changes.
-    wallInOne.publishStatus()
+    -- Defer the snapshot build because this callback has already reconciled
+    -- provider policy and carries a strict Noctalia CPU budget.
+    settingsSnapshotCache = nil
+    settingsStatusPublishPending = true
 end
 
 function onOutputsChanged()
@@ -9316,10 +9343,17 @@ end
 noctalia.state.watch(COMMAND_KEY, wallInOne.handleCommand)
 noctalia.state.watch(RENDERER_STATUS_KEY, wallInOne.adoptRendererStatus)
 noctalia.state.watch(MOTIONBGS_STATUS_KEY, function(nextStatus)
+    local previousDownloadDirectory = if type(motionBgsStatus) == "table"
+        then tostring(motionBgsStatus.download_directory or "")
+        else ""
     if type(nextStatus) == "table" then
         motionBgsStatus = nextStatus
     else
         motionBgsStatus = { available = false, busy = false, last_error = noctalia.tr("errors.motionbgs_unavailable") }
+    end
+    local nextDownloadDirectory = tostring(motionBgsStatus.download_directory or "")
+    if nextDownloadDirectory ~= previousDownloadDirectory then
+        settingsSnapshotCache = nil
     end
     local downloadFingerprint, downloadPath = wallInOne.completedDownloadFingerprint(motionBgsStatus)
     if downloadPath ~= "" and downloadFingerprint ~= lastMotionDownloadFingerprint then
@@ -9359,7 +9393,6 @@ noctalia.state.watch(WALLHAVEN_RESULTS_KEY, function(nextResults)
     wallhavenResults = if type(nextResults) == "table" then nextResults else { items = {}, selected = {} }
 end)
 wallInOne.handleCommand(noctalia.state.get(COMMAND_KEY))
-wallInOne.publishStatus()
 wallInOne.probeProviders()
 
 function onExit(_signal, _reason)

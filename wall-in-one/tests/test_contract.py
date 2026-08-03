@@ -9,6 +9,7 @@ ownership, FIFO cleanup, and exact argv remain observable.
 
 from __future__ import annotations
 
+import base64
 import errno
 import json
 import os
@@ -146,7 +147,7 @@ def test_manifest_and_translations() -> None:
     assert settings["motionbgs_quality"]["default"] == "hd"
     assert [item["value"] for item in settings["motionbgs_quality"]["options"]] == ["hd", "4k"]
     for key, default, minimum, maximum in (
-        ("motionbgs_result_limit", 24, 1, 24),
+        ("motionbgs_result_limit", 48, 1, 48),
         ("motionbgs_cache_minutes", 30, 5, 1440),
         ("motionbgs_max_download_mb", 256, 16, 512),
     ):
@@ -698,6 +699,19 @@ def test_coordinator_contract() -> None:
         ),
         "lightweight coordinator lifecycle status",
     )
+    settings_snapshot = service[
+        service.index("function wallInOne.settingsSnapshot()") : service.index("function wallInOne.storagePath")
+    ]
+    require_all(
+        settings_snapshot,
+        (
+            'if type(settingsSnapshotCache) == "table" then',
+            "local extraPanel = wallInOne.normalizedExtraPanel()",
+            "settingsSnapshotCache = snapshot",
+            "extra_provider_panel = extraPanel",
+        ),
+        "cached bounded settings snapshot",
+    )
     for heavy in (
         "playlists =",
         "outputs =",
@@ -715,7 +729,9 @@ def test_coordinator_contract() -> None:
         service.index("function onConfigChanged()") : service.index("function onOutputsChanged()")
     ]
     assert 'wallInOne.markStateDomain("config")' not in config_changed
-    assert "wallInOne.publishStatus()" in config_changed
+    assert "wallInOne.publishStatus()" not in config_changed
+    assert "settingsSnapshotCache = nil" in config_changed
+    assert config_changed.index("wallInOne.probeProviders()") < config_changed.index("settingsSnapshotCache = nil")
     require_all(
         config_changed,
         (
@@ -724,6 +740,7 @@ def test_coordinator_contract() -> None:
             "wallInOne.currentLibraryRootsSignature()",
             "libraryRefreshPending = true",
             "wallInOne.probeProviders()",
+            "settingsStatusPublishPending = true",
         ),
         "bounded settings-change reconciliation",
     )
@@ -739,6 +756,9 @@ def test_coordinator_contract() -> None:
             "libraryRefreshPending = false",
             "wallInOne.ensureImageManagedDirectories()",
             "wallInOne.refreshLibrary()",
+            "if settingsStatusPublishPending then",
+            "settingsStatusPublishPending = false",
+            "wallInOne.publishStatus()",
             "return",
         ),
         "deferred path-sensitive library refresh",
@@ -1946,6 +1966,12 @@ def test_wallhaven_contract() -> None:
             'local FETCH_PROTOCOL = "WIO-FETCH1"',
             "local function validatedSearchFilters(command, hasApiKey)",
             "NSFW search requires a Wallhaven API key",
+            "local function validatedResolutions(value)",
+            "Choose either minimum resolution or exact resolutions, not both",
+            'append("resolutions", filters.resolutions)',
+            'append("topRange", filters.top_range)',
+            'append("seed", filters.seed)',
+            "hot = true",
             "local function searchUrl(filters)",
             'noctalia.writeFile(credentialPath, "X-API-Key: " .. key .. "\\n")',
             "local function allocateApiTransport(operation, key)",
@@ -2285,6 +2311,638 @@ printf '%s\\t%s\\t%s\\t%s' "${FAKE_STATUS:-200}" "$url" "${FAKE_CONTENT_TYPE:-ap
         assert cancelled.stdout.startswith("WIO-FETCH1\terror\tcancelled\t200\t")
         assert not cancelled_output.exists() and not cancelled_guard.exists()
         assert not list(root.glob(".wall-in-one-fetch-body.*"))
+
+
+def test_provider_thumbnail_helper_contract() -> None:
+    """Pin thumbnail ingress independently of either provider's metadata parser."""
+
+    helper_path = ROOT / "scripts" / "provider-thumbnail"
+    helper = helper_path.read_text(encoding="utf-8")
+    require_all(
+        helper,
+        (
+            "readonly protocol='WIO-THUMB1'",
+            "local wallhaven_re='^https://th\\.wallhaven\\.cc/lg/",
+            "local motionbgs_re='^https://motionbgs\\.com/(i/c/",
+            '[[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]:0:2}" ]]',
+            "readonly max_bytes=$((2 * 1024 * 1024))",
+            "readonly max_seconds=30",
+            "ulimit -f",
+            "--disable",
+            "--connect-timeout 10",
+            '--max-time "$max_seconds"',
+            "--max-filesize",
+            "--speed-limit 1024",
+            "--speed-time 15",
+            "--proto '=https'",
+            "--max-redirs 0",
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            '[[ $effective_url == "$url" ]]',
+            'signature_type=$(mime_from_file_signature "$body")',
+            '[[ $signature_type == "$normalized_type" ]]',
+            'validate_image_structure "$body" "$signature_type" "$bytes"',
+            "validate_jpeg_structure()",
+            "validate_png_structure()",
+            "validate_webp_structure()",
+            "readonly max_dimension=8192",
+            "readonly max_pixels=$((32 * 1024 * 1024))",
+            '[[ ! -e $output && ! -L $output ]]',
+            'ln -- "$body" "$output"',
+            "trap cleanup EXIT",
+        ),
+        "provider thumbnail hard ingress boundary",
+    )
+    assert "--location" not in helper, "thumbnail transport must not follow redirects"
+
+    self_test = subprocess.run(
+        ["bash", str(helper_path), "self-test"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+    assert self_test.stdout.strip() == "WIO-THUMB1\tok\tself-test", self_test.stdout
+
+    with tempfile.TemporaryDirectory(prefix="wall-in-one-provider-thumbnail-") as temporary:
+        root = Path(temporary)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        argv_log = root / "curl.argv"
+        jpeg_fixture = root / "valid.jpg"
+        png_fixture = root / "valid.png"
+        webp_fixture = root / "valid.webp"
+        jpeg_fixture.write_bytes(
+            base64.b64decode(
+                "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgG"
+                "BgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMD"
+                "AwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"
+                "EBAQEBAQEBAQEBAQEBD/wAARCAABAAEDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAA"
+                "AAAAAACP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAHC"
+                "f/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/ADoDFU3/2Q=="
+            )
+        )
+        png_fixture.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAIGNIUk0AAHomAACAhAAA"
+                "+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYk"
+                "tHRAH/Ai3eAAAAB3RJTUUH6ggDACswCWe7rgAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAy"
+                "Ni0wOC0wM1QwMDo0Mzo0OCswMDowMLJPHRkAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMj"
+                "YtMDgtMDNUMDA6NDM6NDgrMDA6MDDDEqWlAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAy"
+                "MDI2LTA4LTAzVDAwOjQzOjQ4KzAwOjAwlAeEegAAAApJREFUCNdjYAAAAAIAAeIhvD"
+                "MAAAAASUVORK5CYII="
+            )
+        )
+        webp_fixture.write_bytes(
+            base64.b64decode(
+                "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAgA0JaACdLoB+AADsAD+8MQL/"
+                "yC5YXXI1/8gP+QH/ID/+PIAAAA="
+            )
+        )
+        truncated_jpeg = root / "truncated.jpg"
+        truncated_png = root / "truncated.png"
+        truncated_webp = root / "truncated.webp"
+        truncated_jpeg.write_bytes(jpeg_fixture.read_bytes()[:-2])
+        truncated_png.write_bytes(png_fixture.read_bytes()[:-6])
+        truncated_webp.write_bytes(webp_fixture.read_bytes()[:-1])
+        fake_curl = fake_bin / "curl"
+        fake_curl.write_text(
+            """#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\\0' "$@" >"$FAKE_CURL_ARGV"
+output=''
+url=''
+while (( $# > 0 )); do
+  case $1 in
+    --output|--url) name=$1; value=$2; shift 2; [[ $name == --output ]] && output=$value || url=$value ;;
+    --connect-timeout|--max-time|--max-filesize|--speed-limit|--speed-time|--proto|--proto-redir|--max-redirs|--header|--user-agent|--write-out)
+      shift 2 ;;
+    --disable|--silent|--show-error|--tlsv1.2) shift ;;
+    --request) shift 2 ;;
+    *) exit 64 ;;
+  esac
+done
+[[ -n $output && -n $url ]] || exit 64
+case ${FAKE_BODY:-jpeg} in
+  jpeg) cp -- "$FAKE_JPEG_FIXTURE" "$output" ;;
+  png) cp -- "$FAKE_PNG_FIXTURE" "$output" ;;
+  webp) cp -- "$FAKE_WEBP_FIXTURE" "$output" ;;
+  truncated-jpeg) cp -- "$FAKE_TRUNCATED_JPEG" "$output" ;;
+  truncated-png) cp -- "$FAKE_TRUNCATED_PNG" "$output" ;;
+  truncated-webp) cp -- "$FAKE_TRUNCATED_WEBP" "$output" ;;
+  bad) printf '<html>not an image</html>' >"$output" ;;
+  oversize) cp -- "$FAKE_JPEG_FIXTURE" "$output"; exit 63 ;;
+  *) exit 64 ;;
+esac
+bytes=$(stat -c '%s' -- "$output")
+printf '%s\\t%s\\t%s\\t%s' \
+  "${FAKE_STATUS:-200}" "${FAKE_EFFECTIVE:-$url}" \
+  "${FAKE_CONTENT_TYPE:-image/jpeg}" "${FAKE_REPORTED_BYTES:-$bytes}"
+""",
+            encoding="utf-8",
+        )
+        fake_curl.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}:{environment.get('PATH', '')}"
+        environment["FAKE_CURL_ARGV"] = str(argv_log)
+        environment["FAKE_JPEG_FIXTURE"] = str(jpeg_fixture)
+        environment["FAKE_PNG_FIXTURE"] = str(png_fixture)
+        environment["FAKE_WEBP_FIXTURE"] = str(webp_fixture)
+        environment["FAKE_TRUNCATED_JPEG"] = str(truncated_jpeg)
+        environment["FAKE_TRUNCATED_PNG"] = str(truncated_png)
+        environment["FAKE_TRUNCATED_WEBP"] = str(truncated_webp)
+
+        def fetch(
+            provider: str,
+            url: str,
+            name: str,
+            *,
+            body: str,
+            content_type: str,
+            status: int = 200,
+            effective: str | None = None,
+            reported_bytes: int | None = None,
+        ) -> tuple[subprocess.CompletedProcess[str], Path]:
+            output = root / name
+            invocation_environment = environment.copy()
+            invocation_environment["FAKE_BODY"] = body
+            invocation_environment["FAKE_CONTENT_TYPE"] = content_type
+            invocation_environment["FAKE_STATUS"] = str(status)
+            if effective is not None:
+                invocation_environment["FAKE_EFFECTIVE"] = effective
+            if reported_bytes is not None:
+                invocation_environment["FAKE_REPORTED_BYTES"] = str(reported_bytes)
+            result = subprocess.run(
+                ["bash", str(helper_path), "fetch", provider, url, str(output)],
+                check=False,
+                env=invocation_environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            return result, output
+
+        jpeg_url = "https://th.wallhaven.cc/lg/ab/abc123.jpg"
+        jpeg_result, jpeg_output = fetch(
+            "wallhaven",
+            jpeg_url,
+            "wallhaven.jpg",
+            body="jpeg",
+            content_type="image/jpeg",
+        )
+        assert jpeg_result.returncode == 0, (jpeg_result.stdout, jpeg_result.stderr)
+        assert jpeg_result.stdout.startswith("WIO-THUMB1\tok\twallhaven\t200\t")
+        assert jpeg_output.read_bytes().startswith(b"\xff\xd8\xff")
+
+        webp_url = "https://motionbgs.com/i/c/364x205/media/42/fixture.jpg.webp"
+        webp_result, webp_output = fetch(
+            "motionbgs",
+            webp_url,
+            "motion.webp",
+            body="webp",
+            content_type="image/webp",
+        )
+        assert webp_result.returncode == 0, (webp_result.stdout, webp_result.stderr)
+        assert webp_result.stdout.startswith("WIO-THUMB1\tok\tmotionbgs\t200\t")
+        assert webp_output.read_bytes().startswith(b"RIFF")
+
+        png_url = "https://motionbgs.com/media/42/fixture.png"
+        png_result, png_output = fetch(
+            "motionbgs",
+            png_url,
+            "motion.png",
+            body="png",
+            content_type="image/png",
+        )
+        assert png_result.returncode == 0, (png_result.stdout, png_result.stderr)
+        assert png_result.stdout.startswith("WIO-THUMB1\tok\tmotionbgs\t200\t")
+        assert png_output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+        curl_argv = argv_log.read_bytes().split(b"\0")
+        assert b"--disable" in curl_argv
+        assert b"--max-redirs" in curl_argv
+        redirect_index = curl_argv.index(b"--max-redirs")
+        assert curl_argv[redirect_index + 1] == b"0"
+        max_size_index = curl_argv.index(b"--max-filesize")
+        assert curl_argv[max_size_index + 1] == b"2097152"
+
+        conflict_output = root / "existing.jpg"
+        conflict_output.write_bytes(b"operator-owned sentinel")
+        conflict_result, returned_conflict = fetch(
+            "wallhaven",
+            jpeg_url,
+            conflict_output.name,
+            body="jpeg",
+            content_type="image/jpeg",
+        )
+        assert returned_conflict == conflict_output
+        assert conflict_result.returncode != 0
+        assert conflict_result.stdout.startswith("WIO-THUMB1\terror\tconflict\t")
+        assert conflict_output.read_bytes() == b"operator-owned sentinel"
+
+        invalid_cases = (
+            (
+                "wallhaven",
+                "https://th.wallhaven.cc.evil.invalid/lg/ab/abc123.jpg",
+                "cross-origin.jpg",
+                "jpeg",
+                "image/jpeg",
+                200,
+                None,
+                None,
+            ),
+            (
+                "wallhaven",
+                jpeg_url,
+                "redirect.jpg",
+                "jpeg",
+                "image/jpeg",
+                302,
+                "https://evil.invalid/redirect.jpg",
+                None,
+            ),
+            (
+                "wallhaven",
+                jpeg_url,
+                "wrong-mime.jpg",
+                "jpeg",
+                "text/html",
+                200,
+                None,
+                None,
+            ),
+            (
+                "wallhaven",
+                jpeg_url,
+                "wrong-signature.jpg",
+                "bad",
+                "image/jpeg",
+                200,
+                None,
+                None,
+            ),
+            (
+                "motionbgs",
+                webp_url,
+                "oversize.webp",
+                "oversize",
+                "image/webp",
+                200,
+                None,
+                None,
+            ),
+            (
+                "wallhaven",
+                jpeg_url,
+                "truncated-result.jpg",
+                "truncated-jpeg",
+                "image/jpeg",
+                200,
+                None,
+                None,
+            ),
+            (
+                "motionbgs",
+                png_url,
+                "truncated-result.png",
+                "truncated-png",
+                "image/png",
+                200,
+                None,
+                None,
+            ),
+            (
+                "motionbgs",
+                webp_url,
+                "truncated-result.webp",
+                "truncated-webp",
+                "image/webp",
+                200,
+                None,
+                None,
+            ),
+        )
+        for case in invalid_cases:
+            result, output = fetch(
+                case[0],
+                case[1],
+                case[2],
+                body=case[3],
+                content_type=case[4],
+                status=case[5],
+                effective=case[6],
+                reported_bytes=case[7],
+            )
+            assert result.returncode != 0, (case[2], result.stdout, result.stderr)
+            assert result.stdout.startswith("WIO-THUMB1\terror\t"), (case[2], result.stdout)
+            assert not output.exists(), f"rejected thumbnail was installed: {case[2]}"
+
+        assert not list(root.glob(".wall-in-one-thumbnail.*")), "thumbnail helper leaked a temporary"
+
+
+def test_provider_preview_panel_contract() -> None:
+    """Keep remote-provider presentation bounded, local-only, and visibly wired."""
+
+    panel = text("panel.luau")
+    require_all(
+        panel,
+        (
+            "local PREVIEW_CACHE_SCHEMA = 1",
+            "local PREVIEW_MAX_CONCURRENT = 4",
+            "local PREVIEW_MAX_QUEUE = 32",
+            "local PREVIEW_MAX_FILE_BYTES = 2 * 1024 * 1024",
+            "local PREVIEW_MAX_CACHE_BYTES = 64 * 1024 * 1024",
+            "local PREVIEW_MAX_ENTRIES = 64",
+            "local PREVIEW_MAX_MANIFEST_BYTES = 64 * 1024",
+            "local PREVIEW_MAX_FAILURES = 64",
+            "local PREVIEW_RETRY_BASE_SECONDS = 15",
+            "local PREVIEW_RETRY_MAX_SECONDS = 300",
+            "local PREVIEW_RETRY_POLL_MS = 5000",
+            'local PREVIEW_PROTOCOL = "WIO-THUMB1"',
+            "local function previewRetryReady(url)",
+            "local function previewRetryDue()",
+            "local function recordPreviewFailure(url)",
+            "local function resetPreviewQueue(scope)",
+            "local function setPreviewScope(scope)",
+            "local function validPreviewUrl(provider, value)",
+            "local function savePreviewManifest()",
+            "local function prunePreviewCache()",
+            "local function initializePreviewCache()",
+            "local function previewHelperResult(result)",
+            "local function ensureProviderPreview(provider, identifier, url)",
+            "local function providerPreviewNode(provider, item, width, height, glyph)",
+            "pumpPreviewQueue = function()",
+            "preview.ensure = ensureProviderPreview",
+            "preview.node = providerPreviewNode",
+            "preview.scope = setPreviewScope",
+            "preview.retryDue = previewRetryDue",
+            "preview.cancel = function()",
+            "preview.close = function()",
+        ),
+        "panel-owned provider preview manager",
+    )
+    retry_due = panel[
+        panel.index("local function previewRetryDue") : panel.index(
+            "local function clearPreviewFailure"
+        )
+    ]
+    require_all(
+        retry_due,
+        (
+            "tonumber(failure.generation) == previewGeneration",
+            "tonumber(failure.interest) == previewInterest",
+        ),
+        "current-visible-generation retry gate",
+    )
+
+    url_gate = panel[
+        panel.index("local function validPreviewUrl") : panel.index("local function previewKey")
+    ]
+    require_all(
+        url_gate,
+        (
+            r'value:find("[%c\\#]")',
+            "^https://th%.wallhaven%.cc/lg/",
+            "bucket == identifier:sub(1, 2)",
+            'provider == "motionbgs"',
+            "^https://motionbgs%.com/media/",
+            "^https://motionbgs%.com/i/c/",
+            "tonumber(width) > 4096",
+            'extension == "jpg"',
+            'extension == "jpeg"',
+            'extension == "png"',
+            'extension == "webp"',
+        ),
+        "strict panel-side provider URL gate",
+    )
+    assert "http://" not in url_gate
+    assert "cdn.motionbgs" not in url_gate
+
+    manifest_writer = panel[
+        panel.index("local function savePreviewManifest") : panel.index(
+            "local function prunePreviewCache"
+        )
+    ]
+    require_all(
+        manifest_writer,
+        (
+            "#encoded + 1 > PREVIEW_MAX_MANIFEST_BYTES",
+            'local temporary = previewManifestPath .. ".tmp"',
+            "noctalia.writeFile(temporary, encoded",
+            "noctalia.renameFile(temporary, previewManifestPath)",
+            "noctalia.removeFile(temporary)",
+        ),
+        "atomic bounded preview manifest writer",
+    )
+    assert manifest_writer.index("noctalia.writeFile(temporary") < manifest_writer.index(
+        "noctalia.renameFile(temporary, previewManifestPath)"
+    )
+
+    pruning = panel[
+        panel.index("local function prunePreviewCache") : panel.index(
+            "local function initializePreviewCache"
+        )
+    ]
+    require_all(
+        pruning,
+        (
+            "table.sort(ordered",
+            "> PREVIEW_MAX_ENTRIES",
+            "totalBytes > PREVIEW_MAX_CACHE_BYTES",
+            "removePreviewEntry(victim.key, true)",
+            "totalBytes = math.max(0, totalBytes - victim.bytes)",
+        ),
+        "fixed-size LRU preview pruning",
+    )
+
+    initialization = panel[
+        panel.index("local function initializePreviewCache") : panel.index(
+            "local function previewShellQuote"
+        )
+    ]
+    require_all(
+        initialization,
+        (
+            "noctalia.pluginDir()",
+            "noctalia.pluginDataDir()",
+            '"/scripts/provider-thumbnail"',
+            '"/provider-previews/v1"',
+            '"/manifest.json"',
+            "noctalia.mkdirAll(previewCacheDirectory)",
+            "tonumber(manifestInfo.size) <= PREVIEW_MAX_MANIFEST_BYTES",
+            "#raw <= PREVIEW_MAX_MANIFEST_BYTES",
+            "tonumber(decoded.schema) == PREVIEW_CACHE_SCHEMA",
+            "previewEntryValid(key, entry)",
+            "prunePreviewCache()",
+            "noctalia.listDir(previewCacheDirectory)",
+            'name == "manifest.json.tmp"',
+        ),
+        "bounded preview cache initialization and schema discard",
+    )
+    assert initialization.index("noctalia.fileInfo(previewManifestPath)") < initialization.index(
+        "noctalia.readFile(previewManifestPath)"
+    )
+
+    helper_result = panel[
+        panel.index("local function previewHelperResult") : panel.index(
+            "local function previewExtension"
+        )
+    ]
+    require_all(
+        helper_result,
+        (
+            "result.timedOut == true",
+            "tonumber(result.exitCode) ~= 0",
+            "protocol ~= PREVIEW_PROTOCOL",
+            'outcome ~= "ok"',
+        ),
+        "thumbnail helper result protocol gate",
+    )
+
+    completion = panel[
+        panel.index("local function finishPreviewTask") : panel.index("pumpPreviewQueue = function()")
+    ]
+    require_all(
+        completion,
+        (
+            "transport.provider == task.provider",
+            "transport.effective_url == task.url",
+            "transport.path == task.staging_path",
+            "transport.bytes <= PREVIEW_MAX_FILE_BYTES",
+            "math.floor(tonumber(info.size) or 0) == transport.bytes",
+            "task.generation ~= previewGeneration",
+            "noctalia.removeFile(task.staging_path)",
+            "clearPreviewFailure(task.url)",
+            "recordPreviewFailure(task.url)",
+            "noctalia.renameFile(task.staging_path, finalPath)",
+            "prunePreviewCache()",
+            "savePreviewManifest()",
+            "noctalia.removeFile(task.staging_path)",
+        ),
+        "post-helper preview promotion gate",
+    )
+
+    pump = panel[
+        panel.index("pumpPreviewQueue = function()") : panel.index(
+            "local function ensureProviderPreview"
+        )
+    ]
+    require_all(
+        pump,
+        (
+            "previewActive < PREVIEW_MAX_CONCURRENT",
+            "task.generation == previewGeneration",
+            "previewPending[task.key] == nil",
+            "previewRetryReady(task.url)",
+            '" fetch "',
+            "previewShellQuote(task.provider)",
+            "previewShellQuote(task.url)",
+            "previewShellQuote(task.staging_path)",
+            "noctalia.runAsync(command",
+            "40000",
+        ),
+        "bounded and de-duplicated preview work queue",
+    )
+
+    ensure = panel[
+        panel.index("local function ensureProviderPreview") : panel.index(
+            "local function providerPreviewNode"
+        )
+    ]
+    require_all(
+        ensure,
+        (
+            "#previewQueue < PREVIEW_MAX_QUEUE",
+            "generation = previewGeneration",
+            "previewRetryReady(safeUrl)",
+        ),
+        "hard-bounded generation-aware preview enqueue",
+    )
+    assert "previewFailedUrls" not in panel, "preview failures must not remain permanent for the runtime"
+
+    preview_node = panel[
+        panel.index("local function providerPreviewNode") : panel.index(
+            "local function resetLibraryVisibility"
+        )
+    ]
+    require_all(
+        preview_node,
+        (
+            "previewAbsolutePath(path)",
+            "noctalia.fileExists(path)",
+            "return ui.image({",
+            "path = path",
+            'fit = "cover"',
+            "return ui.row({",
+        ),
+        "local-file preview node with placeholder fallback",
+    )
+    for forbidden in ("http://", "https://", "thumbnail_url", "poster_url", "thumbs"):
+        assert forbidden not in preview_node, f"preview image node can consume remote data directly: {forbidden}"
+
+    wallhaven_section = panel[
+        panel.index("local function wallhavenSection") : panel.index("local function motionBgsSection")
+    ]
+    motionbgs_section = panel[
+        panel.index("local function motionBgsSection") : panel.index("local function librarySection")
+    ]
+    for source, provider, remote_field in (
+        (wallhaven_section, "wallhaven", "thumbs"),
+        (motionbgs_section, "motionbgs", "thumbnail_url"),
+    ):
+        require_all(
+            source,
+            (
+                remote_field,
+                f'preview.ensure("{provider}"',
+                f'preview.node("{provider}"',
+            ),
+            f"visible {provider} preview wiring",
+        )
+        assert "if value <" in source and "preview.cancel()" in source, (
+            f"{provider} show-fewer can leave invisible preview work queued"
+        )
+
+    wallhaven_fetches = wallhaven_section[
+        wallhaven_section.index("local ready =") : wallhaven_section.index("local sortingValues")
+    ]
+    motionbgs_fetches = motionbgs_section[
+        motionbgs_section.index("local integrationReady =") : motionbgs_section.index("local children =")
+    ]
+    for source, readiness, provider in (
+        (wallhaven_fetches, "if ready then", "wallhaven"),
+        (motionbgs_fetches, "if integrationReady then", "motionbgs"),
+    ):
+        assert readiness in source
+        assert source.index(readiness) < source.index(f'preview.ensure("{provider}"'), (
+            f"{provider} previews can fetch while the integration is force-disabled"
+        )
+        assert f'preview.scope("{provider}:"' in source
+
+    on_close = panel[panel.index("function onOpen") : panel.index("function onSettings")]
+    assert "preview.close()" in on_close, "closing the panel must cancel queued preview presentation work"
+    on_settings = panel[panel.index("function onSettings") : panel.index("function onIpc")]
+    assert "preview.close()" in on_settings, "opening settings must cancel queued preview presentation work"
+    require_all(
+        on_settings,
+        ("function update()", "if isOpen and preview.retryDue() then", "render()"),
+        "bounded preview retry wakeup",
+    )
+    assert "noctalia.setUpdateInterval(preview.retryPollMs)" in panel
+
+    navigation = panel[
+        panel.index("function panelPages.selectPage") : panel.index(
+            "function panelPages.navigationButton"
+        )
+    ]
+    assert navigation.count("preview.cancel()") >= 3, "page changes must retire invisible preview generations"
+
+    for image_call in re.findall(r"ui\.image\(\{(.*?)\}\)", panel, flags=re.DOTALL):
+        assert "http://" not in image_call and "https://" not in image_call
+        assert "thumbnail_url" not in image_call and "poster_url" not in image_call
 
 
 def test_renderer_static_contract() -> None:
@@ -3145,11 +3803,13 @@ def test_motionbgs_contract() -> None:
         service,
         (
             "local SCHEMA = 1",
+            "local CACHE_SCHEMA = 2",
             'local COMMAND_KEY = "wall_in_one_motionbgs_command_v1"',
             'local COMMAND_ACK_KEY = "wall_in_one_motionbgs_command_ack_v1"',
             'local STATUS_KEY = "wall_in_one_motionbgs_status_v1"',
             'local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"',
-            "local MAX_RESULTS = 24",
+            "local MAX_RESULTS = 48",
+            "local SEARCH_ANCHORS_PER_TICK = 1",
             "local MAX_QUEUE = 8",
             "local MAX_CACHE_SEARCHES = 8",
             "local MAX_CACHE_DETAILS = 48",
@@ -3173,8 +3833,34 @@ def test_motionbgs_contract() -> None:
             'quality == "4k"',
             'kind == "site-markup" or kind == "challenge"',
             "challengePage",
-            "parseSearchHtml",
+            "local function beginSearchParse(html, limit)",
+            "local function appendSearchCard(parser, attributes, body)",
+            "local function advanceSearchParse(parser)",
+            "processed < SEARCH_ANCHORS_PER_TICK",
+            'local normalizedDigits = digits:gsub(",", "")',
+            "tonumber(normalizedDigits)",
+            "local function beginSearchOperation(operation, transport)",
+            "local function advanceSearchOperation(operation)",
+            "parser.ready = true",
+            "deferred = beginSearchOperation(operation, transport)",
+            "if not deferred then",
+            'type(activeOperation.search_parse) == "table"',
+            "advanceSearchOperation(activeOperation)",
+            "local function normalizedBrowseRequest(candidate)",
+            "local function browseUrl(request)",
+            "local function listingRouteMatches(request, value)",
+            "local function parseListingMeta(html, request, itemCount)",
+            'mode ~= "search" and mode ~= "latest" and mode ~= "genre" and mode ~= "4k" and mode ~= "hd"',
+            "MotionBGS text search does not expose pagination",
+            "MotionBGS currently redirects HD pages after page 1 into the unfiltered catalog",
+            'request.mode == "latest" or request.mode == "genre" or request.mode == "4k"',
+            'request.mode == "latest"',
+            'return table.concat({',
             "parseDetailsHtml",
+            "normalizeStillImageUrl",
+            'for _, attribute in ipairs({ "data-src", "data-lazy-src", "data-original", "src" }) do',
+            'for _, attribute in ipairs({ "data-srcset", "srcset", "data-src", "src" }) do',
+            'candidate:match("^%s*([^%s]+)")',
             'spanText(body, "ttl")',
             'path:match("^/dl/([%w]+)/(%d+)/?$")',
             "normalizeSiteUrl",
@@ -3209,6 +3895,28 @@ def test_motionbgs_contract() -> None:
         "MotionBGS service",
     )
     assert service.count('local function hasClass(attributes, wanted)') == 1
+
+    still_parser = service[
+        service.index("local function normalizeStillImageUrl") : service.index(
+            "local function challengePage"
+        )
+    ]
+    require_all(
+        still_parser,
+        (
+            "^https://motionbgs%.com/media/",
+            "^https://motionbgs%.com/i/c/",
+            "tonumber(width) > 4096",
+            'lower:match("%.jpe?g$")',
+            'attributeValue(attributes, attribute)',
+            '"data-src", "data-lazy-src", "data-original", "src"',
+            '"data-srcset", "srcset", "data-src", "src"',
+        ),
+        "MotionBGS lazy still candidate selection",
+    )
+    assert still_parser.index('"data-src"') < still_parser.index('"src"'), (
+        "MotionBGS lazy data-src must be considered before a placeholder src"
+    )
 
     bounded_reader = service[
         service.index("local function readBoundedRegularFile") : service.index(
@@ -3257,7 +3965,7 @@ def test_motionbgs_contract() -> None:
     assert "noctalia.readFile(cachePath)" not in cache_load
 
     search_response = service[
-        service.index("local function performSearch") : service.index("local function enqueueDownload")
+        service.index("local function beginSearchOperation") : service.index("local function enqueueDownload")
     ]
     detail_response = service[
         service.index("local function performDetails") : service.index("local function performDownload")
@@ -3492,6 +4200,18 @@ def test_ui_and_documentation_surface() -> None:
             'kind = "wallhaven_detail"',
             'kind = "wallhaven_download"',
             'kind = "wallhaven_clear"',
+            'key = "wallhaven-resolution-mode"',
+            'key = "wallhaven-top-range"',
+            'noctalia.tr("panel.wallhaven.previous_page")',
+            'noctalia.tr("panel.wallhaven.next_page")',
+            'key = "motionbgs-mode"',
+            'key = "motionbgs-genre-preset"',
+            'noctalia.tr("panel.motionbgs.mode_latest")',
+            'noctalia.tr("panel.motionbgs.genre_presets.custom")',
+            '"hello-kitty"',
+            'key = "motionbgs-page"',
+            'noctalia.tr("panel.motionbgs.previous_page")',
+            'noctalia.tr("panel.motionbgs.next_page")',
             "local function paletteInventory()",
             '{ id = "audio_volume_down", label = "actions.audio_volume_down" }',
             '{ id = "audio_volume_up", label = "actions.audio_volume_up" }',
@@ -3585,8 +4305,20 @@ def test_ui_and_documentation_surface() -> None:
         "`--send-only`",
         "pause/resume uses exact-pid signals",
         "mute/volume is unavailable",
+        "provider-previews/v1",
+        "64 entries",
+        "64 mib",
+        "2 mib",
+        "never follow redirects",
+        "only a local file through `ui.image`",
     ):
         assert phrase in readme, f"README does not document {phrase!r}"
+    for retired in (
+        "metadata browsers",
+        "do not cache or render remote thumbnails",
+        "thumbnail cache is intentionally left for a later refinement",
+    ):
+        assert retired not in readme, f"README still advertises the retired preview limitation: {retired!r}"
 
 
 def main() -> None:
@@ -3602,6 +4334,8 @@ def main() -> None:
     test_palette_inventory_contract()
     test_wallhaven_contract()
     test_bounded_fetch_contract()
+    test_provider_thumbnail_helper_contract()
+    test_provider_preview_panel_contract()
     test_renderer_static_contract()
     test_capture_helper_fallback_validation()
     test_renderer_supervisor()
