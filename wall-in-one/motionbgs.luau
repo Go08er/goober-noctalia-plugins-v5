@@ -8,14 +8,21 @@
 -- response size/time limits and atomic downloads.
 
 local SCHEMA = 1
+local CACHE_SCHEMA = 2
 local COMMAND_KEY = "wall_in_one_motionbgs_command_v1"
 local COMMAND_ACK_KEY = "wall_in_one_motionbgs_command_ack_v1"
 local STATUS_KEY = "wall_in_one_motionbgs_status_v1"
 local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"
 local BASE_URL = "https://motionbgs.com"
 local MAX_NONCE = 9007199254740991
-local MAX_RESULTS = 24
+local MAX_RESULTS = 48
 local MAX_QUERY_BYTES = 80
+local MAX_CACHE_KEY_BYTES = 240
+local MAX_PAGE = 10000
+-- Noctalia gives every update callback a deliberately small CPU budget.  A
+-- listing card involves several bounded markup scans, so advance one anchor at
+-- a time and let the regular update cadence amortize a full provider page.
+local SEARCH_ANCHORS_PER_TICK = 1
 local MAX_QUEUE = 8
 local MAX_CACHE_SEARCHES = 8
 local MAX_CACHE_DETAILS = 48
@@ -43,7 +50,7 @@ local cachePath = ""
 local helperPath = ""
 
 local cache = {
-    schema = SCHEMA,
+    schema = CACHE_SCHEMA,
     searches = {},
     search_order = {},
     details = {},
@@ -76,11 +83,21 @@ local results = {
     schema = SCHEMA,
     sequence = 0,
     nonce = 0,
+    mode = "search",
     query = "",
+    genre = "",
+    page = 1,
     source_url = BASE_URL,
     cached = false,
     fetched_at = 0,
     items = {},
+    meta = {
+        current_page = 1,
+        has_previous = false,
+        has_next = false,
+        pageable = false,
+        total_hint = 0,
+    },
     selected = {},
 }
 
@@ -393,8 +410,126 @@ local function normalizeSiteUrl(value)
     return value
 end
 
+local function normalizedQuery(value)
+    if type(value) ~= "string" or value:find("[%c]") then
+        return nil
+    end
+    local query = noctalia.string.trim(value):gsub("%s+", " ")
+    if query == "" or #query > MAX_QUERY_BYTES then
+        return nil
+    end
+    return query
+end
+
+local function normalizedBrowseRequest(candidate)
+    local mode = tostring(candidate.mode or "search"):lower()
+    if mode ~= "search" and mode ~= "latest" and mode ~= "genre" and mode ~= "4k" and mode ~= "hd" then
+        return nil, "Browse mode must be search, latest, genre, 4k, or hd"
+    end
+
+    local page = tonumber(candidate.page or 1)
+    if page == nil or page ~= math.floor(page) or page < 1 or page > MAX_PAGE then
+        return nil, "Page must be an integer from 1 through " .. tostring(MAX_PAGE)
+    end
+
+    local query = ""
+    local genre = ""
+    if mode == "search" then
+        query = normalizedQuery(candidate.query)
+        if query == nil then
+            return nil, "Search query must be 1-80 bytes and contain no controls"
+        end
+        if page ~= 1 then
+            return nil, "MotionBGS text search does not expose pagination"
+        end
+    elseif mode == "genre" then
+        genre = validSlug(candidate.genre)
+        if genre == nil then
+            return nil, "Genre/tag must be a lowercase MotionBGS slug such as nature or anime"
+        end
+    elseif mode == "hd" and page ~= 1 then
+        return nil, "MotionBGS currently redirects HD pages after page 1 into the unfiltered catalog"
+    end
+
+    return {
+        mode = mode,
+        query = query,
+        genre = genre,
+        page = page,
+    },
+        nil
+end
+
+local function browseUrl(request)
+    if request.mode == "search" then
+        return BASE_URL .. "/search?q=" .. noctalia.string.urlEncode(request.query)
+    elseif request.mode == "latest" then
+        return BASE_URL .. "/" .. (if request.page == 1 then "" else tostring(request.page) .. "/")
+    elseif request.mode == "genre" then
+        local suffix = if request.page == 1 then "/" else "/" .. tostring(request.page) .. "/"
+        return BASE_URL .. "/tag:" .. request.genre .. suffix
+    elseif request.mode == "4k" then
+        return BASE_URL .. "/4k/" .. (if request.page == 1 then "" else tostring(request.page) .. "/")
+    end
+    return BASE_URL .. "/hd/"
+end
+
+local function sitePath(value)
+    local normalized = normalizeSiteUrl(value)
+    if normalized == nil then
+        return nil
+    end
+    local suffix = normalized:sub(#BASE_URL + 1)
+    local path = suffix:match("^([^?]*)") or ""
+    path = path:gsub("/+$", "")
+    return if path == "" then "/" else path
+end
+
+local function listingRouteMatches(request, value)
+    local actual = sitePath(value)
+    if actual == nil then
+        return false
+    end
+    if request.mode == "search" then
+        return actual == "/search"
+    end
+    return actual == sitePath(browseUrl(request))
+end
+
+local function normalizeStillImageUrl(value)
+    local normalized = normalizeSiteUrl(value)
+    if normalized == nil then
+        return nil
+    end
+    local mediaId, filename = normalized:match(
+        "^https://motionbgs%.com/media/([0-9]+)/([A-Za-z0-9][A-Za-z0-9._-]*)$"
+    )
+    if mediaId == nil then
+        local width, height
+        width, height, mediaId, filename = normalized:match(
+            "^https://motionbgs%.com/i/c/([1-9][0-9]*)x([1-9][0-9]*)/media/([0-9]+)/([A-Za-z0-9][A-Za-z0-9._-]*)$"
+        )
+        if
+            width == nil
+            or tonumber(width) > 4096
+            or height == nil
+            or tonumber(height) > 4096
+        then
+            return nil
+        end
+    end
+    if mediaId == nil or #mediaId > 12 or filename == nil or #filename > 240 then
+        return nil
+    end
+    local lower = filename:lower()
+    return if lower:match("%.jpe?g$") or lower:match("%.png$") or lower:match("%.webp$") then normalized else nil
+end
+
 local function htmlDecode(value)
     local text = tostring(value or "")
+    if text:find("&", 1, true) == nil then
+        return text
+    end
     text = text:gsub("&amp;", "&")
     text = text:gsub("&quot;", '"')
     text = text:gsub("&#0*39;", "'")
@@ -411,9 +546,10 @@ local function stripMarkup(value)
 end
 
 local function attributeValue(attributes, key)
-    local escapedKey = key:gsub("([^%w])", "%%%1")
-    local prefix = "^" .. escapedKey
-    local spaced = "%s" .. escapedKey
+    -- All callers use fixed ASCII attribute names, so rebuilding an escaped
+    -- pattern for every lookup only burns callback budget.
+    local prefix = "^" .. key
+    local spaced = "%s" .. key
     local value = attributes:match(prefix .. '%s*=%s*"([^"]*)"') or attributes:match(spaced .. '%s*=%s*"([^"]*)"')
     if value == nil then
         value = attributes:match(prefix .. "%s*=%s*'([^']*)'") or attributes:match(spaced .. "%s*=%s*'([^']*)'")
@@ -448,20 +584,27 @@ end
 
 local function firstImage(body)
     for attributes in body:gmatch("<[iI][mM][gG]%s+([^>]-)>") do
-        local source = attributeValue(attributes, "src") or attributeValue(attributes, "data-src")
-        local normalized = normalizeSiteUrl(source)
-        if normalized ~= nil then
-            return normalized
+        -- Lazy cards commonly keep a placeholder in src. Test each lazy still
+        -- independently so a present-but-unusable src cannot mask data-src.
+        for _, attribute in ipairs({ "data-src", "data-lazy-src", "data-original", "src" }) do
+            local normalized = normalizeStillImageUrl(attributeValue(attributes, attribute))
+            if normalized ~= nil then
+                return normalized
+            end
         end
     end
     for attributes in body:gmatch("<[sS][oO][uU][rR][cC][eE]%s+([^>]-)>") do
-        local source = attributeValue(attributes, "srcset") or attributeValue(attributes, "src")
-        if source ~= nil then
-            source = source:match("^([^,%s]+)") or source
-        end
-        local normalized = normalizeSiteUrl(source)
-        if normalized ~= nil then
-            return normalized
+        for _, attribute in ipairs({ "data-srcset", "srcset", "data-src", "src" }) do
+            local candidates = attributeValue(attributes, attribute)
+            if candidates ~= nil then
+                for candidate in candidates:gmatch("[^,]+") do
+                    local source = candidate:match("^%s*([^%s]+)") or ""
+                    local normalized = normalizeStillImageUrl(source)
+                    if normalized ~= nil then
+                        return normalized
+                    end
+                end
+            end
         end
     end
     return ""
@@ -475,65 +618,150 @@ local function challengePage(html)
         or lower:find("checking your browser", 1, true) ~= nil
 end
 
-local function parseSearchHtml(html, limit)
+local function beginSearchParse(html, limit)
     if challengePage(html) then
         return nil, "challenge", "MotionBGS returned an anti-bot challenge; no bypass was attempted"
     end
 
-    local found = {}
-    local seen = {}
-    for attributes, body in html:gmatch("<[aA]%s+([^>]-)>(.-)</[aA]>") do
-        if #found >= limit then
+    return {
+        html = html,
+        limit = limit,
+        cursor = 1,
+        found = {},
+        seen = {},
+    },
+        nil,
+        nil
+end
+
+local function appendSearchCard(parser, attributes, body)
+    local href = attributeValue(attributes, "href")
+    local titleAttribute = attributeValue(attributes, "title") or ""
+    local title = spanText(body, "ttl")
+    local candidate = title ~= "" or titleAttribute:lower():find("live wallpaper", 1, true) ~= nil
+    if not candidate or href == nil then
+        return
+    end
+    local path = href
+    if path:sub(1, #BASE_URL) == BASE_URL then
+        path = path:sub(#BASE_URL + 1)
+    end
+    local slug = path:match("^/([a-z0-9][a-z0-9-]*)/?$")
+    if slug == nil or parser.seen[slug] then
+        return
+    end
+    if title == "" then
+        title = bounded(titleAttribute:gsub("[Ll]ive%s+[Ww]allpaper", ""), 240)
+    end
+    local sourceUrl = normalizeSiteUrl("/" .. slug)
+    local thumbnail = firstImage(body)
+    local quality = spanText(body, "frm")
+    if quality == "" then
+        quality = titleAttribute:match("([4][Kk])") or titleAttribute:match("([Hh][Dd])") or ""
+    end
+    local id = thumbnail:match("/media/(%d+)/") or ""
+    table.insert(parser.found, {
+        slug = slug,
+        id = id,
+        title = title ~= "" and title or slug,
+        quality = bounded(quality, 20):upper(),
+        source_url = sourceUrl,
+        thumbnail_url = thumbnail,
+        provider = "MotionBGS",
+    })
+    parser.seen[slug] = true
+end
+
+local function advanceSearchParse(parser)
+    local processed = 0
+    while processed < SEARCH_ANCHORS_PER_TICK and #parser.found < parser.limit do
+        local _, finish, attributes, body = parser.html:find(
+            "<[aA]%s+([^>]-)>(.-)</[aA]>",
+            parser.cursor
+        )
+        if finish == nil then
+            parser.finished = true
             break
         end
-        local href = attributeValue(attributes, "href")
-        local titleAttribute = attributeValue(attributes, "title") or ""
-        local title = spanText(body, "ttl")
-        local candidate = title ~= "" or titleAttribute:lower():find("live wallpaper", 1, true) ~= nil
-        if candidate and href ~= nil then
-            local path = href
-            if path:sub(1, #BASE_URL) == BASE_URL then
-                path = path:sub(#BASE_URL + 1)
-            end
-            local slug = path:match("^/([a-z0-9][a-z0-9-]*)/?$")
-            if slug ~= nil and not seen[slug] then
-                if title == "" then
-                    title = titleAttribute:gsub("[Ll]ive%s+[Ww]allpaper", "")
-                    title = bounded(title, 240)
-                end
-                local sourceUrl = normalizeSiteUrl("/" .. slug)
-                local thumbnail = firstImage(body)
-                local quality = spanText(body, "frm")
-                if quality == "" then
-                    quality = titleAttribute:match("([4][Kk])") or titleAttribute:match("([Hh][Dd])") or ""
-                end
-                local id = thumbnail:match("/media/(%d+)/") or ""
-                table.insert(found, {
-                    slug = slug,
-                    id = id,
-                    title = title ~= "" and title or slug,
-                    quality = bounded(quality, 20):upper(),
-                    source_url = sourceUrl,
-                    thumbnail_url = thumbnail,
-                    provider = "MotionBGS",
-                })
-                seen[slug] = true
-            end
-        end
+        parser.cursor = finish + 1
+        processed += 1
+        appendSearchCard(parser, attributes, body)
+    end
+    if #parser.found >= parser.limit then
+        parser.finished = true
+    end
+    if parser.finished ~= true then
+        return false, nil, nil
     end
 
-    if #found == 0 then
-        local lower = tostring(html or ""):lower()
+    if #parser.found == 0 then
+        local lower = tostring(parser.html or ""):lower()
         local explicitEmpty = lower:find("no wallpapers", 1, true) ~= nil
             or lower:find("nothing found", 1, true) ~= nil
             or lower:find("no results", 1, true) ~= nil
         if not explicitEmpty then
-            return nil,
+            return true,
                 "site-markup",
                 "MotionBGS returned no recognizable wallpaper cards; its public markup may have changed"
         end
     end
-    return found, nil, nil
+    return true, nil, nil
+end
+
+local function relationToken(attributes, relation)
+    local rel = tostring(attributeValue(attributes, "rel") or ""):lower()
+    for token in rel:gmatch("[^%s]+") do
+        if token == relation then
+            return true
+        end
+    end
+    return false
+end
+
+local function relatedPageUrl(html, relation, request)
+    local targetPage = request.page + (if relation == "next" then 1 else -1)
+    if targetPage < 1 or targetPage > MAX_PAGE then
+        return ""
+    end
+    local targetRequest = {
+        mode = request.mode,
+        query = request.query,
+        genre = request.genre,
+        page = targetPage,
+    }
+    for attributes in html:gmatch("<[lL][iI][nN][kK]%s+([^>]-)>") do
+        if relationToken(attributes, relation) then
+            local href = normalizeSiteUrl(attributeValue(attributes, "href"))
+            if href ~= nil and listingRouteMatches(targetRequest, href) then
+                return href
+            end
+        end
+    end
+    return ""
+end
+
+local function listingTotalHint(html)
+    local title = html:match("<[tT][iI][tT][lL][eE]>(.-)</[tT][iI][tT][lL][eE]>") or ""
+    local digits = stripMarkup(title):match("^([%d,]+)%+")
+    if digits == nil then
+        return 0
+    end
+    -- gsub returns both the replaced string and a replacement count. Bind the
+    -- string first so Luau cannot pass that count to tonumber as its base.
+    local normalizedDigits = digits:gsub(",", "")
+    return math.max(0, math.min(MAX_NONCE, tonumber(normalizedDigits) or 0))
+end
+
+local function parseListingMeta(html, request, itemCount)
+    local pageable = request.mode == "latest" or request.mode == "genre" or request.mode == "4k"
+    return {
+        current_page = request.page,
+        has_previous = pageable and relatedPageUrl(html, "prev", request) ~= "",
+        has_next = pageable and relatedPageUrl(html, "next", request) ~= "",
+        pageable = pageable,
+        total_hint = listingTotalHint(html),
+        count = itemCount,
+    }
 end
 
 local function metaContent(html, propertyName)
@@ -558,7 +786,7 @@ local function parseDetailsHtml(html, slug)
     title = stripMarkup(title):gsub("%s+[Ll]ive%s+[Ww]allpaper%s*$", "")
 
     local preview = normalizeSiteUrl(metaContent(html, "og:video")) or ""
-    local poster = normalizeSiteUrl(metaContent(html, "og:image")) or ""
+    local poster = normalizeStillImageUrl(metaContent(html, "og:image")) or ""
     if preview == "" then
         for attributes in html:gmatch("<[sS][oO][uU][rR][cC][eE]%s+([^>]-)>") do
             local mediaType = (attributeValue(attributes, "type") or ""):lower()
@@ -639,19 +867,32 @@ local function touchOrder(order, key)
 end
 
 local function validCachedSearch(key, record)
+    local request = type(record) == "table" and normalizedBrowseRequest(record) or nil
+    local meta = type(record) == "table" and record.meta or nil
     if
         type(key) ~= "string"
         or key == ""
-        or #key > MAX_QUERY_BYTES
+        or #key > MAX_CACHE_KEY_BYTES
         or key:find("[%c]") ~= nil
         or type(record) ~= "table"
-        or type(record.query) ~= "string"
-        or record.query == ""
-        or #record.query > MAX_QUERY_BYTES
-        or record.query:find("[%c]") ~= nil
+        or request == nil
+        or record.mode ~= request.mode
+        or record.query ~= request.query
+        or record.genre ~= request.genre
+        or tonumber(record.page) ~= request.page
+        or tonumber(record.limit) == nil
+        or tonumber(record.limit) < 1
+        or tonumber(record.limit) > MAX_RESULTS
         or normalizeSiteUrl(record.source_url) == nil
+        or not listingRouteMatches(request, record.source_url)
         or type(record.items) ~= "table"
         or #record.items > MAX_RESULTS
+        or type(meta) ~= "table"
+        or tonumber(meta.current_page) ~= request.page
+        or type(meta.has_previous) ~= "boolean"
+        or type(meta.has_next) ~= "boolean"
+        or type(meta.pageable) ~= "boolean"
+        or tonumber(meta.total_hint) == nil
         or tonumber(record.fetched_at) == nil
     then
         return false
@@ -661,7 +902,7 @@ local function validCachedSearch(key, record)
             type(item) ~= "table"
             or validSlug(item.slug) == nil
             or normalizeSiteUrl(item.source_url) == nil
-            or (tostring(item.thumbnail_url or "") ~= "" and normalizeSiteUrl(item.thumbnail_url) == nil)
+            or (tostring(item.thumbnail_url or "") ~= "" and normalizeStillImageUrl(item.thumbnail_url) == nil)
         then
             return false
         end
@@ -676,6 +917,7 @@ local function validCachedDetail(key, record)
         or validSlug(record.slug) ~= key
         or tostring(record.id or ""):match("^%d+$") == nil
         or normalizeSiteUrl(record.source_url) == nil
+        or (tostring(record.poster_url or "") ~= "" and normalizeStillImageUrl(record.poster_url) == nil)
         or type(record.downloads) ~= "table"
         or tonumber(record.fetched_at) == nil
     then
@@ -729,7 +971,7 @@ local function rebuildOrderedCache(order, values, maximum, validator)
 end
 
 local function normalizeCache(candidate)
-    if type(candidate) ~= "table" or tonumber(candidate.schema) ~= SCHEMA then
+    if type(candidate) ~= "table" or tonumber(candidate.schema) ~= CACHE_SCHEMA then
         return nil
     end
     local searches, searchOrder =
@@ -737,7 +979,7 @@ local function normalizeCache(candidate)
     local details, detailOrder =
         rebuildOrderedCache(candidate.detail_order, candidate.details, MAX_CACHE_DETAILS, validCachedDetail)
     return {
-        schema = SCHEMA,
+        schema = CACHE_SCHEMA,
         searches = searches,
         search_order = searchOrder,
         details = details,
@@ -793,17 +1035,28 @@ local function fresh(timestamp)
     return age >= 0 and age <= cacheTtlSeconds()
 end
 
-local function searchKey(query)
-    return query:lower():gsub("%s+", " ")
+local function searchKey(request, limit)
+    return table.concat({
+        request.mode,
+        request.query:lower():gsub("%s+", " "),
+        request.genre,
+        tostring(request.page),
+        tostring(limit),
+    }, "|")
 end
 
-local function cacheSearch(query, sourceUrl, items)
-    local key = searchKey(query)
+local function cacheSearch(request, limit, sourceUrl, items, meta)
+    local key = searchKey(request, limit)
     cache.searches[key] = {
-        query = query,
+        mode = request.mode,
+        query = request.query,
+        genre = request.genre,
+        page = request.page,
+        limit = limit,
         source_url = sourceUrl,
         fetched_at = nowSeconds(),
         items = items,
+        meta = meta,
     }
     touchOrder(cache.search_order, key)
     trimOrder(cache.search_order, cache.searches, MAX_CACHE_SEARCHES)
@@ -838,11 +1091,21 @@ end
 
 local function setVisibleSearch(entry, nonce, cached)
     results.nonce = nonce
+    results.mode = tostring(entry.mode or "search")
     results.query = tostring(entry.query or "")
+    results.genre = tostring(entry.genre or "")
+    results.page = tonumber(entry.page) or 1
     results.source_url = normalizeSiteUrl(entry.source_url) or BASE_URL
     results.cached = cached == true
     results.fetched_at = tonumber(entry.fetched_at) or 0
     results.items = type(entry.items) == "table" and entry.items or {}
+    results.meta = type(entry.meta) == "table" and entry.meta or {
+        current_page = results.page,
+        has_previous = false,
+        has_next = false,
+        pageable = false,
+        total_hint = 0,
+    }
     results.selected = {}
     publishResults()
 end
@@ -923,19 +1186,68 @@ local function finishNetworkOperation(operation)
     pumpQueue()
 end
 
-local function performSearch(operation, transport)
+local function beginSearchOperation(operation, transport)
     local raw = readBoundedRegularFile(transport.path, MAX_HTML_RESPONSE_BYTES)
     noctalia.removeFile(transport.path)
     if type(raw) ~= "string" then
         failNonce(operation.nonce, "search", "local-io", "search response could not be read safely")
-        return
+        return false
     end
-    local items, kind, parseError = parseSearchHtml(raw, operation.limit)
-    if items == nil then
+    local parser, kind, parseError = beginSearchParse(raw, operation.limit)
+    if parser == nil then
         failNonce(operation.nonce, "search", kind, parseError)
+        return false
+    end
+    operation.search_parse = parser
+    operation.search_source_url = transport.effective_url or operation.url
+    return true
+end
+
+local function advanceSearchOperation(operation)
+    if
+        operation.cancelled == true
+        or operation.generation ~= operationGeneration
+        or not providerAvailable()
+    then
+        operation.search_parse = nil
+        finishNetworkOperation(operation)
         return
     end
-    local entry, saved = cacheSearch(operation.query, transport.effective_url or operation.url, items)
+
+    local parser = operation.search_parse
+    if type(parser) ~= "table" then
+        failNonce(operation.nonce, "search", "internal", "MotionBGS search parser state was lost")
+        finishNetworkOperation(operation)
+        return
+    end
+    if parser.ready ~= true then
+        local finished, kind, parseError = advanceSearchParse(parser)
+        if finished ~= true then
+            return
+        end
+        if kind ~= nil then
+            operation.search_parse = nil
+            failNonce(operation.nonce, "search", kind, parseError)
+            finishNetworkOperation(operation)
+            return
+        end
+        -- Final metadata/cache publication runs on the next service tick so a
+        -- full 36-card page cannot combine parsing and JSON work in one CPU
+        -- budget window.
+        parser.ready = true
+        return
+    end
+
+    local items = parser.found
+    local meta = parseListingMeta(parser.html, operation.request, #items)
+    local entry, saved = cacheSearch(
+        operation.request,
+        operation.limit,
+        operation.search_source_url or operation.url,
+        items,
+        meta
+    )
+    operation.search_parse = nil
     setVisibleSearch(entry, operation.nonce, false)
     if not saved then
         failNonce(
@@ -944,9 +1256,11 @@ local function performSearch(operation, transport)
             "cache",
             status.last_error ~= "" and status.last_error or "Could not persist the MotionBGS search cache"
         )
+        finishNetworkOperation(operation)
         return
     end
     completeNonce(operation.nonce, "search")
+    finishNetworkOperation(operation)
 end
 
 local function enqueueDownload(operation, detail)
@@ -1181,6 +1495,7 @@ local function launchOperation(operation)
         end
 
         local transport, kind, message = helperResult(result)
+        local deferred = false
         if transport == nil then
             if operation.response_path ~= nil and noctalia.fileExists(operation.response_path) then
                 noctalia.removeFile(operation.response_path)
@@ -1199,14 +1514,19 @@ local function launchOperation(operation)
                 noctalia.removeFile(operation.response_path)
             end
             failNonce(operation.nonce, operation.kind, "protocol", "MotionBGS helper returned the wrong response path")
+        elseif operation.kind == "search" and not listingRouteMatches(operation.request, transport.effective_url) then
+            noctalia.removeFile(operation.response_path)
+            failNonce(operation.nonce, "search", "protocol", "MotionBGS redirected into a different catalog route")
         elseif operation.kind == "search" then
-            performSearch(operation, transport)
+            deferred = beginSearchOperation(operation, transport)
         elseif operation.kind == "details" then
             performDetails(operation, transport)
         else
             performDownload(operation, transport)
         end
-        finishNetworkOperation(operation)
+        if not deferred then
+            finishNetworkOperation(operation)
+        end
     end, timeout)
 
     if not accepted then
@@ -1233,33 +1553,28 @@ pumpQueue = function()
     launchOperation(operation)
 end
 
-local function normalizedQuery(value)
-    if type(value) ~= "string" or value:find("[%c]") then
-        return nil
-    end
-    local query = noctalia.string.trim(value):gsub("%s+", " ")
-    if query == "" or #query > MAX_QUERY_BYTES then
-        return nil
-    end
-    return query
-end
-
 local function handleSearch(command, nonce)
-    local query = normalizedQuery(command.query)
-    if query == nil then
-        failNonce(nonce, "search", "invalid-query", "Search query must be 1-80 bytes and contain no controls")
+    local request, requestError = normalizedBrowseRequest(command)
+    if request == nil then
+        failNonce(nonce, "search", "invalid-browse", requestError)
         return
     end
     local limit = math.floor(tonumber(command.limit) or configuredResultLimit())
     limit = math.max(1, math.min(MAX_RESULTS, limit))
-    local cached = cache.searches[searchKey(query)]
+    local cached = cache.searches[searchKey(request, limit)]
     if command.force ~= true and type(cached) == "table" and fresh(cached.fetched_at) then
         setVisibleSearch(cached, nonce, true)
         completeNonce(nonce, "search")
         return
     end
-    local url = BASE_URL .. "/search?q=" .. noctalia.string.urlEncode(query)
-    local queued, enqueueError = enqueue({ kind = "search", nonce = nonce, query = query, limit = limit, url = url })
+    local url = browseUrl(request)
+    local queued, enqueueError = enqueue({
+        kind = "search",
+        nonce = nonce,
+        request = request,
+        limit = limit,
+        url = url,
+    })
     if not queued then
         if enqueueError == "unavailable" then
             failNonce(nonce, "search", "unavailable", "MotionBGS integration became unavailable")
@@ -1323,12 +1638,22 @@ local function handleCommand(command)
 
     if action == "clear" then
         invalidateOperations("MotionBGS requests were cancelled by cache clear", true)
-        cache = { schema = SCHEMA, searches = {}, search_order = {}, details = {}, detail_order = {} }
+        cache = { schema = CACHE_SCHEMA, searches = {}, search_order = {}, details = {}, detail_order = {} }
+        results.mode = "search"
         results.query = ""
+        results.genre = ""
+        results.page = 1
         results.source_url = BASE_URL
         results.cached = false
         results.fetched_at = 0
         results.items = {}
+        results.meta = {
+            current_page = 1,
+            has_previous = false,
+            has_next = false,
+            pageable = false,
+            total_hint = 0,
+        }
         results.selected = {}
         local saved = saveCache()
         publishResults()
@@ -1383,7 +1708,8 @@ local function initializeStorage()
         cacheDirectory = ""
         return
     end
-    cachePath = cacheDirectory .. "/cache-v1.json"
+    noctalia.removeFile(cacheDirectory .. "/cache-v1.json")
+    cachePath = cacheDirectory .. "/cache-v2.json"
     loadCache()
     if usesManagedDownloadDirectory() then
         -- This is deliberately separate from pluginDataDir()/motionbgs, which
@@ -1395,7 +1721,11 @@ local function initializeStorage()
 end
 
 function update()
-    pumpQueue()
+    if type(activeOperation) == "table" and type(activeOperation.search_parse) == "table" then
+        advanceSearchOperation(activeOperation)
+    else
+        pumpQueue()
+    end
 end
 
 function onConfigChanged()

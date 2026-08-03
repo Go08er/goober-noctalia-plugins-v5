@@ -21,7 +21,7 @@ inside the guest. Once every file is committed, `.#...` is equivalent.
 | --- | --- |
 | `vm-test` | Hydra rendering, actions, hot reload, settings, and native searchable glyph picker |
 | `vm-test-nocvox` | NocVox singleton listener, state/control matrix, diagnostics, validation, privacy, and teardown |
-| `vm-test-wall-in-one` | Five-service startup, provider policy, reusable pairings/playlists, month-aware schedules, adaptive palette preview, internal renderer ownership and crash backoff, MotionBGS fixtures, schema-3→4/runtime-6 migration, panel compilation/rendering/IPC, and teardown persistence |
+| `vm-test-wall-in-one` | Five-service startup, provider policy, reusable pairings/playlists, month-aware schedules, adaptive palette and provider-thumbnail rendering, internal renderer ownership and crash backoff, MotionBGS fixtures, schema-3→4/runtime-6 migration, panel compilation/IPC, and teardown persistence |
 
 Each suite also exposes an interactive driver by adding `-driver` to its
 package name. For example:
@@ -99,6 +99,14 @@ log, a changed compositor screenshot, a provider probe initiated by `onOpen`,
 and successful panel IPC. Luau load failures, `onOpen` failures, and local-
 register exhaustion fail the gate explicitly.
 
+Wallhaven and MotionBGS thumbnail presentation is also exercised without the
+internet. The shipped thumbnail helper first runs its own boundary self-test;
+the guest then substitutes an exact-protocol helper that installs two distinct
+local PNG fixtures. The real provider panes must render those colors through
+`ui.image`, write a bounded manifest with valid local files, reuse both entries
+when the fixture rejects every cache miss, and leave no staging or manifest
+temporary behind.
+
 The renderer fixture records NUL-delimited argv and keeps each fake child alive
 long enough to test replacement, pause/resume/toggle, stop, output ownership,
 and teardown. The VM pins the configured `--layer background` path while the
@@ -162,9 +170,13 @@ by the separate official plugin remain user-owned and non-deletable here.
 MotionBGS is tested without internet access. A guest-only conservative helper
 returns pinned search/detail HTML and a tiny local MP4 through the exact
 `WIO-MBG1` protocol. Tests cover same-origin parsing, bounded results, HD/4K
-links, cache hits without another fetch, serialized commands, challenge and
+links, the same route validation used for pageable latest/genre/4K catalogs, a
+36-card pageable genre fixture, per-page cache hits without another
+fetch, rejection of the site's broken HD-page shape before transport,
+serialized commands, challenge and
 unknown-markup failures, cross-origin rejection, atomic MP4 install, provenance
-sidecar creation, clear, and status/results mirroring. The shipped helper's
+sidecar creation, clear, and status/results mirroring. Provider previews use a
+second exact-protocol fixture and real image pixels. The shipped helper's
 local self-test runs before the fixture is substituted.
 
 The guest currently seeds a config-schema-3 playlist/schedule fixture and a

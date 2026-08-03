@@ -210,9 +210,10 @@ boundary.
 ### Wall-in-One coordination and pairing
 
 Wall-in-One `0.5.0` coordinates Noctalia stills and palettes, local video,
-Wallpaper Engine projects, Wallhaven, and bounded MotionBGS browsing in one
-hub. Reusable pairings bind each source to a real static representative and a
-complete theme policy. Named rotate/shuffle playlists can mix all media types,
+Wallpaper Engine projects, pageable Wallhaven search, and bounded MotionBGS
+text/latest/genre/4K browsing in one hub. Reusable pairings bind each source to a real
+static representative and a complete theme policy. Named rotate/shuffle
+playlists can mix all media types,
 run independently per output, and select lower-listed month/weekday/time rules
 when schedules overlap.
 

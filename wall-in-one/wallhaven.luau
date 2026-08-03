@@ -51,11 +51,22 @@ local SORTING_VALUES = {
     views = true,
     favorites = true,
     toplist = true,
+    hot = true,
 }
 
 local ORDER_VALUES = {
     asc = true,
     desc = true,
+}
+
+local TOP_RANGE_VALUES = {
+    ["1d"] = true,
+    ["3d"] = true,
+    ["1w"] = true,
+    ["1M"] = true,
+    ["3M"] = true,
+    ["6M"] = true,
+    ["1y"] = true,
 }
 
 local COLOR_VALUES = {
@@ -680,6 +691,30 @@ local function validatedResolution(value)
     return tostring(math.floor(width)) .. "x" .. tostring(math.floor(height)), nil
 end
 
+local function validatedResolutions(value)
+    if value == nil or value == "" then
+        return "", nil
+    end
+    if type(value) ~= "string" or #value > 192 or value:find("[%c%s]") then
+        return nil, "Exact resolutions must be comma-separated values such as 1920x1080,2560x1440"
+    end
+    local resolutions = {}
+    for token in value:gmatch("[^,]+") do
+        if #resolutions >= 12 then
+            return nil, "resolutions accepts at most twelve exact values"
+        end
+        local normalized = validatedResolution(token)
+        if normalized == nil or normalized == "" then
+            return nil, "Exact resolutions must be comma-separated values such as 1920x1080,2560x1440"
+        end
+        table.insert(resolutions, normalized)
+    end
+    if #resolutions == 0 or table.concat(resolutions, ",") ~= value then
+        return nil, "Exact resolutions must be comma-separated values such as 1920x1080,2560x1440"
+    end
+    return table.concat(resolutions, ","), nil
+end
+
 local function validatedRatios(value)
     if value == nil or value == "" then
         return "", nil
@@ -753,6 +788,13 @@ local function validatedSearchFilters(command, hasApiKey)
     if atleast == nil then
         return nil, atleastError
     end
+    local resolutions, resolutionsError = validatedResolutions(supplied.resolutions)
+    if resolutions == nil then
+        return nil, resolutionsError
+    end
+    if atleast ~= "" and resolutions ~= "" then
+        return nil, "Choose either minimum resolution or exact resolutions, not both"
+    end
     local ratios, ratiosError = validatedRatios(supplied.ratios)
     if ratios == nil then
         return nil, ratiosError
@@ -760,6 +802,17 @@ local function validatedSearchFilters(command, hasApiKey)
     local colors, colorsError = validatedColor(supplied.colors)
     if colors == nil then
         return nil, colorsError
+    end
+
+    local topRange = tostring(supplied.top_range or supplied.topRange or "1M")
+    if not TOP_RANGE_VALUES[topRange] then
+        return nil, "topRange must be one of 1d, 3d, 1w, 1M, 3M, 6M, or 1y"
+    end
+
+    local seed = tostring(supplied.seed or "")
+    local validSeed = seed:match("^[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]$")
+    if seed ~= "" and (sorting ~= "random" or validSeed == nil) then
+        return nil, "seed must be empty or a six-character alphanumeric value used with random sorting"
     end
 
     local pageValue = tonumber(supplied.page or 1)
@@ -774,8 +827,11 @@ local function validatedSearchFilters(command, hasApiKey)
         sorting = sorting,
         order = order,
         atleast = atleast,
+        resolutions = resolutions,
         ratios = ratios,
         colors = colors,
+        top_range = topRange,
+        seed = seed,
         page = pageValue,
     },
         nil
@@ -794,8 +850,14 @@ local function searchUrl(filters)
     append("sorting", filters.sorting)
     append("order", filters.order)
     append("atleast", filters.atleast)
+    append("resolutions", filters.resolutions)
     append("ratios", filters.ratios)
     append("colors", filters.colors)
+    if filters.sorting == "toplist" then
+        append("topRange", filters.top_range)
+    elseif filters.sorting == "random" then
+        append("seed", filters.seed)
+    end
     append("page", tostring(filters.page))
     return API_ORIGIN .. API_PREFIX .. "/search?" .. table.concat(parameters, "&")
 end

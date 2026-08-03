@@ -181,6 +181,21 @@ let
     magick -size 96x64 'xc:#208060' "png:$out"
   '';
 
+  # Deliberately vivid, provider-specific colors make the panel screenshot a
+  # deterministic assertion that ui.image rendered the cached file rather
+  # than leaving the glyph fallback in place.
+  fixtureWallhavenThumbnail = pkgs.runCommand "wall-in-one-vm-wallhaven-thumbnail.png" {
+    nativeBuildInputs = [ pkgs.imagemagick ];
+  } ''
+    magick -size 320x180 'xc:#f51166' -strip "png:$out"
+  '';
+
+  fixtureMotionBgsThumbnail = pkgs.runCommand "wall-in-one-vm-motionbgs-thumbnail.png" {
+    nativeBuildInputs = [ pkgs.imagemagick ];
+  } ''
+    magick -size 320x180 'xc:#12d6c5' -strip "png:$out"
+  '';
+
   fixtureWorkshopStill = pkgs.runCommand "wall-in-one-vm-workshop-still.png" {
     nativeBuildInputs = [ pkgs.imagemagick ];
   } ''
@@ -210,15 +225,46 @@ let
       > "$out/431960001/project.json"
   '';
 
+  motionGenreCards = lib.concatMapStrings (index: ''
+    <a href="/nature-${toString index}" title="Nature ${toString index} Live Wallpaper">
+      <span class="ttl">Nature ${toString index}</span>
+      <span class="frm">4K</span>
+      <img src=/i/c/364x205/media/${toString index}/nature-${toString index}.3840x2160.jpg>
+    </a>
+  '') (lib.range 1 36);
+
   motionSearchHtml = pkgs.writeText "motionbgs-search.html" ''
     <!doctype html><html><body>
       <a href="/night-city" title="Night City Live Wallpaper">
         <span class="ttl">Night City</span>
         <span class="frm">4K</span>
-        <img src="/media/4242/thumb.jpg">
+        <picture>
+          <source srcset=/i/c/364x205/media/4242/night-city.3840x2160.jpg.webp type=image/webp>
+          <img src=/i/c/364x205/media/4242/night-city.3840x2160.jpg>
+        </picture>
       </a>
       <a href="https://evil.example/not-a-card" title="Ignore Live Wallpaper">
         <span class="ttl">Cross origin</span>
+      </a>
+    </body></html>
+  '';
+  motionGenrePageOneHtml = pkgs.writeText "motionbgs-genre-page-1.html" ''
+    <!doctype html><html><head>
+      <title>610+ Nature Live Wallpapers 4K &amp; HD</title>
+      <link rel="next" href="https://motionbgs.com/tag:nature/2/">
+    </head><body>
+      ${motionGenreCards}
+    </body></html>
+  '';
+  motionGenrePageTwoHtml = pkgs.writeText "motionbgs-genre-page-2.html" ''
+    <!doctype html><html><head>
+      <title>600+ Nature Live Wallpapers 4K &amp; HD (Page 2)</title>
+      <link rel="prev" href="https://motionbgs.com/tag:nature/">
+    </head><body>
+      <a href="/nature-page-two" title="Nature Page Two Live Wallpaper">
+        <span class="ttl">Nature Page Two</span>
+        <span class="frm">HD</span>
+        <img src=/i/c/364x205/media/9999/nature-page-two.1920x1080.jpg>
       </a>
     </body></html>
   '';
@@ -526,6 +572,8 @@ let
           good)
             case $url in
               https://motionbgs.com/night-city) source=${motionDetailHtml} ;;
+              https://motionbgs.com/tag:nature/) source=${motionGenrePageOneHtml} ;;
+              https://motionbgs.com/tag:nature/2/) source=${motionGenrePageTwoHtml} ;;
               *) source=${motionSearchHtml} ;;
             esac
             effective=$url
@@ -579,6 +627,50 @@ let
         exit 64
         ;;
     esac
+  '';
+
+  # The production helper is self-tested before this replacement is installed.
+  # Panel coverage then stays fully offline while retaining the helper's exact
+  # success protocol and recording every attempted cache miss.
+  fakeProviderThumbnailHelper = pkgs.writeText "wall-in-one-provider-thumbnail-fixture" ''
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    [[ ''${1:-} == fetch && $# -eq 4 ]] || {
+      printf 'WIO-THUMB1\terror\tusage\t0\tfixture expected fetch PROVIDER URL OUTPUT\n'
+      exit 64
+    }
+
+    provider=$2
+    url=$3
+    destination=$4
+    printf 'fetch\t%s\t%s\t%s\n' "$provider" "$url" "$destination" \
+      >> /tmp/wall-in-one-vm-thumbnail-calls.log
+
+    mode=$(cat /tmp/wall-in-one-vm-thumbnail-mode 2>/dev/null || printf good)
+    if [[ $mode == deny ]]; then
+      printf 'WIO-THUMB1\terror\tfixture-deny\t0\tcache miss unexpectedly reached helper\n'
+      exit 69
+    fi
+    [[ $mode == good ]] || exit 64
+
+    case "$provider:$url" in
+      wallhaven:https://th.wallhaven.cc/lg/ab/abc123.jpg)
+        source=${fixtureWallhavenThumbnail}
+        ;;
+      motionbgs:https://motionbgs.com/i/c/364x205/media/4242/night-city.3840x2160.jpg)
+        source=${fixtureMotionBgsThumbnail}
+        ;;
+      *)
+        printf 'WIO-THUMB1\terror\tfixture-url\t0\tunexpected provider thumbnail URL\n'
+        exit 64
+        ;;
+    esac
+
+    cp -- "$source" "$destination"
+    bytes=$(stat -c %s -- "$destination")
+    printf 'WIO-THUMB1\tok\t%s\t200\t%s\timage/png\t%s\t%s\n' \
+      "$provider" "$url" "$bytes" "$destination"
   '';
 
   fakeWallpaperEngine = pkgs.writeShellApplication {
@@ -1297,6 +1389,15 @@ let
                 query = tostring(payload or "night city"),
                 force = event == "vm-motion-search-force",
             })
+        elseif event == "vm-motion-browse-genre" then
+            vmHandle({
+                kind = "motionbgs_search",
+                mode = "genre",
+                genre = "nature",
+                page = tonumber(payload) or 1,
+            })
+        elseif event == "vm-motion-hd-page-two" then
+            vmHandle({ kind = "motionbgs_search", mode = "hd", page = 2 })
         elseif event == "vm-motion-details" then
             vmHandle({ kind = "motionbgs_details", slug = tostring(payload or "night-city"), force = true })
         elseif event == "vm-motion-download" then
@@ -1317,6 +1418,7 @@ let
         elseif event == "vm-motion-probe" then
             local items = type(motionBgsResults) == "table" and motionBgsResults.items or {}
             local selected = type(motionBgsResults) == "table" and motionBgsResults.selected or {}
+            local meta = type(motionBgsResults) == "table" and motionBgsResults.meta or {}
             local downloaded = type(motionBgsStatus) == "table" and motionBgsStatus.last_download or {}
             noctalia.log(
                 "WALL_IN_ONE_VM_MOTION "
@@ -1326,6 +1428,10 @@ let
                     .. " action=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.last_action or "")
                     .. " error_kind=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.last_error_kind or "")
                     .. " cached=" .. tostring(type(motionBgsResults) == "table" and motionBgsResults.cached == true)
+                    .. " mode=" .. tostring(type(motionBgsResults) == "table" and motionBgsResults.mode or "")
+                    .. " page=" .. tostring(type(meta) == "table" and meta.current_page or 0)
+                    .. " previous=" .. tostring(type(meta) == "table" and meta.has_previous == true)
+                    .. " next=" .. tostring(type(meta) == "table" and meta.has_next == true)
                     .. " items=" .. tostring(type(items) == "table" and #items or 0)
                     .. " first=" .. tostring(type(items[1]) == "table" and items[1].slug or "")
                     .. " selected=" .. tostring(type(selected) == "table" and selected.slug or "")
@@ -1333,6 +1439,127 @@ let
             )
         elseif type(vmProductionOnIpc) == "function" then
             vmProductionOnIpc(event, payload)
+        end
+    end
+  '';
+
+  # This is appended only to the materialized VM panel. It drives the real
+  # provider-section builders with deterministic metadata and keeps them above
+  # the fold, so the screenshot test exercises production preview.ensure(),
+  # preview.node(), async completion, and ui.image rather than a test facsimile.
+  vmPanelPreviewProbe = pkgs.writeText "wall-in-one-vm-panel-preview-probe.luau" ''
+    do
+        local vmPreview = {
+            provider = "",
+            render = render,
+            onIpc = onIpc,
+        }
+
+        render = function()
+            if vmPreview.provider == "" then
+                vmPreview.render()
+                return
+            end
+            if not isOpen then
+                return
+            end
+
+            local section = if vmPreview.provider == "wallhaven"
+                then wallhavenSection()
+                else motionBgsSection()
+            panel.render(ui.column({ gap = 10, padding = 14, align = "stretch", flexGrow = 1 }, {
+                ui.label({
+                    text = "VM provider preview · " .. vmPreview.provider,
+                    fontSize = 14,
+                    fontWeight = "bold",
+                }),
+                ui.scroll({
+                    key = "wall-in-one-vm-provider-preview-" .. vmPreview.provider,
+                    flexGrow = 1,
+                    align = "stretch",
+                    gap = 10,
+                }, { section }),
+            }))
+        end
+
+        onIpc = function(event, payload)
+            if event == "vm-provider-preview" then
+                local provider, token = tostring(payload or ""):match("^([a-z]+):([a-z0-9-]+)$")
+                if provider == "wallhaven" then
+                    local item = {
+                        id = "abc123",
+                        url = "https://wallhaven.cc/w/abc123",
+                        short_url = "https://whvn.cc/abc123",
+                        resolution = "320x180",
+                        ratio = "16:9",
+                        purity = "sfw",
+                        category = "general",
+                        file_size = 12345,
+                        views = 12,
+                        favorites = 3,
+                        thumbs = {
+                            large = "https://th.wallhaven.cc/lg/ab/abc123.jpg",
+                        },
+                    }
+                    wallhavenResultsState = {
+                        schema = 1,
+                        kind = "search",
+                        sequence = 901,
+                        items = { item },
+                        selected = item,
+                        meta = { current_page = 1, last_page = 1, total = 1 },
+                    }
+                    wallhavenState = { available = true, busy = false }
+                    vmPreview.provider = provider
+                    status = composeStatus()
+                    status.storage_valid = true
+                    render()
+                    noctalia.log("WALL_IN_ONE_VM_PROVIDER_PREVIEW wallhaven token=" .. token)
+                    return
+                elseif provider == "motionbgs" then
+                    local item = {
+                        slug = "night-city",
+                        title = "Night City VM Preview",
+                        quality = "4K",
+                        source_url = "https://motionbgs.com/night-city",
+                        thumbnail_url = "https://motionbgs.com/i/c/364x205/media/4242/night-city.3840x2160.jpg",
+                        poster_url = "https://motionbgs.com/media/4242/poster.jpg",
+                        duration = "00:30",
+                        downloads = {},
+                    }
+                    motionBgsResultsState = {
+                        schema = 1,
+                        kind = "search",
+                        sequence = 902,
+                        items = { item },
+                        selected = item,
+                    }
+                    vmPreview.provider = provider
+                    status = composeStatus()
+                    status.storage_valid = true
+                    if type(status.providers) ~= "table" then
+                        status.providers = {}
+                    end
+                    if type(status.providers.motionbgs) ~= "table" then
+                        status.providers.motionbgs = {}
+                    end
+                    status.providers.motionbgs.integration_available = true
+                    render()
+                    noctalia.log("WALL_IN_ONE_VM_PROVIDER_PREVIEW motionbgs token=" .. token)
+                    return
+                end
+            elseif event == "vm-provider-preview-reset" then
+                vmPreview.provider = ""
+                activePage = "main"
+                reloadSharedState()
+                vmPreview.render()
+                noctalia.log("WALL_IN_ONE_VM_PROVIDER_PREVIEW reset")
+                return
+            end
+
+            if type(vmPreview.onIpc) == "function" then
+                vmPreview.onIpc(event, payload)
+            end
         end
     end
   '';
@@ -1400,7 +1627,7 @@ let
     video_directory = "${videoRoot}"
     motionbgs_download_directory = "${videoRoot}"
     motionbgs_quality = "hd"
-    motionbgs_result_limit = 24
+    motionbgs_result_limit = 48
     motionbgs_cache_minutes = 30
     motionbgs_max_download_mb = 16
     auto_capture = true
@@ -1888,11 +2115,24 @@ pkgs.testers.runNixOSTest (
               if isinstance(value, bool):
                   value = str(value).lower()
               filters += " | grep -F -- " + shlex.quote(f"{key}={value}")
-          machine.wait_until_succeeds(
-              noctalia_command(f"plugin ${serviceId} all vm-motion-probe {token}")
-              + " >/dev/null && "
-              + filters
-          )
+          try:
+              machine.wait_until_succeeds(
+                  noctalia_command(f"plugin ${serviceId} all vm-motion-probe {token}")
+                  + " >/dev/null && "
+                  + filters,
+                  timeout=60,
+              )
+          except Exception:
+              print(
+                  "MotionBGS wait failed; recent Noctalia journal:\n"
+                  + machine.execute(
+                      "journalctl -b --no-pager -u noctalia-wall-in-one-vm-session.service "
+                      "| tail -n 180"
+                  )[1]
+                  + "\nMotionBGS fixture calls:\n"
+                  + machine.execute("tail -n 80 /tmp/wall-in-one-vm-motion-calls.log")[1]
+              )
+              raise
 
       library_probe_number = [0]
       def wait_library(**expected):
@@ -2090,8 +2330,15 @@ pkgs.testers.runNixOSTest (
           "| grep -Fx $'WIO-MBG1\\tok\\tself-test'"
       )
       machine.succeed(
+          "runuser -u ${testUser} -- bash "
+          "${materializedRoot}/scripts/provider-thumbnail self-test "
+          "| grep -Fx $'WIO-THUMB1\\tok\\tself-test'"
+      )
+      machine.succeed(
           "cp ${fakeMotionBgsHelper} ${materializedRoot}/scripts/motionbgs-provider; "
-          "chmod 0755 ${materializedRoot}/scripts/motionbgs-provider"
+          "chmod 0755 ${materializedRoot}/scripts/motionbgs-provider; "
+          "cp ${fakeProviderThumbnailHelper} ${materializedRoot}/scripts/provider-thumbnail; "
+          "chmod 0755 ${materializedRoot}/scripts/provider-thumbnail"
       )
 
       # Pin the exact v5.0.0 output grammar before feeding equivalent controlled
@@ -2108,7 +2355,10 @@ pkgs.testers.runNixOSTest (
           "mv ${materializedRoot}/service.luau.new ${materializedRoot}/service.luau && "
           "cat ${materializedRoot}/palettes.luau ${vmPaletteExitProbe} "
           "> ${materializedRoot}/palettes.luau.new && "
-          "mv ${materializedRoot}/palettes.luau.new ${materializedRoot}/palettes.luau"
+          "mv ${materializedRoot}/palettes.luau.new ${materializedRoot}/palettes.luau && "
+          "cat ${materializedRoot}/panel.luau ${vmPanelPreviewProbe} "
+          "> ${materializedRoot}/panel.luau.new && "
+          "mv ${materializedRoot}/panel.luau.new ${materializedRoot}/panel.luau"
       )
       wait_log("hot reload: reloaded service '${serviceId}'")
       wait_log("hot reload: reloaded service '${palettesServiceId}'")
@@ -3167,7 +3417,10 @@ pkgs.testers.runNixOSTest (
       wait_motion(available=True, busy=False)
       set_motion_mode("good")
       noctalia_msg("plugin ${serviceId} all vm-motion-search 'night city'")
-      wait_motion(action="search", cached=False, items=1, first="night-city")
+      wait_motion(
+          action="search", cached=False, busy=False,
+          items=1, first="night-city",
+      )
       motion_calls_after_search = len(
           machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
       )
@@ -3175,10 +3428,50 @@ pkgs.testers.runNixOSTest (
       # A fresh cache hit must not invoke even a deliberately failing helper.
       set_motion_mode("deny")
       noctalia_msg("plugin ${serviceId} all vm-motion-search 'night city'")
-      wait_motion(action="search", cached=True, items=1, first="night-city")
+      wait_motion(
+          action="search", cached=True, busy=False,
+          items=1, first="night-city",
+      )
       assert len(
           machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
       ) == motion_calls_after_search
+
+      # Genre browsing uses the site's real page family, retains every one of
+      # the 36 fixture cards, and caches each page independently. Search mode
+      # remains deliberately unpaged.
+      set_motion_mode("good")
+      noctalia_msg("plugin ${serviceId} all vm-motion-browse-genre 1")
+      wait_motion(
+          action="search", cached=False, busy=False, mode="genre", page=1,
+          previous=False, next=True, items=36, first="nature-1",
+      )
+      motion_calls_after_genre = len(
+          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      )
+      set_motion_mode("deny")
+      noctalia_msg("plugin ${serviceId} all vm-motion-browse-genre 1")
+      wait_motion(
+          action="search", cached=True, busy=False, mode="genre", page=1,
+          previous=False, next=True, items=36, first="nature-1",
+      )
+      assert len(
+          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      ) == motion_calls_after_genre
+
+      set_motion_mode("good")
+      noctalia_msg("plugin ${serviceId} all vm-motion-browse-genre 2")
+      wait_motion(
+          action="search", cached=False, busy=False, mode="genre", page=2,
+          previous=True, next=False, items=1, first="nature-page-two",
+      )
+      motion_calls_after_page_two = len(
+          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      )
+      noctalia_msg("plugin ${serviceId} all vm-motion-hd-page-two")
+      wait_motion(action="search", error_kind="invalid-browse", busy=False)
+      assert len(
+          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      ) == motion_calls_after_page_two
 
       set_motion_mode("good")
       noctalia_msg("plugin ${serviceId} all vm-motion-details night-city")
@@ -3857,6 +4150,145 @@ pkgs.testers.runNixOSTest (
       machine.fail(f"{journal} | grep -F -- \"call to 'onOpen' failed\"")
       machine.copy_from_machine(screenshot)
 
+      # Exercise both real provider panes against a deterministic offline
+      # thumbnail transport. A cache entry alone is insufficient: the captured
+      # pane must contain the fixture's unique color, proving that ui.image
+      # replaced the glyph fallback after async completion.
+      preview_cache = "${pluginDataRoot}/provider-previews/v1"
+      preview_manifest = preview_cache + "/manifest.json"
+      thumbnail_log = "/tmp/wall-in-one-vm-thumbnail-calls.log"
+      thumbnail_mode = "/tmp/wall-in-one-vm-thumbnail-mode"
+      preview_probe_number = [0]
+
+      def render_provider_preview(provider: str):
+          preview_probe_number[0] += 1
+          token = f"preview-{preview_probe_number[0]}"
+          assert noctalia_msg(
+              f"plugin ${pluginId}:hub all vm-provider-preview {provider}:{token}"
+          ).strip() == "ok: dispatched 1"
+          wait_log(f"WALL_IN_ONE_VM_PROVIDER_PREVIEW {provider} token={token}")
+
+      def wait_preview_entry(key: str, provider: str, url: str) -> str:
+          predicate = (
+              f'.schema == 1 and .entries[{json.dumps(key)}].provider == '
+              f'{json.dumps(provider)} and .entries[{json.dumps(key)}].url == '
+              f'{json.dumps(url)} and .entries[{json.dumps(key)}].bytes > 0 and '
+              f'(.entries[{json.dumps(key)}].filename | type) == "string"'
+          )
+          machine.wait_until_succeeds(
+              "${lib.getExe pkgs.jq} -e "
+              + shlex.quote(predicate)
+              + " "
+              + shlex.quote(preview_manifest)
+          )
+          filename = machine.succeed(
+              "${lib.getExe pkgs.jq} -r "
+              + shlex.quote(f'.entries[{json.dumps(key)}].filename')
+              + " "
+              + shlex.quote(preview_manifest)
+          ).strip()
+          assert filename and "/" not in filename and "\\" not in filename, filename
+          cached = preview_cache + "/" + filename
+          machine.succeed(
+              "test -s "
+              + shlex.quote(cached)
+              + " && ${pkgs.imagemagick}/bin/magick identify "
+              + shlex.quote(cached)
+          )
+          return cached
+
+      def wait_preview_color(path: str, color: str):
+          machine.wait_until_succeeds(
+              "rm -f "
+              + shlex.quote(path)
+              + " && runuser -u ${testUser} -- env -i "
+              + ipc_environment
+              + " ${lib.getExe pkgs.grim} -o HEADLESS-1 "
+              + shlex.quote(path)
+              + " && ${pkgs.imagemagick}/bin/magick "
+              + shlex.quote(path)
+              + " -format %c histogram:info:- | grep -Fqi -- "
+              + shlex.quote(color)
+          )
+
+      machine.fail("test -e " + shlex.quote(thumbnail_log))
+      machine.succeed("printf '%s\\n' good > " + shlex.quote(thumbnail_mode))
+
+      render_provider_preview("motionbgs")
+      motion_preview = wait_preview_entry(
+          "motionbgs:night-city",
+          "motionbgs",
+          "https://motionbgs.com/i/c/364x205/media/4242/night-city.3840x2160.jpg",
+      )
+      machine.succeed(
+          "cmp -s "
+          + shlex.quote(motion_preview)
+          + " ${fixtureMotionBgsThumbnail}"
+      )
+      wait_preview_color(
+          "/tmp/noctalia-wall-in-one-vm-motion-preview.png",
+          "#12D6C5",
+      )
+      assert len(machine.succeed("cat " + shlex.quote(thumbnail_log)).splitlines()) == 1
+
+      # A second render under a helper that rejects every cache miss must stay
+      # on the local entry and leave the transport call count unchanged.
+      machine.succeed("printf '%s\\n' deny > " + shlex.quote(thumbnail_mode))
+      render_provider_preview("motionbgs")
+      assert len(machine.succeed("cat " + shlex.quote(thumbnail_log)).splitlines()) == 1
+      wait_preview_color(
+          "/tmp/noctalia-wall-in-one-vm-motion-cache-hit.png",
+          "#12D6C5",
+      )
+
+      machine.succeed("printf '%s\\n' good > " + shlex.quote(thumbnail_mode))
+      render_provider_preview("wallhaven")
+      wallhaven_preview = wait_preview_entry(
+          "wallhaven:abc123",
+          "wallhaven",
+          "https://th.wallhaven.cc/lg/ab/abc123.jpg",
+      )
+      machine.succeed(
+          "cmp -s "
+          + shlex.quote(wallhaven_preview)
+          + " ${fixtureWallhavenThumbnail}"
+      )
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          + shlex.quote('.schema == 1 and (.entries | length) == 2')
+          + " "
+          + shlex.quote(preview_manifest)
+      )
+      wait_preview_color(
+          "/tmp/noctalia-wall-in-one-vm-wallhaven-preview.png",
+          "#F51166",
+      )
+
+      thumbnail_calls = [
+          line.split("\t")
+          for line in machine.succeed("cat " + shlex.quote(thumbnail_log)).splitlines()
+      ]
+      assert [call[:3] for call in thumbnail_calls] == [
+          ["fetch", "motionbgs", "https://motionbgs.com/i/c/364x205/media/4242/night-city.3840x2160.jpg"],
+          ["fetch", "wallhaven", "https://th.wallhaven.cc/lg/ab/abc123.jpg"],
+      ], thumbnail_calls
+
+      machine.succeed("printf '%s\\n' deny > " + shlex.quote(thumbnail_mode))
+      for provider in ("wallhaven", "motionbgs"):
+          render_provider_preview(provider)
+      assert len(machine.succeed("cat " + shlex.quote(thumbnail_log)).splitlines()) == 2
+      machine.fail(
+          "find "
+          + shlex.quote(preview_cache)
+          + " -maxdepth 1 -type f "
+          + "\\( -name '*.stage' -o -name 'manifest.json.tmp' "
+          + "-o -name '.wall-in-one-thumbnail.*' \\) | grep -q ."
+      )
+      assert noctalia_msg(
+          "plugin ${pluginId}:hub all vm-provider-preview-reset"
+      ).strip() == "ok: dispatched 1"
+      wait_log("WALL_IN_ONE_VM_PROVIDER_PREVIEW reset")
+
       # Corrupt user data is evidence: reload must not reset or overwrite it,
       # and action dispatch remains disabled. Teardown deliberately leaves
       # Noctalia's last static backing and complete color selection in place,
@@ -3989,6 +4421,7 @@ pkgs.testers.runNixOSTest (
           "[glyph] missing glyph",
           "undeclared setting",
           "hot reload: failed",
+          "call to 'async command callback' failed",
           "exceeded its CPU budget",
       ):
           assert forbidden not in logs, f"unexpected log marker: {forbidden}"
