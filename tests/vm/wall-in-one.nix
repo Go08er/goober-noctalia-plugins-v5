@@ -31,6 +31,7 @@ let
     "${stateRoot}/state/noctalia/plugins/data/goober/wall-in-one";
   captureRoot = "/home/${testUser}/Pictures/Wall-in-One";
   videoRoot = "/home/${testUser}/Videos/Wall-in-One";
+  motionManagedRoot = "${videoRoot}/Wall-in-One/MotionBGS";
 
   manifest = builtins.fromTOML (
     builtins.readFile (pluginRoot + "/wall-in-one/plugin.toml")
@@ -1063,7 +1064,7 @@ let
             local motionProvider = ""
             local userProvider = ""
             for _, entry in ipairs(type(library.videos) == "table" and library.videos or {}) do
-                if type(entry) == "table" and entry.path == "${videoRoot}/night-city.hd.mp4" then
+                if type(entry) == "table" and entry.path == "${motionManagedRoot}/night-city.hd.mp4" then
                     motionManaged = entry.managed == true
                     motionDeletable = entry.deletable == true
                     motionProvider = tostring(entry.provider or "")
@@ -1110,7 +1111,7 @@ let
         elseif event == "vm-delete-motion-download" then
             local itemId = ""
             for _, entry in ipairs(type(library.videos) == "table" and library.videos or {}) do
-                if type(entry) == "table" and entry.path == "${videoRoot}/night-city.hd.mp4" then
+                if type(entry) == "table" and entry.path == "${motionManagedRoot}/night-city.hd.mp4" then
                     itemId = tostring(entry.id or "")
                     break
                 end
@@ -2812,7 +2813,7 @@ pkgs.testers.runNixOSTest (
 
       set_motion_mode("good")
       noctalia_msg("plugin ${serviceId} all vm-motion-download night-city")
-      motion_download = "${videoRoot}/night-city.hd.mp4"
+      motion_download = "${motionManagedRoot}/night-city.hd.mp4"
       wait_motion(action="download", download=motion_download, busy=False)
       machine.succeed("${lib.getExe pkgs.ffmpeg} -v error -i " + motion_download + " -f null -")
       machine.succeed(
