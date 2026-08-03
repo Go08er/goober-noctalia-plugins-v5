@@ -9,7 +9,7 @@ set -uo pipefail
 # no-replace hard link so an existing cache entry is never overwritten.
 
 readonly protocol='WIO-THUMB1'
-readonly user_agent='Wall-in-One/0.5 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
+readonly user_agent='Wall-in-One/0.6 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
 readonly max_bytes=$((2 * 1024 * 1024))
 readonly max_seconds=30
 readonly max_dimension=8192

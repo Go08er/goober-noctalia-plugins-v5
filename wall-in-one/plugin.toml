@@ -1,6 +1,6 @@
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "0.5.0"
+version = "0.6.0"
 plugin_api = 17
 author = "goober"
 license = "MIT"
@@ -27,71 +27,11 @@ visible_when = { key = "use_wallhaven", values = ["true"] }
 advanced = true
 
 [[setting]]
-key = "use_w_engine"
-type = "bool"
-label_key = "settings.use_w_engine.label"
-description_key = "settings.use_w_engine.description"
-default = true
-
-[[setting]]
-key = "use_mpvpaper"
-type = "bool"
-label_key = "settings.use_mpvpaper.label"
-description_key = "settings.use_mpvpaper.description"
-default = true
-
-[[setting]]
 key = "use_motionbgs"
 type = "bool"
 label_key = "settings.use_motionbgs.label"
 description_key = "settings.use_motionbgs.description"
 default = true
-
-[[setting]]
-key = "w_engine_backend"
-type = "select"
-label_key = "settings.w_engine_backend.label"
-description_key = "settings.w_engine_backend.description"
-default = "auto"
-visible_when = { key = "use_w_engine", values = ["true"] }
-options = [
-  { value = "auto", label_key = "settings.backends.options.auto" },
-  { value = "external", label_key = "settings.backends.options.external" },
-  { value = "internal", label_key = "settings.backends.options.internal" },
-]
-
-[[setting]]
-key = "mpvpaper_backend"
-type = "select"
-label_key = "settings.mpvpaper_backend.label"
-description_key = "settings.mpvpaper_backend.description"
-default = "auto"
-visible_when = { key = "use_mpvpaper", values = ["true"] }
-options = [
-  { value = "auto", label_key = "settings.backends.options.auto" },
-  { value = "external", label_key = "settings.backends.options.external" },
-  { value = "internal", label_key = "settings.backends.options.internal" },
-]
-
-[[setting]]
-key = "internal_renderer_layer"
-type = "select"
-label_key = "settings.internal_renderer_layer.label"
-description_key = "settings.internal_renderer_layer.description"
-default = "bottom"
-options = [
-  { value = "bottom", label_key = "settings.internal_renderer_layer.options.bottom" },
-  { value = "background", label_key = "settings.internal_renderer_layer.options.background" },
-]
-advanced = true
-
-[[setting]]
-key = "use_extra_provider"
-type = "bool"
-label_key = "settings.use_extra_provider.label"
-description_key = "settings.use_extra_provider.description"
-default = true
-advanced = true
 
 [[setting]]
 key = "capture_directory"
@@ -106,14 +46,6 @@ type = "folder"
 label_key = "settings.video_directory.label"
 description_key = "settings.video_directory.description"
 default = ""
-
-[[setting]]
-key = "motionbgs_download_directory"
-type = "folder"
-label_key = "settings.motionbgs_download_directory.label"
-description_key = "settings.motionbgs_download_directory.description"
-default = ""
-visible_when = { key = "use_motionbgs", values = ["true"] }
 
 [[setting]]
 key = "motionbgs_quality"
@@ -209,6 +141,7 @@ label_key = "settings.video_source.label"
 description_key = "settings.video_source.description"
 default = ""
 extensions = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".gif"]
+advanced = true
 
 [[setting]]
 key = "manual_pair_file"
@@ -217,6 +150,7 @@ label_key = "settings.manual_pair_file.label"
 description_key = "settings.manual_pair_file.description"
 default = ""
 extensions = [".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif"]
+advanced = true
 
 [[setting]]
 key = "video_frame_second"
@@ -234,6 +168,7 @@ type = "string"
 label_key = "settings.workshop_id.label"
 description_key = "settings.workshop_id.description"
 default = ""
+advanced = true
 
 [[setting]]
 key = "workshop_directory"
@@ -251,164 +186,6 @@ description_key = "settings.scene_screenshot_delay.description"
 default = 15
 min = 1
 max = 120
-visible_when = { key = "use_w_engine", values = ["true"] }
-advanced = true
-
-[[setting]]
-key = "w_engine_scaling"
-type = "select"
-label_key = "settings.w_engine_scaling.label"
-description_key = "settings.w_engine_scaling.description"
-default = "fill"
-visible_when = { key = "use_w_engine", values = ["true"] }
-options = [
-  { value = "default", label_key = "settings.w_engine_scaling.options.default" },
-  { value = "stretch", label_key = "settings.w_engine_scaling.options.stretch" },
-  { value = "fit", label_key = "settings.w_engine_scaling.options.fit" },
-  { value = "fill", label_key = "settings.w_engine_scaling.options.fill" },
-]
-
-[[setting]]
-key = "w_engine_clamp"
-type = "select"
-label_key = "settings.w_engine_clamp.label"
-description_key = "settings.w_engine_clamp.description"
-default = "border"
-visible_when = { key = "use_w_engine", values = ["true"] }
-options = [
-  { value = "clamp", label_key = "settings.w_engine_clamp.options.clamp" },
-  { value = "border", label_key = "settings.w_engine_clamp.options.border" },
-  { value = "repeat", label_key = "settings.w_engine_clamp.options.repeat" },
-]
-
-[[setting]]
-key = "w_engine_fps"
-type = "int"
-label_key = "settings.w_engine_fps.label"
-description_key = "settings.w_engine_fps.description"
-default = 30
-min = 5
-max = 144
-advanced = true
-
-[[setting]]
-key = "w_engine_volume"
-type = "int"
-label_key = "settings.w_engine_volume.label"
-description_key = "settings.w_engine_volume.description"
-default = 0
-min = 0
-max = 100
-advanced = true
-
-[[setting]]
-key = "w_engine_silent"
-type = "bool"
-label_key = "settings.w_engine_silent.label"
-description_key = "settings.w_engine_silent.description"
-default = true
-advanced = true
-
-[[setting]]
-key = "w_engine_noautomute"
-type = "bool"
-label_key = "settings.w_engine_noautomute.label"
-description_key = "settings.w_engine_noautomute.description"
-default = false
-advanced = true
-
-[[setting]]
-key = "w_engine_no_audio_processing"
-type = "bool"
-label_key = "settings.w_engine_no_audio_processing.label"
-description_key = "settings.w_engine_no_audio_processing.description"
-default = false
-advanced = true
-
-[[setting]]
-key = "w_engine_disable_particles"
-type = "bool"
-label_key = "settings.w_engine_disable_particles.label"
-description_key = "settings.w_engine_disable_particles.description"
-default = false
-advanced = true
-
-[[setting]]
-key = "w_engine_disable_mouse"
-type = "bool"
-label_key = "settings.w_engine_disable_mouse.label"
-description_key = "settings.w_engine_disable_mouse.description"
-default = false
-advanced = true
-
-[[setting]]
-key = "w_engine_disable_parallax"
-type = "bool"
-label_key = "settings.w_engine_disable_parallax.label"
-description_key = "settings.w_engine_disable_parallax.description"
-default = false
-advanced = true
-
-[[setting]]
-key = "w_engine_no_fullscreen_pause"
-type = "bool"
-label_key = "settings.w_engine_no_fullscreen_pause.label"
-description_key = "settings.w_engine_no_fullscreen_pause.description"
-default = false
-advanced = true
-
-[[setting]]
-key = "w_engine_fullscreen_pause_only_active"
-type = "bool"
-label_key = "settings.w_engine_fullscreen_pause_only_active.label"
-description_key = "settings.w_engine_fullscreen_pause_only_active.description"
-default = false
-advanced = true
-
-[[setting]]
-key = "mpv_mute"
-type = "bool"
-label_key = "settings.mpv_mute.label"
-description_key = "settings.mpv_mute.description"
-default = true
-advanced = true
-
-[[setting]]
-key = "mpv_hardware_decode"
-type = "bool"
-label_key = "settings.mpv_hardware_decode.label"
-description_key = "settings.mpv_hardware_decode.description"
-default = true
-advanced = true
-
-[[setting]]
-key = "mpv_auto_pause"
-type = "bool"
-label_key = "settings.mpv_auto_pause.label"
-description_key = "settings.mpv_auto_pause.description"
-default = true
-advanced = true
-
-[[setting]]
-key = "mpv_auto_pause_mode"
-type = "select"
-label_key = "settings.mpv_auto_pause_mode.label"
-description_key = "settings.mpv_auto_pause_mode.description"
-default = "FULL"
-visible_when = { key = "mpv_auto_pause", values = ["true"] }
-options = [
-  { value = "FULL", label_key = "settings.mpv_auto_pause_mode.options.full" },
-  { value = "MAX", label_key = "settings.mpv_auto_pause_mode.options.max" },
-  { value = "ACTIVE", label_key = "settings.mpv_auto_pause_mode.options.active" },
-]
-advanced = true
-
-[[setting]]
-key = "mpv_options"
-type = "string"
-label_key = "settings.mpv_options.label"
-description_key = "settings.mpv_options.description"
-default = ""
 advanced = true
 
 [[setting]]
@@ -437,14 +214,6 @@ type = "bool"
 label_key = "settings.cycle_start_on_load.label"
 description_key = "settings.cycle_start_on_load.description"
 default = false
-
-[[setting]]
-key = "extra_provider_panel"
-type = "string"
-label_key = "settings.extra_provider_panel.label"
-description_key = "settings.extra_provider_panel.description"
-default = ""
-advanced = true
 
 [[service]]
 id = "coordinator"
@@ -505,11 +274,11 @@ entry = "widget.luau"
 [[panel]]
 id = "hub"
 entry = "panel.luau"
-width = 820
-height = 780
-placement = "attached"
-position = "auto"
-open_near_click = true
+width = "fill"
+height = "fill"
+placement = "floating"
+position = "center"
+open_near_click = false
 dismiss_on_outside_click = true
 
 [[shortcut]]

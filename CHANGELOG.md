@@ -31,7 +31,45 @@ All notable staging changes will be recorded here.
 - Remove the now-empty plugin-settings button from the details panel and point
   users to the exact per-placement editor instead.
 
-## Unreleased — Wall-in-One 0.5.0 staging
+## Unreleased — Wall-in-One 0.6.0
+
+- Replace the attached all-in-one scroll with a full-size floating routed panel:
+  Home; Displays with per-output Overview/Engines/Schedule; Library with
+  Images/Videos/Wallpaper Engine; Shops with
+  Wallhaven/MotionBGS/Steam Workshop; per-playlist routes; and Diagnostics.
+- Render local libraries and both provider stores as four-column still-led
+  browser grids on a 1280-pixel logical panel. Replace unsupported decorative
+  box layout and button-variant properties, and split weekday, month, and
+  playback controls into bounded rows instead of allowing them to overlap.
+- Present image, video, and Workshop inventory as still-led pairing cards with
+  selected/automatic representative behavior and an adaptive wallpaper palette
+  by default.
+- Make Wall-in-One the direct owner of all dynamic playback through `mpvpaper`
+  and `linux-wallpaperengine`. Retire plugin discovery, renderer handoff modes,
+  provider control relays, the configurable provider-panel slot, and renderer
+  cooperation handshakes.
+- Move engine policy into schema-5 per-display state: layer; video enable,
+  mute, hardware decode, auto-pause mode and options; and Workshop enable,
+  FPS, volume, silent/scaling/clamp behavior, and validated flags. Older
+  persisted outputs receive explicit schema-5 defaults without reading removed
+  manifest keys.
+- Require independent explicit existing image and video roots. Do no scan,
+  download, export, capture, managed-directory creation, or provider-cache
+  initialization before the matching root is ready. Show the roots, derived
+  `Wall-in-One/Wallhaven`, `Wall-in-One/Automatic Stills`, and
+  `Wall-in-One/MotionBGS` children, relevant defaults, and private cache paths
+  on each medium's Library page.
+- Keep the palette service dormant until the explicit image root exists, and
+  make provider searches submit immediately on Enter. Fix MotionBGS search
+  controls so typed queries do not wait for an unrelated panel refresh before
+  becoming actionable.
+- Keep MotionBGS at one anchor per callback but use a temporary 16ms parser
+  cadence and restore 250ms on every terminal path, reducing a live-like
+  206-anchor parse from roughly 52 seconds to roughly 3.3 seconds. Accept only
+  an exact same-origin `/search?q=X` → `/tag:<normalized-X>/` canonical redirect
+  and apply the same rule to cache validation.
+
+## Wall-in-One 0.5.0 - Provider stores and reusable pairings
 
 - Complete the Wallhaven browser with exact/minimum resolution modes, all
   category/purity masks, Hot/top-list filters, stable random-page seeds, and
@@ -125,21 +163,21 @@ All notable staging changes will be recorded here.
   palette-leader arbitration.
 - Add a native Wallhaven official-API browser with optional header-only API-key
   authentication, bounded search/detail, validated managed JPG/PNG download,
-  provenance sidecars, and the separate official panel as a fallback.
+  provenance sidecars, and a direct-site fallback.
 - Add one shared `bottom` or `background` layer setting for internally owned
   mpvpaper and `linux-wallpaperengine` children, retaining `bottom` as the safe
   default and documenting the compositor-specific niri backdrop use case.
 - Capture rendered Workshop PNGs through the exact owned
   `linux-wallpaperengine --screenshot` path with private staging, stable-file
   detection, atomic validation, and source-video/preview fallback. Preserve the
-  adapter's existing 1–120-frame setting while clamping only internal capture
+  legacy 1–120-frame setting while clamping the owned capture command
   to linux-wallpaperengine's five-frame maximum.
 - Serialize native capture with existing per-output ownership, restore only a
   still-current displaced child, and reject stale callbacks after stop, hotplug,
   backend change, reload, or disable without signalling a foreign renderer.
 - Allow internally owned mpvpaper and Wallpaper Engine children to coexist on
   different outputs, with exact-PID break-before-make replacement on one output
-  and explicit external-provider ownership boundaries.
+  and explicit process ownership boundaries.
 - Add capability-driven playback IPC. mpvpaper uses a private socket for
   pause/resume/toggle, mute/unmute, and volume; Wallpaper Engine exposes only
   its supported signal controls. Commands are one-shot and idle heartbeats do
@@ -147,8 +185,8 @@ All notable staging changes will be recorded here.
 - Add user-selected image/video roots, shared-root media classification, marked
   managed MotionBGS and Automatic Stills children, sidecar-gated deletion, and
   automatic cleanup of only the managed still belonging to an explicitly
-  deleted managed video. Add a marked native Wallhaven child while keeping files
-  owned by the separate official plugin outside Wall-in-One delete authority.
+  deleted managed video. Add a marked native Wallhaven child while keeping every
+  file without Wall-in-One provenance outside its delete authority.
 - Enable automatic still creation/pairing by default, keep manual exports in
   the user image root, make configured-manual pairing an immediate standalone
   backing action, and add Steam launch plus Workshop links.
@@ -170,9 +208,8 @@ All notable staging changes will be recorded here.
 - Add a bounded MotionBGS HTML search/download provider with atomic local
   imports, source sidecars, explicit degraded status, and a permanent direct
   browser fallback.
-- Preserve the official Wallhaven browser and external provider controls,
-  default detected integrations on, and refuse internal renderer startup while
-  another enabled plugin owns that backend.
+- Add an early provider-control experiment, superseded by the directly owned
+  renderer and native shop services in 0.6.0.
 - Move the default generated-still location to Noctalia's wallpaper directory
   and retain the complete color scheme, palette-leader, renderer, widget glyph,
   label, and gesture customization surface.
@@ -191,40 +228,23 @@ All notable staging changes will be recorded here.
 
 ## Wall-in-One 0.3.0 - Provider policy and backing export
 
-- Enable each detected Wallhaven, W Engine, mpvpaper, and custom-panel
-  integration by default, with an independent Wall-in-One force-off that never
-  disables, stops, or uninstalls the provider itself.
-- Gate panels, controls, adapter probes, status, and W Engine capture routes on
-  the effective detected-and-allowed provider state.
-- Export the current per-output backing reported by Noctalia into the selected
-  still directory. This safely saves a representative backing already supplied
-  by W Engine without reading its private frame or thumbnail cache.
-- Document that W Engine 1.1.0 already owns its timer, representative static
-  backing, color handoff, and previous-wallpaper restoration. Wall-in-One does
-  not duplicate that scheduler or take over its renderer.
+- Prototype provider policy and backing export. The delegation model from this
+  release was retired by Wall-in-One 0.6.0's native shops and owned renderers.
 
 ## Wall-in-One 0.2.0 - Live/static coordination preview
 
 - Rename the early wallpaper hub and its plugin, widget, panel, service, and
   Control Center IDs to `goober/wall-in-one`.
-- Discover Wallhaven, W Engine, mpvpaper, and an optional open-only provider,
-  while retaining Noctalia's native selector and next/previous/random routes.
-- Route only documented provider panels and service commands; providers retain
-  ownership of their renderers, files, and scheduling.
-- Export full-resolution stills from a configured video or a configured W Engine
-  Workshop project into a selected directory. Video projects use FFmpeg;
-  scene/web projects use their preview until a cooperative capture adapter is
-  present.
+- Prototype live/static coordination and full-resolution still export from
+  configured video or Workshop sources.
 - Pair an exported still through `setWallpaper` so Noctalia persists a real
   image for its backdrop, hooks, lock-screen fallback, and wallpaper-derived
   colors while the dynamic provider remains active.
 - Add selectable color-scheme synchronization and an optional palette-output
   leader for Noctalia's single global palette. Preserve explicit lock-screen
   wallpaper overrides instead of rewriting them.
-- Define a versioned, opt-in W Engine status/capture handshake for rendered
-  stills while keeping current upstream W Engine on safe video/preview fallback.
-  Do not inspect process arguments or provider-private state, start a second
-  renderer, or start a competing rotation scheduler.
+- Establish the initial safe video/preview fallback later replaced by owned
+  rendered capture.
 
 ## NocVox 0.1.0 - Companion MVP
 

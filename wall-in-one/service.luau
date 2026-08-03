@@ -1,18 +1,16 @@
 --!nonstrict
 -- Wall-in-One coordinator service.
 --
--- External provider processes remain provider-owned. Wall-in-One may also own
--- an explicitly selected internal renderer through renderer.luau. The
+-- Wall-in-One owns every dynamic wallpaper child through renderer.luau. The
 -- coordinator keeps Noctalia's static wallpaper surface enabled, pairs every
 -- live item with a real still, and coordinates named playlists plus
--- independent per-output schedules.
+-- independent per-output schedules and renderer settings.
 
-local CONFIG_SCHEMA = 4
+local CONFIG_SCHEMA = 5
 local RUNTIME_SCHEMA = 6
 local UPDATE_INTERVAL_MS = 2000
-local PROVIDER_PROBE_SECONDS = 30
+local AVAILABILITY_REFRESH_SECONDS = 30
 local NOTIFY_COOLDOWN_SECONDS = 10
-local ADAPTER_PROBE_GRACE_MS = 10000
 local MAX_PROJECT_JSON_BYTES = 256 * 1024
 local MAX_STORAGE_BYTES = 8 * 1024 * 1024
 local MAX_MANAGED_MARKER_BYTES = 16 * 1024
@@ -32,8 +30,6 @@ local MAX_PAIR_REGISTRY_ENTRIES = 1024
 local MAX_PERSISTED_PATH_BYTES = 4096
 local MAX_PERSISTED_NAME_BYTES = 160
 local MAX_WORKSHOP_ID_BYTES = 24
-local MAX_ADAPTER_PAYLOAD_BYTES = 512
-local ADAPTER_FIELD_COUNT = 3
 local MIN_CYCLE_SECONDS = 60
 local MAX_CYCLE_SECONDS = 30 * 24 * 60 * 60
 local RENDERER_CRASH_BACKOFF_SECONDS = { 10, 20, 40, 80, 160, 300 }
@@ -69,17 +65,8 @@ local WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"
 local MOTIONBGS_URL = "https://motionbgs.com/"
 local WALLHAVEN_URL = "https://wallhaven.cc/"
 
-local WALLHAVEN_ID = "noctalia/wallhaven"
-local W_ENGINE_ID = "tadomika_ari/w-engine"
-local W_ENGINE_SERVICE = "tadomika_ari/w-engine:start"
-local MPVPAPER_ID = "noctalia/mpvpaper"
-local MPVPAPER_SERVICE = "noctalia/mpvpaper:service"
-
 local OPEN_TARGETS = {
     native_open = "wallpaper",
-    wallhaven_open = "noctalia/wallhaven:browser",
-    w_engine_open = "tadomika_ari/w-engine:w-engine-panel",
-    mpvpaper_open = "noctalia/mpvpaper:picker",
     hub_open = "goober/wall-in-one:hub",
 }
 
@@ -87,20 +74,6 @@ local NATIVE_SWITCH_VERBS = {
     native_next = "wallpaper-next",
     native_previous = "wallpaper-previous",
     native_random = "wallpaper-random",
-}
-
-local W_ENGINE_VERBS = {
-    w_engine_next = "next",
-    w_engine_cycle_stop = "cycle-stop",
-    w_engine_stop = "stop",
-}
-
-local MPVPAPER_VERBS = {
-    mpvpaper_pause = "pause",
-    mpvpaper_resume = "resume",
-    mpvpaper_toggle = "toggle",
-    mpvpaper_clear = "clear",
-    mpvpaper_clear_all = "clear-all",
 }
 
 local VALID_COLOR_SCHEMES = {
@@ -144,15 +117,38 @@ local VALID_PALETTE_SOURCES = {
     inherit = true,
 }
 
-local VALID_BACKENDS = {
-    auto = true,
-    external = true,
-    internal = true,
-}
-
 local VALID_INTERNAL_LAYERS = {
     background = true,
     bottom = true,
+}
+
+local VALID_MPV_AUTO_PAUSE_MODES = {
+    FULL = true,
+    MAX = true,
+    ACTIVE = true,
+}
+
+local VALID_W_ENGINE_SCALING = {
+    default = true,
+    stretch = true,
+    fit = true,
+    fill = true,
+}
+
+local VALID_W_ENGINE_CLAMP = {
+    clamp = true,
+    border = true,
+    ["repeat"] = true,
+}
+
+local WORKSHOP_FLAG_NAMES = {
+    "noautomute",
+    "no_audio_processing",
+    "disable_particles",
+    "disable_mouse",
+    "disable_parallax",
+    "no_fullscreen_pause",
+    "fullscreen_pause_only_active",
 }
 
 local VALID_PLAYLIST_ORDERS = {
@@ -190,19 +186,8 @@ local VALID_ACTIONS = {
     native_next = true,
     native_previous = true,
     native_random = true,
-    wallhaven_open = true,
     wallhaven_site = true,
     motionbgs_open = true,
-    w_engine_open = true,
-    w_engine_next = true,
-    w_engine_cycle_stop = true,
-    w_engine_stop = true,
-    mpvpaper_open = true,
-    mpvpaper_pause = true,
-    mpvpaper_resume = true,
-    mpvpaper_toggle = true,
-    mpvpaper_clear = true,
-    mpvpaper_clear_all = true,
     capture_backing = true,
     capture_current = true,
     capture_pair = true,
@@ -223,7 +208,6 @@ local VALID_ACTIONS = {
     cycle_remove_last = true,
     cycle_clear = true,
     manual_pair = true,
-    extra_provider_open = true,
     hub_open = true,
     no_action = true,
     playback_pause = true,
@@ -239,6 +223,24 @@ local VALID_ACTIONS = {
     audio_set_volume = true,
     steam_launch = true,
     steam_workshop = true,
+}
+
+-- Schema 4 and older could store actions that delegated to other plugins.
+-- Translate them to Wall-in-One-owned behavior while loading; these names are
+-- intentionally not valid executable actions in schema 5.
+local LEGACY_GESTURE_ACTIONS = {
+    wallhaven_open = "hub_open",
+    w_engine_open = "hub_open",
+    w_engine_next = "cycle_next",
+    w_engine_cycle_stop = "cycle_stop",
+    w_engine_stop = "playback_stop",
+    mpvpaper_open = "hub_open",
+    mpvpaper_pause = "playback_pause",
+    mpvpaper_resume = "playback_resume",
+    mpvpaper_toggle = "playback_toggle",
+    mpvpaper_clear = "playback_stop",
+    mpvpaper_clear_all = "playback_stop_all",
+    extra_provider_open = "no_action",
 }
 
 -- Parameterized IPC actions are intentionally kept out of gesture settings.
@@ -291,37 +293,19 @@ local runtime = {
 }
 
 local providers = {
-    probing = true,
-    probe_ok = false,
-    probe_error = "",
-    probed_at = "",
     noctalia_cli = noctalia.commandExists("noctalia"),
     native = { available = true },
     wallhaven = {
         allowed = true,
-        plugin_enabled = false,
         available = false,
         site_available = noctalia.commandExists("xdg-open"),
         site_url = WALLHAVEN_URL,
-        version = "",
     },
     w_engine = {
-        allowed = true,
-        plugin_enabled = false,
-        renderer_available = noctalia.commandExists("linux-wallpaperengine"),
-        internal_available = false,
-        effective_backend = "none",
-        apply_available = false,
-        conflict = false,
+        command_available = noctalia.commandExists("linux-wallpaperengine"),
+        renderer_ready = false,
         available = false,
-        version = "",
-        adapter_version = "",
-        adapter_capture = false,
-        adapter_status = false,
-        adapter_seen_at = "",
-        adapter_seen_ms = 0,
-        adapter_probe_ms = 0,
-        current = {},
+        apply_available = false,
         internal_current = {},
         steam_available = noctalia.commandExists("steam") or noctalia.commandExists("xdg-open"),
         steam_workshop_available = noctalia.commandExists("xdg-open"),
@@ -329,15 +313,10 @@ local providers = {
         steam_workshop_url = WALLPAPER_ENGINE_WORKSHOP_URL,
     },
     mpvpaper = {
-        allowed = true,
-        plugin_enabled = false,
         command_available = noctalia.commandExists("mpvpaper"),
-        internal_available = false,
-        effective_backend = "none",
-        apply_available = false,
-        conflict = false,
+        renderer_ready = false,
         available = false,
-        version = "",
+        apply_available = false,
     },
     motionbgs = {
         allowed = true,
@@ -345,20 +324,6 @@ local providers = {
         browser_available = noctalia.commandExists("xdg-open"),
         integration_available = false,
         url = MOTIONBGS_URL,
-    },
-    daemons = {
-        awww = noctalia.commandExists("awww"),
-        swww = noctalia.commandExists("swww"),
-        wpaperd = noctalia.commandExists("wpaperctl"),
-        hyprpaper = noctalia.commandExists("hyprctl"),
-    },
-    extra = {
-        allowed = true,
-        configured = false,
-        plugin_enabled = false,
-        available = false,
-        panel = "",
-        plugin_id = "",
     },
 }
 
@@ -408,21 +373,17 @@ local domainPublications = {
     runtime = { key = RUNTIME_STATE_KEY, revision = 0, dirty = true },
     library = { key = LIBRARY_STATE_KEY, revision = 0, dirty = true },
 }
-local providerProbeInFlight = false
-local providerProbePending = false
 local colorProbeInFlight = false
 local providerSignature = ""
-local lastProviderProbeAt = 0
+local lastAvailabilityRefreshAt = 0
 local lastNotificationAt = {}
 local lastCommandSequence = 0
 local captureInFlight = {}
 local activeCaptureRequests = {}
 local captureQueued = {}
-local adapterCaptureQueued = {}
 local internalCaptureQueued = {}
 local internalCaptureIntent = {}
 local captureSequence = 0
-local pendingAdapterCaptures = {}
 local pendingInternalCaptures = {}
 local rendererStatus = { ready = false, outputs = {}, last_error = "" }
 local rendererStatusInstance = ""
@@ -589,14 +550,165 @@ function wallInOne.configuredColorScheme()
     return scheme
 end
 
-function wallInOne.configuredBackend(key)
-    local value = wallInOne.settingString(key, "auto")
-    return if VALID_BACKENDS[value] then value else "auto"
+function wallInOne.defaultOutputEngines()
+    return {
+        layer = "bottom",
+        video = {
+            enabled = true,
+            mute = true,
+            hardware_decode = true,
+            auto_pause = true,
+            auto_pause_mode = "FULL",
+            options = "",
+        },
+        workshop = {
+            enabled = true,
+            fps = 30,
+            volume = 0,
+            silent = true,
+            scaling = "fill",
+            clamp = "border",
+            flags = {
+                noautomute = false,
+                no_audio_processing = false,
+                disable_particles = false,
+                disable_mouse = false,
+                disable_parallax = false,
+                no_fullscreen_pause = false,
+                fullscreen_pause_only_active = false,
+            },
+        },
+    }
 end
 
-function wallInOne.configuredInternalLayer()
-    local value = wallInOne.settingString("internal_renderer_layer", "bottom")
-    return if VALID_INTERNAL_LAYERS[value] then value else "bottom"
+function wallInOne.normalizedOutputEngines(candidate, fallback)
+    if candidate ~= nil and type(candidate) ~= "table" then
+        return nil
+    end
+    fallback = type(fallback) == "table" and fallback or wallInOne.defaultOutputEngines()
+    candidate = type(candidate) == "table" and candidate or {}
+    local rawVideo = candidate.video
+    local rawWorkshop = candidate.workshop
+    if rawVideo ~= nil and type(rawVideo) ~= "table" then
+        return nil
+    end
+    if rawWorkshop ~= nil and type(rawWorkshop) ~= "table" then
+        return nil
+    end
+    rawVideo = type(rawVideo) == "table" and rawVideo or {}
+    rawWorkshop = type(rawWorkshop) == "table" and rawWorkshop or {}
+    local fallbackVideo = type(fallback.video) == "table" and fallback.video or {}
+    local fallbackWorkshop = type(fallback.workshop) == "table" and fallback.workshop or {}
+    local rawFlags = rawWorkshop.flags
+    if rawFlags ~= nil and type(rawFlags) ~= "table" then
+        return nil
+    end
+    rawFlags = type(rawFlags) == "table" and rawFlags or {}
+    local fallbackFlags = type(fallbackWorkshop.flags) == "table" and fallbackWorkshop.flags or {}
+
+    local function booleanValue(raw, key, defaultValue)
+        local value = raw[key]
+        if value == nil then
+            return defaultValue == true, true
+        end
+        return value == true, type(value) == "boolean"
+    end
+
+    local videoEnabled, videoEnabledOk = booleanValue(rawVideo, "enabled", fallbackVideo.enabled)
+    local mute, muteOk = booleanValue(rawVideo, "mute", fallbackVideo.mute)
+    local hardwareDecode, hardwareDecodeOk = booleanValue(
+        rawVideo,
+        "hardware_decode",
+        fallbackVideo.hardware_decode
+    )
+    local autoPause, autoPauseOk = booleanValue(rawVideo, "auto_pause", fallbackVideo.auto_pause)
+    local workshopEnabled, workshopEnabledOk = booleanValue(rawWorkshop, "enabled", fallbackWorkshop.enabled)
+    local silent, silentOk = booleanValue(rawWorkshop, "silent", fallbackWorkshop.silent)
+    if not videoEnabledOk or not muteOk or not hardwareDecodeOk or not autoPauseOk or not workshopEnabledOk or not silentOk then
+        return nil
+    end
+
+    local layer = if candidate.layer == nil then tostring(fallback.layer or "bottom") else tostring(candidate.layer)
+    local autoPauseMode = if rawVideo.auto_pause_mode == nil
+        then tostring(fallbackVideo.auto_pause_mode or "FULL")
+        else tostring(rawVideo.auto_pause_mode)
+    local options = if rawVideo.options == nil then tostring(fallbackVideo.options or "") else rawVideo.options
+    local scaling = if rawWorkshop.scaling == nil
+        then tostring(fallbackWorkshop.scaling or "fill")
+        else tostring(rawWorkshop.scaling)
+    local clamp = if rawWorkshop.clamp == nil
+        then tostring(fallbackWorkshop.clamp or "border")
+        else tostring(rawWorkshop.clamp)
+    local fps = if rawWorkshop.fps == nil then tonumber(fallbackWorkshop.fps) or 30 else tonumber(rawWorkshop.fps)
+    local volume = if rawWorkshop.volume == nil
+        then tonumber(fallbackWorkshop.volume) or 0
+        else tonumber(rawWorkshop.volume)
+    if
+        not VALID_INTERNAL_LAYERS[layer]
+        or not VALID_MPV_AUTO_PAUSE_MODES[autoPauseMode]
+        or type(options) ~= "string"
+        or #options > 1024
+        or options:find("[%c]") ~= nil
+        or not VALID_W_ENGINE_SCALING[scaling]
+        or not VALID_W_ENGINE_CLAMP[clamp]
+        or fps == nil
+        or volume == nil
+        or fps % 1 ~= 0
+        or fps < 5
+        or fps > 144
+        or volume % 1 ~= 0
+        or volume < 0
+        or volume > 100
+    then
+        return nil
+    end
+
+    local flags = {}
+    for _, name in ipairs(WORKSHOP_FLAG_NAMES) do
+        local rawValue = rawFlags[name]
+        -- Accept the schema-4 manifest spelling at the workshop level on the
+        -- command boundary, but always persist the canonical flags object.
+        if rawValue == nil then
+            rawValue = rawWorkshop[name]
+        end
+        if rawValue == nil then
+            rawValue = fallbackFlags[name]
+        end
+        if type(rawValue) ~= "boolean" then
+            return nil
+        end
+        flags[name] = rawValue
+    end
+    if flags.no_fullscreen_pause and flags.fullscreen_pause_only_active then
+        return nil
+    end
+
+    return {
+        layer = layer,
+        video = {
+            enabled = videoEnabled,
+            mute = mute,
+            hardware_decode = hardwareDecode,
+            auto_pause = autoPause,
+            auto_pause_mode = autoPauseMode,
+            options = options,
+        },
+        workshop = {
+            enabled = workshopEnabled,
+            fps = math.floor(fps),
+            volume = math.floor(volume),
+            silent = silent,
+            scaling = scaling,
+            clamp = clamp,
+            flags = flags,
+        },
+    }
+end
+
+function wallInOne.outputEngineSettings(output)
+    local outputConfig = type(config.outputs) == "table" and config.outputs[tostring(output or "")] or nil
+    local engines = type(outputConfig) == "table" and outputConfig.engines or nil
+    return wallInOne.normalizedOutputEngines(engines) or wallInOne.defaultOutputEngines()
 end
 
 function wallInOne.configuredPlaylistOrder()
@@ -630,28 +742,27 @@ end
 
 function wallInOne.captureDirectory()
     local configured = wallInOne.settingString("capture_directory", "")
-    local directory = ""
     if configured == "" then
-        local wallpaperDirectory = wallInOne.normalizedDirectory(noctalia.wallpaperDirectory())
-        if wallpaperDirectory ~= nil then
-            directory = wallpaperDirectory
-        else
-            local dataDirectory = noctalia.pluginDataDir()
-            if type(dataDirectory) == "string" and dataDirectory ~= "" then
-                directory = dataDirectory .. "/captures"
-            end
-        end
-    else
-        directory = noctalia.expandPath(configured)
+        return ""
     end
-
-    return wallInOne.normalizedDirectory(directory) or ""
+    return wallInOne.normalizedDirectory(noctalia.expandPath(configured)) or ""
 end
 
 function wallInOne.videoDirectory()
     local configured = wallInOne.settingString("video_directory", "")
-    local directory = if configured == "" then wallInOne.captureDirectory() else noctalia.expandPath(configured)
-    return wallInOne.normalizedDirectory(directory) or ""
+    if configured == "" then
+        return ""
+    end
+    return wallInOne.normalizedDirectory(noctalia.expandPath(configured)) or ""
+end
+
+function wallInOne.existingDirectory(directory)
+    directory = wallInOne.normalizedDirectory(directory)
+    if directory == nil then
+        return false
+    end
+    local info = noctalia.fileInfo(directory)
+    return type(info) == "table" and info.isDir == true
 end
 
 function wallInOne.managedChildDirectory(root, child)
@@ -671,11 +782,6 @@ function wallInOne.automaticStillDirectory()
 end
 
 function wallInOne.motionBgsManagedDirectory()
-    local reported = type(motionBgsStatus) == "table" and tostring(motionBgsStatus.download_directory or "") or ""
-    local normalized = wallInOne.normalizedDirectory(reported)
-    if normalized ~= nil then
-        return normalized
-    end
     return wallInOne.managedChildDirectory(wallInOne.videoDirectory(), MANAGED_MOTIONBGS_DIRECTORY)
 end
 
@@ -728,6 +834,13 @@ function wallInOne.ensureManagedDirectory(directory, kind)
 end
 
 function wallInOne.ensureImageManagedDirectories()
+    local imageRoot = wallInOne.captureDirectory()
+    if imageRoot == "" then
+        return true, nil
+    end
+    if not wallInOne.existingDirectory(imageRoot) then
+        return false, noctalia.tr("errors.managed_directory")
+    end
     local errors = {}
     for _, entry in ipairs({
         { path = wallInOne.wallhavenManagedDirectory(), kind = "wallhaven" },
@@ -761,31 +874,15 @@ function wallInOne.configuredWorkshopId()
     return if wallInOne.validWorkshopId(value) then value else ""
 end
 
-function wallInOne.normalizedExtraPanel()
-    local panelId = wallInOne.settingString("extra_provider_panel", "")
-    if panelId == "" or panelId:match("^[%w_.-]+/[%w_.-]+:[%w_.-]+$") == nil then
-        return "", ""
-    end
-    return panelId, panelId:match("^([^:]+):") or ""
-end
-
 function wallInOne.settingsSnapshot()
     if type(settingsSnapshotCache) == "table" then
         return settingsSnapshotCache
     end
-    local extraPanel = wallInOne.normalizedExtraPanel()
     local snapshot = {
         use_wallhaven = wallInOne.settingBool("use_wallhaven", true),
-        use_w_engine = wallInOne.settingBool("use_w_engine", true),
-        use_mpvpaper = wallInOne.settingBool("use_mpvpaper", true),
         use_motionbgs = wallInOne.settingBool("use_motionbgs", true),
-        use_extra_provider = wallInOne.settingBool("use_extra_provider", true),
-        w_engine_backend = wallInOne.configuredBackend("w_engine_backend"),
-        mpvpaper_backend = wallInOne.configuredBackend("mpvpaper_backend"),
-        internal_renderer_layer = wallInOne.configuredInternalLayer(),
         capture_directory = wallInOne.captureDirectory(),
         video_directory = wallInOne.videoDirectory(),
-        motionbgs_download_directory = wallInOne.settingString("motionbgs_download_directory", ""),
         motionbgs_result_limit = wallInOne.settingInt("motionbgs_result_limit", 48, 1, 48),
         motionbgs_cache_minutes = wallInOne.settingInt("motionbgs_cache_minutes", 30, 5, 1440),
         motionbgs_max_download_mb = wallInOne.settingInt("motionbgs_max_download_mb", 256, 16, 512),
@@ -804,27 +901,9 @@ function wallInOne.settingsSnapshot()
         workshop_directory = wallInOne.settingString("workshop_directory", ""),
         video_frame_second = wallInOne.settingInt("video_frame_second", 1, 0, 3600),
         scene_screenshot_delay = wallInOne.settingInt("scene_screenshot_delay", 15, 1, 120),
-        w_engine_scaling = wallInOne.settingString("w_engine_scaling", "fill"),
-        w_engine_fps = wallInOne.settingInt("w_engine_fps", 30, 1, 240),
-        w_engine_volume = wallInOne.settingInt("w_engine_volume", 0, 0, 100),
-        w_engine_silent = wallInOne.settingBool("w_engine_silent", true),
-        w_engine_clamp = wallInOne.settingString("w_engine_clamp", "border"),
-        w_engine_noautomute = wallInOne.settingBool("w_engine_noautomute", false),
-        w_engine_no_audio_processing = wallInOne.settingBool("w_engine_no_audio_processing", false),
-        w_engine_disable_particles = wallInOne.settingBool("w_engine_disable_particles", false),
-        w_engine_disable_mouse = wallInOne.settingBool("w_engine_disable_mouse", false),
-        w_engine_disable_parallax = wallInOne.settingBool("w_engine_disable_parallax", false),
-        w_engine_no_fullscreen_pause = wallInOne.settingBool("w_engine_no_fullscreen_pause", false),
-        w_engine_fullscreen_pause_only_active = wallInOne.settingBool("w_engine_fullscreen_pause_only_active", false),
-        mpv_mute = wallInOne.settingBool("mpv_mute", true),
-        mpv_hardware_decode = wallInOne.settingBool("mpv_hardware_decode", true),
-        mpv_auto_pause = wallInOne.settingBool("mpv_auto_pause", true),
-        mpv_auto_pause_mode = wallInOne.settingString("mpv_auto_pause_mode", "FULL"),
-        mpv_options = wallInOne.settingString("mpv_options", ""),
         cycle_interval_minutes = wallInOne.settingInt("cycle_interval_minutes", 15, 1, 43200),
         cycle_order = wallInOne.configuredPlaylistOrder(),
         cycle_start_on_load = wallInOne.settingBool("cycle_start_on_load", false),
-        extra_provider_panel = extraPanel,
     }
     settingsSnapshotCache = snapshot
     return snapshot
@@ -1313,7 +1392,7 @@ function wallInOne.normalizedSchedule(candidate, playlists, allowMissingMonths)
     }
 end
 
-function wallInOne.normalizedOutputs(candidate, playlists, allowMissingScheduleMonths)
+function wallInOne.normalizedOutputs(candidate, playlists, allowMissingScheduleMonths, defaultEngines)
     if type(candidate) ~= "table" then
         return nil
     end
@@ -1372,7 +1451,11 @@ function wallInOne.normalizedOutputs(candidate, playlists, allowMissingScheduleM
             fallback_playlist = fallback,
             quick_choice_playlist = quickChoice,
             schedules = schedules,
+            engines = wallInOne.normalizedOutputEngines(rawOutput.engines, defaultEngines),
         }
+        if normalizedOutput.engines == nil then
+            return nil
+        end
         if outputOrder ~= nil then
             normalizedOutput.order = outputOrder
         end
@@ -1446,7 +1529,7 @@ function wallInOne.validateConfig(candidate)
         return nil, noctalia.tr("errors.config_not_object")
     end
     local schema = tonumber(candidate.schema_version)
-    if schema ~= 1 and schema ~= 2 and schema ~= 3 and schema ~= CONFIG_SCHEMA then
+    if schema ~= 1 and schema ~= 2 and schema ~= 3 and schema ~= 4 and schema ~= CONFIG_SCHEMA then
         return nil, noctalia.tr("errors.config_schema", { version = tostring(candidate.schema_version or "?") })
     end
     if type(candidate.gestures) ~= "table" then
@@ -1455,6 +1538,7 @@ function wallInOne.validateConfig(candidate)
 
     local gestures = wallInOne.cloneGestures(candidate.gestures)
     for _, button in ipairs({ "left", "middle", "right" }) do
+        gestures[button] = LEGACY_GESTURE_ACTIONS[gestures[button]] or gestures[button]
         if not VALID_GESTURE_ACTIONS[gestures[button]] then
             return nil,
                 noctalia.tr("errors.config_action", {
@@ -1468,10 +1552,20 @@ function wallInOne.validateConfig(candidate)
     local playlists
     local outputs
     local migratedPairings = false
+    -- Engine controls moved from global manifest settings to per-output
+    -- schema-5 state. Removed manifest keys cannot be read through getConfig,
+    -- so older configs receive the direct-renderer defaults and can then be
+    -- tailored per display.
+    local migratedEngines = if schema < CONFIG_SCHEMA then wallInOne.defaultOutputEngines() else nil
     if schema == CONFIG_SCHEMA then
         playlists = wallInOne.normalizedPlaylists(candidate.playlists)
         pairings = wallInOne.normalizedPairings(candidate.pairings or {})
         outputs = playlists ~= nil and wallInOne.normalizedOutputs(candidate.outputs, playlists) or nil
+        migratedPairings = candidate.pairings == nil
+    elseif schema == 4 then
+        playlists = wallInOne.normalizedPlaylists(candidate.playlists)
+        pairings = wallInOne.normalizedPairings(candidate.pairings or {})
+        outputs = playlists ~= nil and wallInOne.normalizedOutputs(candidate.outputs, playlists, false, migratedEngines) or nil
         migratedPairings = candidate.pairings == nil
     elseif schema == 3 then
         -- Schema 3 already has the named playlist/output model. Preserve it
@@ -1479,10 +1573,13 @@ function wallInOne.validateConfig(candidate)
         -- explicit numeric priority is intentionally retired in schema 4.
         playlists = wallInOne.normalizedPlaylists(candidate.playlists)
         pairings = {}
-        outputs = playlists ~= nil and wallInOne.normalizedOutputs(candidate.outputs, playlists, true) or nil
+        outputs = playlists ~= nil and wallInOne.normalizedOutputs(candidate.outputs, playlists, true, migratedEngines) or nil
     elseif schema == 2 then
         playlists, outputs = wallInOne.migrateLegacyReels(candidate.reels)
         pairings = {}
+        outputs = playlists ~= nil and outputs ~= nil
+                and wallInOne.normalizedOutputs(outputs, playlists, true, migratedEngines)
+            or nil
     else
         pairings, playlists, outputs = {}, {}, {}
     end
@@ -2556,11 +2653,8 @@ end
 
 function wallInOne.providerCurrentSignature()
     local current = {}
-    for output, id in pairs(providers.w_engine.current or {}) do
-        table.insert(current, tostring(output) .. "=" .. tostring(id))
-    end
     for output, id in pairs(providers.w_engine.internal_current or {}) do
-        table.insert(current, "internal:" .. tostring(output) .. "=" .. tostring(id))
+        table.insert(current, tostring(output) .. "=" .. tostring(id))
     end
     table.sort(current)
     return table.concat(current, ",")
@@ -2568,46 +2662,21 @@ end
 
 function wallInOne.currentProviderSignature()
     return table.concat({
-        tostring(providers.probe_ok),
-        tostring(providers.probe_error),
         tostring(providers.wallhaven.allowed),
-        tostring(providers.wallhaven.plugin_enabled),
         tostring(providers.wallhaven.available),
-        tostring(providers.wallhaven.version),
-        tostring(providers.w_engine.allowed),
-        tostring(providers.w_engine.plugin_enabled),
+        tostring(providers.w_engine.command_available),
+        tostring(providers.w_engine.renderer_ready),
         tostring(providers.w_engine.available),
-        tostring(providers.w_engine.version),
-        tostring(providers.w_engine.renderer_available),
-        tostring(providers.w_engine.adapter_version),
-        tostring(providers.w_engine.adapter_capture),
-        tostring(providers.w_engine.adapter_status),
-        tostring(providers.w_engine.internal_available),
-        tostring(providers.w_engine.effective_backend),
         tostring(providers.w_engine.apply_available),
-        tostring(providers.w_engine.conflict),
         wallInOne.providerCurrentSignature(),
-        tostring(providers.mpvpaper.allowed),
-        tostring(providers.mpvpaper.plugin_enabled),
-        tostring(providers.mpvpaper.available),
-        tostring(providers.mpvpaper.version),
         tostring(providers.mpvpaper.command_available),
-        tostring(providers.mpvpaper.internal_available),
-        tostring(providers.mpvpaper.effective_backend),
+        tostring(providers.mpvpaper.renderer_ready),
+        tostring(providers.mpvpaper.available),
         tostring(providers.mpvpaper.apply_available),
-        tostring(providers.mpvpaper.conflict),
         tostring(providers.motionbgs.allowed),
         tostring(providers.motionbgs.available),
         tostring(providers.motionbgs.browser_available),
         tostring(providers.motionbgs.integration_available),
-        tostring(providers.daemons.awww),
-        tostring(providers.daemons.swww),
-        tostring(providers.daemons.wpaperd),
-        tostring(providers.daemons.hyprpaper),
-        tostring(providers.extra.panel),
-        tostring(providers.extra.allowed),
-        tostring(providers.extra.plugin_enabled),
-        tostring(providers.extra.available),
         tostring(colors.source),
         tostring(colors.scheme),
     }, "|")
@@ -2626,49 +2695,26 @@ function wallInOne.persistRuntimeIfChanged(force)
     runtime.providers = {
         wallhaven = {
             allowed = providers.wallhaven.allowed,
-            enabled = providers.wallhaven.plugin_enabled,
             available = providers.wallhaven.available,
-            version = providers.wallhaven.version,
         },
         w_engine = {
-            allowed = providers.w_engine.allowed,
-            enabled = providers.w_engine.plugin_enabled,
+            command_available = providers.w_engine.command_available,
+            renderer_ready = providers.w_engine.renderer_ready,
             available = providers.w_engine.available,
-            version = providers.w_engine.version,
-            renderer = providers.w_engine.renderer_available,
-            adapter_version = providers.w_engine.adapter_version,
-            adapter_capture = providers.w_engine.adapter_capture,
-            adapter_status = providers.w_engine.adapter_status,
-            internal_available = providers.w_engine.internal_available,
-            effective_backend = providers.w_engine.effective_backend,
             apply_available = providers.w_engine.apply_available,
-            conflict = providers.w_engine.conflict,
-            current = providers.w_engine.current,
             internal_current = providers.w_engine.internal_current,
         },
         mpvpaper = {
-            allowed = providers.mpvpaper.allowed,
-            enabled = providers.mpvpaper.plugin_enabled,
-            available = providers.mpvpaper.available,
-            version = providers.mpvpaper.version,
             command_available = providers.mpvpaper.command_available,
-            internal_available = providers.mpvpaper.internal_available,
-            effective_backend = providers.mpvpaper.effective_backend,
+            renderer_ready = providers.mpvpaper.renderer_ready,
+            available = providers.mpvpaper.available,
             apply_available = providers.mpvpaper.apply_available,
-            conflict = providers.mpvpaper.conflict,
         },
         motionbgs = providers.motionbgs,
-        daemons = providers.daemons,
-        extra = {
-            panel = providers.extra.panel,
-            allowed = providers.extra.allowed,
-            enabled = providers.extra.plugin_enabled,
-            available = providers.extra.available,
-        },
         colors = { source = colors.source, scheme = colors.scheme },
     }
     runtime.observed_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    runtime.last_error = tostring(providers.probe_error or "")
+    runtime.last_error = ""
     local saved, saveError = wallInOne.atomicWrite("runtime.json", runtime)
     if not saved then
         runtimeValid = false
@@ -2678,48 +2724,28 @@ function wallInOne.persistRuntimeIfChanged(force)
     return true
 end
 
-function wallInOne.parseEnabledPlugins(output)
-    local enabled = {}
-    for line in tostring(output or ""):gmatch("[^\r\n]+") do
-        local id, source, version = line:match("^(%S+)%s+%[([^%]]+)%]%s+(%S+)")
-        local framed = " " .. line .. " "
-        if id ~= nil and framed:find(" enabled ", 1, true) ~= nil and framed:find(" incompatible ", 1, true) == nil then
-            enabled[id] = { source = tostring(source or ""), version = tostring(version or "") }
+function wallInOne.anyOutputEngineEnabled(engine)
+    local names = {}
+    for output in pairs(type(config.outputs) == "table" and config.outputs or {}) do
+        names[output] = true
+    end
+    for _, descriptor in ipairs(noctalia.outputs()) do
+        local output = type(descriptor) == "table" and tostring(descriptor.name or descriptor.connector or "") or ""
+        if output ~= "" then
+            names[output] = true
         end
     end
-    return enabled
-end
-
-function wallInOne.refreshExtraProvider(enabled)
-    local panelId, pluginId = wallInOne.normalizedExtraPanel()
-    local entry = type(enabled) == "table" and enabled[pluginId] or nil
-    if
-        type(enabled) ~= "table"
-        and providers.extra.plugin_id == pluginId
-        and providers.extra.plugin_enabled == true
-    then
-        entry = { version = providers.extra.version }
+    if next(names) == nil then
+        return true
     end
-    local allowed = wallInOne.settingBool("use_extra_provider", true)
-    providers.extra = {
-        allowed = allowed,
-        configured = panelId ~= "",
-        plugin_enabled = entry ~= nil,
-        available = panelId ~= "" and entry ~= nil and allowed,
-        panel = panelId,
-        plugin_id = pluginId,
-        version = type(entry) == "table" and tostring(entry.version or "") or "",
-    }
-end
-
-function wallInOne.clearAdapterState()
-    providers.w_engine.adapter_version = ""
-    providers.w_engine.adapter_capture = false
-    providers.w_engine.adapter_status = false
-    providers.w_engine.adapter_seen_at = ""
-    providers.w_engine.adapter_seen_ms = 0
-    providers.w_engine.adapter_probe_ms = 0
-    providers.w_engine.current = {}
+    for output in pairs(names) do
+        local engines = wallInOne.outputEngineSettings(output)
+        local settings = if engine == "w_engine" then engines.workshop else engines.video
+        if type(settings) == "table" and settings.enabled == true then
+            return true
+        end
+    end
+    return false
 end
 
 function wallInOne.refreshBackendPolicy()
@@ -2727,65 +2753,36 @@ function wallInOne.refreshBackendPolicy()
     local previousWEngine = backendPolicySignature.w_engine
     local previousMpvpaper = backendPolicySignature.mpvpaper
 
-    local function resolve(allowed, desired, pluginEnabled, commandAvailable)
-        local ownershipKnown = providers.probe_ok == true
-        local internalAvailable = allowed and ownershipKnown and rendererReady and commandAvailable
-        local conflict = allowed and desired == "internal" and pluginEnabled
-        if not allowed then
-            return "none", internalAvailable, false, false
-        elseif not ownershipKnown then
-            -- Unknown must never be interpreted as no external owner. This
-            -- covers startup and transient `plugins list` failures.
-            return "none", false, false, false
-        elseif desired == "external" then
-            return if pluginEnabled then "external" else "none", internalAvailable, false, false
-        elseif desired == "internal" then
-            return if internalAvailable and not conflict then "internal" else "none",
-                internalAvailable,
-                internalAvailable and not conflict,
-                conflict
-        elseif pluginEnabled then
-            return "external", internalAvailable, false, false
-        elseif internalAvailable then
-            return "internal", internalAvailable, true, false
-        end
-        return "none", internalAvailable, false, false
-    end
-
-    providers.w_engine.effective_backend, providers.w_engine.internal_available, providers.w_engine.apply_available, providers.w_engine.conflict =
-        resolve(
-            providers.w_engine.allowed,
-            wallInOne.configuredBackend("w_engine_backend"),
-            providers.w_engine.plugin_enabled,
-            providers.w_engine.renderer_available
-        )
-    providers.mpvpaper.effective_backend, providers.mpvpaper.internal_available, providers.mpvpaper.apply_available, providers.mpvpaper.conflict =
-        resolve(
-            providers.mpvpaper.allowed,
-            wallInOne.configuredBackend("mpvpaper_backend"),
-            providers.mpvpaper.plugin_enabled,
-            providers.mpvpaper.command_available
-        )
+    providers.w_engine.command_available = noctalia.commandExists("linux-wallpaperengine")
+    providers.w_engine.renderer_ready = rendererReady
+    providers.w_engine.available = providers.w_engine.command_available
+    providers.w_engine.apply_available = rendererReady
+        and providers.w_engine.command_available
+        and wallInOne.anyOutputEngineEnabled("w_engine")
+    providers.mpvpaper.command_available = noctalia.commandExists("mpvpaper")
+    providers.mpvpaper.renderer_ready = rendererReady
+    providers.mpvpaper.available = providers.mpvpaper.command_available
+    providers.mpvpaper.apply_available = rendererReady
+        and providers.mpvpaper.command_available
+        and wallInOne.anyOutputEngineEnabled("mpvpaper")
     providers.motionbgs.allowed = wallInOne.settingBool("use_motionbgs", true)
     providers.motionbgs.browser_available = noctalia.commandExists("xdg-open")
     providers.motionbgs.integration_available = providers.motionbgs.allowed
         and type(motionBgsStatus) == "table"
         and motionBgsStatus.available == true
-    -- The direct website is a permanent fallback and remains independent of
-    -- the best-effort public-page adapter's health or enable switch.
+    -- The direct website remains available independently from the bundled
+    -- scraper service.
     providers.motionbgs.available = providers.motionbgs.browser_available
     providers.motionbgs.url = MOTIONBGS_URL
     local nextWEngine = table.concat({
-        tostring(providers.w_engine.allowed),
-        tostring(providers.w_engine.effective_backend),
+        tostring(rendererReady),
+        tostring(providers.w_engine.command_available),
         tostring(providers.w_engine.apply_available),
-        tostring(providers.w_engine.conflict),
     }, "|")
     local nextMpvpaper = table.concat({
-        tostring(providers.mpvpaper.allowed),
-        tostring(providers.mpvpaper.effective_backend),
+        tostring(rendererReady),
+        tostring(providers.mpvpaper.command_available),
         tostring(providers.mpvpaper.apply_available),
-        tostring(providers.mpvpaper.conflict),
     }, "|")
     backendPolicySignature.w_engine = nextWEngine
     backendPolicySignature.mpvpaper = nextMpvpaper
@@ -2801,137 +2798,21 @@ function wallInOne.applyIntegrationPolicy()
     providers.wallhaven.allowed = wallInOne.settingBool("use_wallhaven", true)
     providers.wallhaven.site_available = noctalia.commandExists("xdg-open")
     providers.wallhaven.site_url = WALLHAVEN_URL
-    providers.wallhaven.available = providers.probe_ok
-        and providers.wallhaven.plugin_enabled
-        and providers.wallhaven.allowed
-
-    providers.w_engine.allowed = wallInOne.settingBool("use_w_engine", true)
-    providers.w_engine.available = providers.probe_ok
-        and providers.w_engine.plugin_enabled
-        and providers.w_engine.allowed
-    if not providers.w_engine.allowed then
-        wallInOne.clearAdapterState()
-    end
-
-    providers.mpvpaper.allowed = wallInOne.settingBool("use_mpvpaper", true)
-    providers.mpvpaper.available = providers.probe_ok
-        and providers.mpvpaper.plugin_enabled
-        and providers.mpvpaper.allowed
+    providers.wallhaven.available = providers.wallhaven.allowed and wallhavenStatus.available == true
     wallInOne.refreshBackendPolicy()
     if type(wallInOne.reconcileRendererOwnership) == "function" then
         wallInOne.reconcileRendererOwnership()
     end
 end
 
-function wallInOne.requestAdapterProbe()
-    if not providers.w_engine.available or not providers.noctalia_cli then
-        return
-    end
-    local requestedAt = noctalia.nowMs()
-    providers.w_engine.adapter_probe_ms = requestedAt
-    local command = "noctalia msg plugin " .. W_ENGINE_SERVICE .. " all wall-in-one-probe-v1"
-    -- A command exit is not a capability response. Keep the timestamp armed;
-    -- update() expires stale adapter state after the documented grace window.
-    noctalia.runAsync(command, function(_result) end, 5000)
-end
-
-function wallInOne.startPendingProviderProbe()
-    if not providerProbePending then
-        return
-    end
-    providerProbePending = false
-    wallInOne.probeProviders()
-end
-
-function wallInOne.completeProviderProbe(enabled, probeError)
-    providerProbeInFlight = false
-    providers.probing = false
-    providers.probe_ok = probeError == nil
-    providers.probe_error = tostring(probeError or "")
-    providers.probed_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+function wallInOne.refreshAvailability()
+    lastAvailabilityRefreshAt = wallInOne.nowSeconds()
     providers.noctalia_cli = noctalia.commandExists("noctalia")
-
-    if probeError ~= nil then
-        -- Preserve the last known ownership flags for diagnostics, but fail
-        -- closed: wallInOne.refreshBackendPolicy gates every internal start on probe_ok.
-        providers.wallhaven.allowed = wallInOne.settingBool("use_wallhaven", true)
-        providers.wallhaven.available = false
-        providers.w_engine.allowed = wallInOne.settingBool("use_w_engine", true)
-        providers.w_engine.available = false
-        providers.w_engine.renderer_available = noctalia.commandExists("linux-wallpaperengine")
-        providers.mpvpaper.allowed = wallInOne.settingBool("use_mpvpaper", true)
-        providers.mpvpaper.available = false
-        providers.mpvpaper.command_available = noctalia.commandExists("mpvpaper")
-        providers.extra.allowed = wallInOne.settingBool("use_extra_provider", true)
-        providers.extra.available = false
-        wallInOne.refreshBackendPolicy()
-        if type(wallInOne.reconcileRendererOwnership) == "function" then
-            wallInOne.reconcileRendererOwnership()
-        end
-        wallInOne.persistRuntimeIfChanged(false)
-        wallInOne.publishStatus()
-        wallInOne.startPendingProviderProbe()
-        return
-    end
-
-    local pluginList = type(enabled) == "table" and enabled or {}
-    local wallhaven = pluginList[WALLHAVEN_ID]
-    local wEngine = pluginList[W_ENGINE_ID]
-    local mpvpaper = pluginList[MPVPAPER_ID]
-    local wallhavenAllowed = wallInOne.settingBool("use_wallhaven", true)
-    local wEngineAllowed = wallInOne.settingBool("use_w_engine", true)
-    local mpvpaperAllowed = wallInOne.settingBool("use_mpvpaper", true)
-    providers.wallhaven = {
-        allowed = wallhavenAllowed,
-        plugin_enabled = wallhaven ~= nil,
-        available = probeError == nil and wallhaven ~= nil and wallhavenAllowed,
-        site_available = noctalia.commandExists("xdg-open"),
-        site_url = WALLHAVEN_URL,
-        version = type(wallhaven) == "table" and tostring(wallhaven.version or "") or "",
-    }
-    local previousWEngineVersion = providers.w_engine.version
-    local previousWEngineAllowed = providers.w_engine.allowed
-    providers.w_engine.allowed = wEngineAllowed
-    providers.w_engine.plugin_enabled = wEngine ~= nil
-    providers.w_engine.version = type(wEngine) == "table" and tostring(wEngine.version or "") or ""
-    providers.w_engine.renderer_available = noctalia.commandExists("linux-wallpaperengine")
     providers.w_engine.steam_available = noctalia.commandExists("steam") or noctalia.commandExists("xdg-open")
     providers.w_engine.steam_workshop_available = noctalia.commandExists("xdg-open")
-    providers.w_engine.available = probeError == nil and wEngine ~= nil and wEngineAllowed
-    if
-        wEngine == nil
-        or not wEngineAllowed
-        or previousWEngineAllowed ~= wEngineAllowed
-        or (previousWEngineVersion ~= "" and previousWEngineVersion ~= providers.w_engine.version)
-    then
-        wallInOne.clearAdapterState()
-    end
-    providers.mpvpaper = {
-        allowed = mpvpaperAllowed,
-        plugin_enabled = mpvpaper ~= nil,
-        available = probeError == nil and mpvpaper ~= nil and mpvpaperAllowed,
-        command_available = noctalia.commandExists("mpvpaper"),
-        internal_available = false,
-        effective_backend = "none",
-        apply_available = false,
-        conflict = false,
-        version = type(mpvpaper) == "table" and tostring(mpvpaper.version or "") or "",
-    }
-    providers.daemons = {
-        awww = noctalia.commandExists("awww"),
-        swww = noctalia.commandExists("swww"),
-        wpaperd = noctalia.commandExists("wpaperctl"),
-        hyprpaper = noctalia.commandExists("hyprctl"),
-    }
-    wallInOne.refreshExtraProvider(pluginList)
-    wallInOne.refreshBackendPolicy()
-    if type(wallInOne.reconcileRendererOwnership) == "function" then
-        wallInOne.reconcileRendererOwnership()
-    end
+    wallInOne.applyIntegrationPolicy()
     wallInOne.persistRuntimeIfChanged(false)
     wallInOne.publishStatus()
-    wallInOne.requestAdapterProbe()
-    wallInOne.startPendingProviderProbe()
 end
 
 function wallInOne.probeColorScheme()
@@ -2977,43 +2858,6 @@ function wallInOne.probeColorScheme()
     end
 end
 
-function wallInOne.probeProviders()
-    if providerProbeInFlight then
-        -- Preserve one follow-up request so a hot-swap or explicit refresh
-        -- arriving during discovery is not lost. A boolean latch bounds a
-        -- burst to one additional subprocess instead of growing a queue.
-        providerProbePending = true
-        return
-    end
-    lastProviderProbeAt = wallInOne.nowSeconds()
-    providerProbeInFlight = true
-    providers.probing = true
-    wallInOne.publishStatus()
-
-    if not noctalia.commandExists("noctalia") then
-        wallInOne.completeProviderProbe(nil, noctalia.tr("errors.noctalia_cli"))
-        return
-    end
-    local started = noctalia.runAsync("noctalia msg plugins list", function(result)
-        if type(result) ~= "table" then
-            wallInOne.completeProviderProbe(nil, noctalia.tr("errors.provider_probe"))
-        elseif result.timedOut then
-            wallInOne.completeProviderProbe(nil, noctalia.tr("errors.provider_probe_timeout"))
-        elseif tonumber(result.exitCode) ~= 0 then
-            wallInOne.completeProviderProbe(
-                nil,
-                noctalia.tr("errors.provider_probe_detail", { detail = wallInOne.commandFailureDetail(result) })
-            )
-        else
-            wallInOne.completeProviderProbe(wallInOne.parseEnabledPlugins(result.stdout), nil)
-        end
-        wallInOne.probeColorScheme()
-    end, 5000)
-    if not started then
-        wallInOne.completeProviderProbe(nil, noctalia.tr("errors.provider_probe_start"))
-    end
-end
-
 -- Local media and Steam Workshop discovery ---------------------------------
 
 function wallInOne.safeRelativePath(value)
@@ -3056,7 +2900,6 @@ function wallInOne.currentLibraryRootsSignature()
     return table.concat({
         wallInOne.captureDirectory(),
         wallInOne.videoDirectory(),
-        wallInOne.settingString("motionbgs_download_directory", ""),
         wallInOne.settingString("workshop_directory", ""),
     }, "\0")
 end
@@ -3147,37 +2990,43 @@ end
 wallInOne.refreshLibrary = function()
     local imageRoot = wallInOne.captureDirectory()
     local videoRoot = wallInOne.videoDirectory()
+    local imageRootReady = wallInOne.existingDirectory(imageRoot)
+    local videoRootReady = wallInOne.existingDirectory(videoRoot)
     local mediaEntries = {}
     local seenMedia = {}
     -- Managed roots must claim an overlapping explicit user root first. The
     -- incremental scan still verifies each sidecar and downgrades unproven
     -- files to user-owned entries.
-    wallInOne.appendLibraryDirectory(
-        mediaEntries,
-        wallInOne.wallhavenManagedDirectory(),
-        "image",
-        "managed-wallhaven",
-        "Wallhaven",
-        seenMedia
-    )
-    wallInOne.appendLibraryDirectory(
-        mediaEntries,
-        wallInOne.automaticStillDirectory(),
-        "image",
-        "managed-auto",
-        "Wall-in-One",
-        seenMedia
-    )
-    wallInOne.appendLibraryDirectory(
-        mediaEntries,
-        wallInOne.motionBgsManagedDirectory(),
-        "video",
-        "managed-motionbgs",
-        "MotionBGS",
-        seenMedia
-    )
-    wallInOne.appendLibraryDirectory(mediaEntries, imageRoot, "image", "user", "local", seenMedia)
-    wallInOne.appendLibraryDirectory(mediaEntries, videoRoot, "video", "user", "local", seenMedia)
+    if imageRootReady then
+        wallInOne.appendLibraryDirectory(
+            mediaEntries,
+            wallInOne.wallhavenManagedDirectory(),
+            "image",
+            "managed-wallhaven",
+            "Wallhaven",
+            seenMedia
+        )
+        wallInOne.appendLibraryDirectory(
+            mediaEntries,
+            wallInOne.automaticStillDirectory(),
+            "image",
+            "managed-auto",
+            "Wall-in-One",
+            seenMedia
+        )
+        wallInOne.appendLibraryDirectory(mediaEntries, imageRoot, "image", "user", "local", seenMedia)
+    end
+    if videoRootReady then
+        wallInOne.appendLibraryDirectory(
+            mediaEntries,
+            wallInOne.motionBgsManagedDirectory(),
+            "video",
+            "managed-motionbgs",
+            "MotionBGS",
+            seenMedia
+        )
+        wallInOne.appendLibraryDirectory(mediaEntries, videoRoot, "video", "user", "local", seenMedia)
+    end
     table.sort(mediaEntries, function(left, right)
         return tostring(left.path) < tostring(right.path)
     end)
@@ -3185,26 +3034,28 @@ wallInOne.refreshLibrary = function()
     local workshopCandidates = {}
     local seenIds = {}
     local workshopNamesExamined = 0
-    for _, root in ipairs(wallInOne.candidateWorkshopRoots()) do
-        local ids = noctalia.listDir(root)
-        if type(ids) == "table" then
-            for _, candidate in ipairs(ids) do
-                workshopNamesExamined += 1
-                local id = tostring(candidate)
-                if wallInOne.validWorkshopId(id) and not seenIds[id] then
-                    seenIds[id] = true
-                    table.insert(workshopCandidates, { id = id, directory = root .. id .. "/" })
-                    if #workshopCandidates >= MAX_LIBRARY_CANDIDATES then
+    if imageRootReady then
+        for _, root in ipairs(wallInOne.candidateWorkshopRoots()) do
+            local ids = noctalia.listDir(root)
+            if type(ids) == "table" then
+                for _, candidate in ipairs(ids) do
+                    workshopNamesExamined += 1
+                    local id = tostring(candidate)
+                    if wallInOne.validWorkshopId(id) and not seenIds[id] then
+                        seenIds[id] = true
+                        table.insert(workshopCandidates, { id = id, directory = root .. id .. "/" })
+                        if #workshopCandidates >= MAX_LIBRARY_CANDIDATES then
+                            break
+                        end
+                    end
+                    if workshopNamesExamined >= MAX_LIBRARY_CANDIDATES then
                         break
                     end
                 end
-                if workshopNamesExamined >= MAX_LIBRARY_CANDIDATES then
-                    break
-                end
             end
-        end
-        if #workshopCandidates >= MAX_LIBRARY_CANDIDATES or workshopNamesExamined >= MAX_LIBRARY_CANDIDATES then
-            break
+            if #workshopCandidates >= MAX_LIBRARY_CANDIDATES or workshopNamesExamined >= MAX_LIBRARY_CANDIDATES then
+                break
+            end
         end
     end
     table.sort(workshopCandidates, function(left, right)
@@ -3411,12 +3262,15 @@ end
 
 function wallInOne.captureDestination(prefix, identity, output, extension, managedAutomatic)
     local directory = if managedAutomatic == true then wallInOne.automaticStillDirectory() else wallInOne.captureDirectory()
-    if directory == "" then
+    local imageRoot = wallInOne.captureDirectory()
+    if directory == "" or not wallInOne.existingDirectory(imageRoot) then
         return nil, noctalia.tr("errors.capture_directory")
     end
-    local ok, directoryError = if managedAutomatic == true
-        then wallInOne.ensureManagedDirectory(directory, "automatic-stills")
-        else noctalia.mkdirAll(directory)
+    local ok = true
+    local directoryError = nil
+    if managedAutomatic == true then
+        ok, directoryError = wallInOne.ensureManagedDirectory(directory, "automatic-stills")
+    end
     if ok ~= true then
         return nil, tostring(directoryError or noctalia.tr("errors.capture_directory"))
     end
@@ -3508,7 +3362,7 @@ function wallInOne.writeManagedStillSidecar(request, path)
     return true, nil
 end
 
-function wallInOne.adapterStagingPath(requestId)
+function wallInOne.captureStagingPath(requestId)
     local dataDirectory, dataError = noctalia.pluginDataDir()
     if
         type(dataDirectory) ~= "string"
@@ -4124,7 +3978,6 @@ end
 function wallInOne.releaseCaptureSlot(key)
     captureInFlight[key] = nil
     activeCaptureRequests[key] = nil
-    pendingAdapterCaptures[key] = nil
     pendingInternalCaptures[key] = nil
 end
 
@@ -4142,17 +3995,6 @@ function wallInOne.drainCaptureQueues(key)
     if type(queued) == "table" then
         wallInOne.runCapture(queued)
     end
-    local queuedAdapter = adapterCaptureQueued[key]
-    adapterCaptureQueued[key] = nil
-    if type(queuedAdapter) == "table" and type(wallInOne.requestRenderedCapture) == "function" then
-        wallInOne.requestRenderedCapture(
-            queuedAdapter.output,
-            queuedAdapter.id,
-            queuedAdapter.pair,
-            queuedAdapter.notify,
-            queuedAdapter.managed_auto
-        )
-    end
     wallInOne.drainInternalCapture(key)
 end
 
@@ -4162,7 +4004,6 @@ function wallInOne.finishCapture(key, request, ok, errorMessage)
         slot.deadline = 0
         slot.phase = if ok == true and request.pair == true then "applying" else "finishing"
     end
-    pendingAdapterCaptures[key] = nil
     pendingInternalCaptures[key] = nil
     if
         type(request.staging_path) == "string"
@@ -4350,13 +4191,6 @@ function wallInOne.captureWorkshopFallback(options)
     local paletteAllowed = options.palette_allowed
     local playlistId = options.playlist_id
     local entryId = options.entry_id
-    if not providers.w_engine.allowed then
-        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
-        if type(onComplete) == "function" then
-            onComplete(false)
-        end
-        return false
-    end
     output = wallInOne.targetOutput(output)
     id = tostring(id or "")
     if output == nil or not wallInOne.validWorkshopId(id) then
@@ -4408,131 +4242,11 @@ function wallInOne.captureWorkshopFallback(options)
     return true
 end
 
-wallInOne.requestRenderedCapture = function(output, id, pair, notifySuccess, managedAutomatic)
-    if not providers.w_engine.allowed then
-        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
-        return
-    end
-    output = wallInOne.targetOutput(output)
-    id = tostring(id or "")
-    if output == nil or not wallInOne.validWorkshopId(id) then
-        wallInOne.setActionError(noctalia.tr("errors.no_current_scene"), "capture-current")
-        return
-    end
-    local function currentSceneMatches()
-        return providers.w_engine.allowed == true
-            and tostring(providers.w_engine.current[output] or "") == id
-            and wallInOne.knownOutputName(output) ~= nil
-    end
-    if not providers.w_engine.adapter_capture or not noctalia.commandExists("ffmpeg") then
-        wallInOne.captureWorkshopFallback({
-            output = output,
-            id = id,
-            force = true,
-            pair = pair,
-            notify = notifySuccess,
-            managed_auto = managedAutomatic,
-            should_apply = currentSceneMatches,
-        })
-        return
-    end
-
-    local key = output
-    if captureInFlight[key] ~= nil then
-        adapterCaptureQueued[key] = {
-            output = output,
-            id = id,
-            pair = pair == true,
-            notify = notifySuccess == true,
-            managed_auto = managedAutomatic == true,
-        }
-        return
-    end
-    local destination, destinationError = wallInOne.captureDestination("w-engine", id, output, ".png", managedAutomatic == true)
-    if destination == nil then
-        wallInOne.setActionError(destinationError, "capture-directory")
-        return
-    end
-    if destination:find("[%c]") ~= nil then
-        wallInOne.setActionError(noctalia.tr("errors.capture_directory"), "capture-directory")
-        return
-    end
-
-    captureSequence += 1
-    local requestId = SERVICE_NONCE .. "-" .. tostring(noctalia.nowMs()) .. "-" .. tostring(captureSequence)
-    local stagingPath, stagingError = wallInOne.adapterStagingPath(requestId)
-    if stagingPath == nil then
-        wallInOne.setActionError(stagingError, "capture-directory")
-        return
-    end
-    local delay = wallInOne.settingInt("scene_screenshot_delay", 15, 1, 120)
-    local request = {
-        provider = "w_engine",
-        output = output,
-        dynamic_id = id,
-        spec = { method = "w-engine-adapter-v1" },
-        destination = destination,
-        force = true,
-        pair = pair == true,
-        notify = notifySuccess == true,
-        request_id = requestId,
-        staging_path = stagingPath,
-        managed_auto = managedAutomatic == true,
-        should_apply = function()
-            return providers.w_engine.adapter_capture == true and currentSceneMatches()
-        end,
-    }
-    pendingAdapterCaptures[key] = request
-    captureInFlight[key] = {
-        sequence = captureSequence,
-        provider = "w_engine",
-        dynamic_id = id,
-        output = output,
-        destination = destination,
-        method = "w-engine-adapter-v1",
-        request_id = requestId,
-        deadline = wallInOne.nowSeconds() + math.max(60, delay + 60),
-    }
-    wallInOne.publishStatus()
-
-    local payload = table.concat({
-        requestId,
-        output,
-        id,
-        stagingPath,
-        tostring(delay),
-    }, "\t")
-    local command = "noctalia msg plugin " .. W_ENGINE_SERVICE .. " all capture-v1 " .. wallInOne.shellQuote(payload)
-    local started = noctalia.runAsync(command, function(result)
-        if
-            pendingAdapterCaptures[key] == request
-            and (type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0)
-        then
-            wallInOne.finishCapture(
-                key,
-                request,
-                false,
-                noctalia.tr("errors.w_engine_adapter", { detail = wallInOne.commandFailureDetail(result) })
-            )
-        end
-    end, 5000)
-    if not started then
-        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter_start"))
-    end
-end
-
 function wallInOne.captureCurrent(output, force, pair, notifySuccess)
-    if not providers.w_engine.allowed then
-        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), "capture-current")
-        return
-    end
     output = wallInOne.targetOutput(output)
     local owned = output ~= nil and type(rendererStatus.outputs) == "table" and rendererStatus.outputs[output] or nil
     local internalId = type(owned) == "table" and tostring(owned.workshop_id or "") or ""
-    local externalId = output ~= nil and tostring(providers.w_engine.current[output] or "") or ""
-    local id = if wallInOne.validWorkshopId(internalId)
-        then internalId
-        else externalId ~= "" and externalId or nil
+    local id = if wallInOne.validWorkshopId(internalId) then internalId else nil
     if id == nil or tostring(id) == "" then
         id = wallInOne.configuredWorkshopId()
     end
@@ -4545,12 +4259,10 @@ function wallInOne.captureCurrent(output, force, pair, notifySuccess)
         applyGeneration[output] = applyToken
     end
     local observedInternal = wallInOne.validWorkshopId(internalId) and internalId == tostring(id)
-    local observedExternal = not observedInternal and externalId ~= "" and externalId == tostring(id)
     local function captureStillCurrent()
         if
             output == nil
             or tonumber(applyGeneration[output]) ~= applyToken
-            or providers.w_engine.allowed ~= true
             or wallInOne.knownOutputName(output) == nil
         then
             return false
@@ -4561,12 +4273,10 @@ function wallInOne.captureCurrent(output, force, pair, notifySuccess)
                 and currentOwned.backend == "w-engine"
                 and tostring(currentOwned.workshop_id or "") == tostring(id)
         end
-        if observedExternal then
-            return tostring(providers.w_engine.current[output] or "") == tostring(id)
-        end
         return true
     end
-    if providers.w_engine.effective_backend == "internal" and output ~= nil then
+    local ready = output ~= nil and wallInOne.internalBackendReady("w_engine", output) == true
+    if ready then
         local backendToken = backendGeneration.w_engine
         local sameCapturing = type(owned) == "table"
             and owned.backend == "w-engine"
@@ -4597,8 +4307,7 @@ function wallInOne.captureCurrent(output, force, pair, notifySuccess)
             notify = notifySuccess,
             should_apply = function()
                 return backendGeneration.w_engine == backendToken
-                    and providers.w_engine.effective_backend == "internal"
-                    and providers.w_engine.apply_available == true
+                    and wallInOne.internalBackendReady("w_engine", output) == true
                     and captureStillCurrent()
             end,
             start_after = wasRunning,
@@ -4606,8 +4315,6 @@ function wallInOne.captureCurrent(output, force, pair, notifySuccess)
             restore_paused = wasRunning and owned.state == "paused",
             managed_auto = false,
         })
-    elseif providers.w_engine.adapter_capture and output ~= nil and providers.w_engine.current[output] == id then
-        wallInOne.requestRenderedCapture(output, id, pair, notifySuccess, false)
     else
         wallInOne.captureWorkshopFallback({
             output = output,
@@ -4959,30 +4666,30 @@ wallInOne.reconcileRendererOwnership = function()
     for output, owned in pairs(ownedOutputs) do
         local backend = type(owned) == "table" and tostring(owned.backend or "") or ""
         local provider = if backend == "w-engine"
-            then providers.w_engine
-            elseif backend == "mpvpaper" then providers.mpvpaper
+            then "w_engine"
+            elseif backend == "mpvpaper" then "mpvpaper"
             else nil
-        local shouldStop = type(provider) ~= "table"
-            or wallInOne.knownOutputName(output) == nil
-            or provider.allowed ~= true
-            or provider.effective_backend ~= "internal"
-            or provider.apply_available ~= true
-            or provider.conflict == true
+        local ready = provider ~= nil and wallInOne.internalBackendReady(provider, output) == true
+        local shouldStop = provider == nil or wallInOne.knownOutputName(output) == nil or not ready
         if shouldStop and rendererStopping[output] ~= true then
             wallInOne.invalidateCycleIntent(output, true)
         end
     end
 end
 
-function wallInOne.internalBackendReady(provider)
-    local state = providers[provider]
-    if type(state) ~= "table" or state.allowed ~= true then
+function wallInOne.internalBackendReady(provider, output)
+    local engines = wallInOne.outputEngineSettings(output)
+    local settings = if provider == "w_engine"
+        then engines.workshop
+        elseif provider == "mpvpaper" then engines.video
+        else nil
+    if type(settings) ~= "table" or settings.enabled ~= true then
         return false, noctalia.tr("errors.provider_forced_off", { provider = provider })
-    elseif state.conflict == true then
-        return false, noctalia.tr("errors.internal_conflict", { provider = provider })
-    elseif state.effective_backend == "external" then
-        return false, noctalia.tr("errors.external_apply_boundary", { provider = provider })
-    elseif state.apply_available ~= true or state.effective_backend ~= "internal" then
+    elseif type(rendererStatus) ~= "table" or rendererStatus.ready ~= true then
+        return false, noctalia.tr("errors.internal_unavailable", { provider = provider })
+    elseif provider == "w_engine" and not noctalia.commandExists("linux-wallpaperengine") then
+        return false, noctalia.tr("errors.internal_unavailable", { provider = provider })
+    elseif provider == "mpvpaper" and not noctalia.commandExists("mpvpaper") then
         return false, noctalia.tr("errors.internal_unavailable", { provider = provider })
     end
     return true, nil
@@ -5036,21 +4743,23 @@ function wallInOne.selectedStaticPair(_output, preferredPath)
 end
 
 function wallInOne.startInternalVideo(output, source, onAcknowledged)
-    local ready, reason = wallInOne.internalBackendReady("mpvpaper")
+    local ready, reason = wallInOne.internalBackendReady("mpvpaper", output)
     if not ready then
         wallInOne.setActionError(reason, "mpvpaper-internal")
         return false
     end
+    local engines = wallInOne.outputEngineSettings(output)
+    local video = engines.video
     return wallInOne.sendRendererCommand({
         action = "start_mpvpaper",
         output = output,
         path = source,
-        layer = wallInOne.configuredInternalLayer(),
-        mute = wallInOne.settingBool("mpv_mute", true),
-        hardware_decode = wallInOne.settingBool("mpv_hardware_decode", true),
-        auto_pause = wallInOne.settingBool("mpv_auto_pause", true),
-        auto_pause_mode = wallInOne.settingString("mpv_auto_pause_mode", "FULL"),
-        options = wallInOne.settingString("mpv_options", ""),
+        layer = engines.layer,
+        mute = video.mute,
+        hardware_decode = video.hardware_decode,
+        auto_pause = video.auto_pause,
+        auto_pause_mode = video.auto_pause_mode,
+        options = video.options,
     }, onAcknowledged)
 end
 
@@ -5059,38 +4768,28 @@ function wallInOne.buildWorkshopRendererCommand(base)
     for key, value in pairs(type(base) == "table" and base or {}) do
         command[key] = value
     end
-    command.layer = wallInOne.configuredInternalLayer()
-    command.fps = wallInOne.settingInt("w_engine_fps", 30, 5, 144)
-    command.volume = wallInOne.settingInt("w_engine_volume", 0, 0, 100)
-    command.scaling = wallInOne.settingString("w_engine_scaling", "fill")
-    command.clamp = wallInOne.settingString("w_engine_clamp", "border")
-    command.silent = wallInOne.settingBool("w_engine_silent", true)
-    command.noautomute = wallInOne.settingBool("w_engine_noautomute", false)
-    command.no_audio_processing = wallInOne.settingBool("w_engine_no_audio_processing", false)
-    command.disable_particles = wallInOne.settingBool("w_engine_disable_particles", false)
-    command.disable_mouse = wallInOne.settingBool("w_engine_disable_mouse", false)
-    command.disable_parallax = wallInOne.settingBool("w_engine_disable_parallax", false)
-    command.no_fullscreen_pause = wallInOne.settingBool("w_engine_no_fullscreen_pause", false)
-    command.fullscreen_pause_only_active = wallInOne.settingBool("w_engine_fullscreen_pause_only_active", false)
+    local engines = wallInOne.outputEngineSettings(command.output)
+    local workshop = engines.workshop
+    command.layer = engines.layer
+    command.fps = workshop.fps
+    command.volume = workshop.volume
+    command.scaling = workshop.scaling
+    command.clamp = workshop.clamp
+    command.silent = workshop.silent
+    for _, name in ipairs(WORKSHOP_FLAG_NAMES) do
+        command[name] = workshop.flags[name]
+    end
     return command
 end
 
 function wallInOne.startInternalWorkshop(output, id, onAcknowledged)
-    local ready, reason = wallInOne.internalBackendReady("w_engine")
+    local ready, reason = wallInOne.internalBackendReady("w_engine", output)
     if not ready then
         wallInOne.setActionError(reason, "w-engine-internal")
         return false
     end
     if not wallInOne.validWorkshopId(id) then
         wallInOne.setActionError(noctalia.tr("errors.no_current_scene"), "w-engine-internal")
-        return false
-    end
-    if
-        wallInOne.settingBool("w_engine_no_fullscreen_pause", false)
-        and wallInOne.settingBool("w_engine_fullscreen_pause_only_active", false)
-    then
-        local reason = noctalia.tr("errors.w_engine_pause_conflict")
-        wallInOne.setActionError(reason, "w-engine-internal")
         return false
     end
     local _project, projectDirectory = wallInOne.findWorkshopProject(id)
@@ -5119,8 +4818,8 @@ wallInOne.requestInternalCapture = function(options)
     local paletteAllowed = options.palette_allowed
     local playlistId = options.playlist_id
     local entryId = options.entry_id
-    local ready, reason = wallInOne.internalBackendReady("w_engine")
     output = wallInOne.targetOutput(output)
+    local ready, reason = wallInOne.internalBackendReady("w_engine", output)
     id = tostring(id or "")
     if not ready or output == nil or not wallInOne.validWorkshopId(id) then
         local failure = tostring(reason or noctalia.tr("errors.no_current_scene"))
@@ -5133,14 +4832,14 @@ wallInOne.requestInternalCapture = function(options)
 
     local key = output
     local function parentStillCurrent()
-        if wallInOne.knownOutputName(output) == nil or providers.w_engine.allowed ~= true then
+        if wallInOne.knownOutputName(output) == nil then
             return false
         end
         if type(shouldApply) == "function" then
             local checked, current = pcall(shouldApply)
             return checked and current == true
         end
-        return providers.w_engine.effective_backend == "internal" and providers.w_engine.apply_available == true
+        return wallInOne.internalBackendReady("w_engine", output) == true
     end
 
     -- Reject a stale dequeued request before assigning a new intent token; it
@@ -5196,7 +4895,7 @@ wallInOne.requestInternalCapture = function(options)
     end
     captureSequence += 1
     local requestId = SERVICE_NONCE .. "-internal-" .. tostring(noctalia.nowMs()) .. "-" .. tostring(captureSequence)
-    local stagingPath, stagingError = wallInOne.adapterStagingPath(requestId)
+    local stagingPath, stagingError = wallInOne.captureStagingPath(requestId)
     if stagingPath == nil then
         wallInOne.setActionError(stagingError, "capture-directory")
         if type(onComplete) == "function" then
@@ -5382,7 +5081,7 @@ function wallInOne.applyVideoWithPair(request)
         end
         return
     end
-    local ready, reason = wallInOne.internalBackendReady("mpvpaper")
+    local ready, reason = wallInOne.internalBackendReady("mpvpaper", output)
     local backendToken = backendGeneration.mpvpaper
     local parentShouldStart = shouldStart
     shouldStart = function()
@@ -5504,7 +5203,7 @@ function wallInOne.applyWorkshopWithPair(request)
         end
         return
     end
-    local ready, reason = wallInOne.internalBackendReady("w_engine")
+    local ready, reason = wallInOne.internalBackendReady("w_engine", output)
     local backendToken = backendGeneration.w_engine
     local parentShouldStart = shouldStart
     shouldStart = function()
@@ -5663,6 +5362,43 @@ function wallInOne.saveConfig(nextConfig, errorKey)
     configValid = true
     configError = ""
     wallInOne.markStateDomain("config")
+    wallInOne.publishStatus()
+    return true
+end
+
+function wallInOne.saveOutputEngines(output, candidate)
+    output = wallInOne.knownOutputName(tostring(output or ""))
+    if output == nil or type(candidate) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("availability.output"), "output-engines")
+        return false
+    end
+    local nextConfig = wallInOne.editableConfig()
+    if nextConfig == nil then
+        wallInOne.setActionError(noctalia.tr("errors.config_playlists"), "output-engines")
+        return false
+    end
+    local current = wallInOne.outputEngineSettings(output)
+    local engines = wallInOne.normalizedOutputEngines(candidate, current)
+    if engines == nil then
+        wallInOne.setActionError(noctalia.tr("errors.config_playlists"), "output-engines")
+        return false
+    end
+    local outputConfig = nextConfig.outputs[output]
+    if type(outputConfig) ~= "table" then
+        outputConfig = {
+            fallback_playlist = "",
+            quick_choice_playlist = "",
+            schedules = {},
+        }
+        nextConfig.outputs[output] = outputConfig
+    end
+    outputConfig.engines = engines
+    if not wallInOne.saveConfig(nextConfig, "output-engines") then
+        return false
+    end
+    wallInOne.refreshBackendPolicy()
+    wallInOne.reconcileRendererOwnership()
+    wallInOne.persistRuntimeIfChanged(false)
     wallInOne.publishStatus()
     return true
 end
@@ -7747,7 +7483,7 @@ function wallInOne.pairConfiguredStill(output, notifySuccess)
         destination, destinationError = wallInOne.captureDestination("manual", identity, output, ".png")
     else
         captureSequence += 1
-        destination, destinationError = wallInOne.adapterStagingPath(
+        destination, destinationError = wallInOne.captureStagingPath(
             "manual-" .. SERVICE_NONCE .. "-" .. tostring(noctalia.nowMs()) .. "-" .. tostring(captureSequence)
         )
         stagingPath = destination
@@ -7811,9 +7547,6 @@ function wallInOne.actionAvailability(action, output)
     if NATIVE_SWITCH_VERBS[action] ~= nil then
         return providers.noctalia_cli, noctalia.tr("availability.native_cli")
     end
-    if action == "wallhaven_open" then
-        return providers.wallhaven.available, noctalia.tr("availability.wallhaven")
-    end
     if action == "wallhaven_site" then
         return providers.wallhaven.site_available == true, noctalia.tr("availability.wallhaven_site")
     end
@@ -7837,33 +7570,12 @@ function wallInOne.actionAvailability(action, output)
         return type(capabilities) == "table" and capabilities[capability] == true,
             noctalia.tr("availability.renderer_control")
     end
-    if action == "w_engine_open" then
-        return providers.w_engine.available, noctalia.tr("availability.w_engine")
-    end
-    if W_ENGINE_VERBS[action] ~= nil then
-        return providers.w_engine.available and providers.noctalia_cli, noctalia.tr("availability.w_engine_ipc")
-    end
-    if action == "mpvpaper_open" then
-        return providers.mpvpaper.available, noctalia.tr("availability.mpvpaper")
-    end
-    if MPVPAPER_VERBS[action] ~= nil then
-        if action == "mpvpaper_clear" and wallInOne.targetOutput(output) == nil then
-            return false, noctalia.tr("availability.output")
-        end
-        return providers.mpvpaper.available and providers.noctalia_cli, noctalia.tr("availability.mpvpaper_ipc")
-    end
     if action == "capture_backing" then
         return providers.noctalia_cli and wallInOne.targetOutput(output) ~= nil, noctalia.tr("availability.backing")
     end
     if action == "capture_current" or action == "capture_pair" then
-        if not providers.w_engine.allowed then
-            return false, noctalia.tr("availability.w_engine_forced_off")
-        end
         local selected = wallInOne.targetOutput(output)
         local id = selected ~= nil and providers.w_engine.internal_current[selected] or nil
-        if id == nil or tostring(id) == "" then
-            id = selected ~= nil and providers.w_engine.current[selected] or nil
-        end
         if id == nil or tostring(id) == "" then
             id = wallInOne.configuredWorkshopId()
         end
@@ -7876,11 +7588,18 @@ function wallInOne.actionAvailability(action, output)
     end
     if action == "video_apply_pair" then
         local source = wallInOne.configuredVideoSource()
-        return providers.mpvpaper.apply_available == true and source ~= "" and noctalia.fileExists(source),
+        local selected = wallInOne.targetOutput(output)
+        return selected ~= nil
+                and wallInOne.internalBackendReady("mpvpaper", selected) == true
+                and source ~= ""
+                and noctalia.fileExists(source),
             noctalia.tr("availability.video_apply")
     end
     if action == "workshop_apply_pair" then
-        return providers.w_engine.apply_available == true and wallInOne.configuredWorkshopId() ~= "",
+        local selected = wallInOne.targetOutput(output)
+        return selected ~= nil
+                and wallInOne.internalBackendReady("w_engine", selected) == true
+                and wallInOne.configuredWorkshopId() ~= "",
             noctalia.tr("availability.workshop_apply")
     end
     if action == "cycle_add_static" then
@@ -7931,9 +7650,6 @@ function wallInOne.actionAvailability(action, output)
             and (tonumber(info.size) or 0) > 0
             and supported,
             noctalia.tr("availability.manual_pair")
-    end
-    if action == "extra_provider_open" then
-        return providers.extra.available, noctalia.tr("availability.extra")
     end
     return false, noctalia.tr("availability.unknown")
 end
@@ -8198,6 +7914,11 @@ function wallInOne.sendWallhavenCommand(request, action)
             wallInOne.setActionError(noctalia.tr("errors.wallhaven_result"), "wallhaven")
             return false
         end
+        local imageRoot = wallInOne.captureDirectory()
+        if not wallInOne.existingDirectory(imageRoot) then
+            wallInOne.setActionError(noctalia.tr("errors.capture_directory"), "wallhaven")
+            return false
+        end
         local directory = wallInOne.wallhavenManagedDirectory()
         local ready, directoryError = wallInOne.ensureManagedDirectory(directory, "wallhaven")
         if ready ~= true then
@@ -8225,64 +7946,13 @@ function wallInOne.sendWallhavenCommand(request, action)
     return true
 end
 
-function wallInOne.runWEngineControl(request, action)
-    if not providers.w_engine.available then
-        wallInOne.setActionError(noctalia.tr("errors.w_engine_forced_off"), action)
-        return
-    end
-    local output = wallInOne.targetOutput(request.output)
-    local command = "noctalia msg plugin " .. W_ENGINE_SERVICE .. " all " .. W_ENGINE_VERBS[action]
-    if output ~= nil then
-        command ..= " " .. wallInOne.shellQuote(output)
-    end
-    local started = noctalia.runAsync(command, function(result)
-        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            wallInOne.setActionError(noctalia.tr("errors.w_engine_ipc", { detail = wallInOne.commandFailureDetail(result) }), action)
-        else
-            lastActionError = ""
-            lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-            wallInOne.publishStatus()
-        end
-    end, 5000)
-    if not started then
-        wallInOne.setActionError(noctalia.tr("errors.w_engine_ipc_start"), action)
-    end
-end
-
-function wallInOne.runMpvpaperControl(request, action)
-    if not providers.mpvpaper.available then
-        wallInOne.setActionError(noctalia.tr("errors.mpvpaper_forced_off"), action)
-        return
-    end
-    local output = wallInOne.targetOutput(request.output)
-    local command = "noctalia msg plugin " .. MPVPAPER_SERVICE .. " all " .. MPVPAPER_VERBS[action]
-    if action ~= "mpvpaper_clear_all" and output ~= nil then
-        command ..= " " .. wallInOne.shellQuote(output)
-    end
-    local started = noctalia.runAsync(command, function(result)
-        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            wallInOne.setActionError(noctalia.tr("errors.mpvpaper_ipc", { detail = wallInOne.commandFailureDetail(result) }), action)
-        else
-            lastActionError = ""
-            lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-            wallInOne.publishStatus()
-        end
-    end, 5000)
-    if not started then
-        wallInOne.setActionError(noctalia.tr("errors.mpvpaper_ipc_start"), action)
-    end
-end
-
 function wallInOne.actionPanelTarget(action)
-    if action == "extra_provider_open" then
-        return providers.extra.panel
-    end
     return OPEN_TARGETS[action]
 end
 
 function wallInOne.dispatchAction(request, action)
-    -- The explicit site link is the scraper's disaster-recovery path. Keep it
-    -- independent of plugin storage and the adapter enable switch.
+    -- The explicit site link is the scraper's disaster-recovery path and is
+    -- independent of plugin storage or bundled-service health.
     if action == "motionbgs_open" or action == "wallhaven_site" then
         local available, unavailableReason = wallInOne.actionAvailability(action, request.output)
         if available then
@@ -8320,12 +7990,6 @@ function wallInOne.dispatchAction(request, action)
         return
     elseif NATIVE_SWITCH_VERBS[action] ~= nil then
         wallInOne.runNativeSwitch(request, action)
-        return
-    elseif W_ENGINE_VERBS[action] ~= nil then
-        wallInOne.runWEngineControl(request, action)
-        return
-    elseif MPVPAPER_VERBS[action] ~= nil then
-        wallInOne.runMpvpaperControl(request, action)
         return
     elseif action == "capture_backing" then
         wallInOne.captureCurrentBacking(request.output, true, true)
@@ -8435,107 +8099,6 @@ function wallInOne.setMapping(button, action)
     wallInOne.saveConfig(nextConfig, "set-mapping")
 end
 
-function wallInOne.tabFields(payload)
-    local text = tostring(payload or "")
-    local fields = {}
-    if #text > MAX_ADAPTER_PAYLOAD_BYTES then
-        return fields
-    end
-    local withoutTabs = text:gsub("\t", "")
-    if withoutTabs:find("[%c]") ~= nil then
-        return fields
-    end
-    for value in (text .. "\t"):gmatch("([^\t]*)\t") do
-        if #fields >= ADAPTER_FIELD_COUNT then
-            return {}
-        end
-        table.insert(fields, value)
-    end
-    return if #fields == ADAPTER_FIELD_COUNT then fields else {}
-end
-
-function wallInOne.receiveProviderCapabilities(payload)
-    local fields = wallInOne.tabFields(payload)
-    if fields[1] ~= "w_engine" or fields[2] ~= "1" or not providers.w_engine.available then
-        return
-    end
-    local capabilities = "," .. tostring(fields[3] or "") .. ","
-    providers.w_engine.adapter_version = "1"
-    providers.w_engine.adapter_capture = capabilities:find(",capture,", 1, true) ~= nil
-    providers.w_engine.adapter_status = capabilities:find(",status,", 1, true) ~= nil
-    providers.w_engine.adapter_seen_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    providers.w_engine.adapter_seen_ms = noctalia.nowMs()
-    providers.w_engine.adapter_probe_ms = 0
-    wallInOne.persistRuntimeIfChanged(false)
-    wallInOne.publishStatus()
-end
-
-function wallInOne.receiveProviderCurrent(payload)
-    local fields = wallInOne.tabFields(payload)
-    if fields[1] ~= "w_engine" or not providers.w_engine.available or not providers.w_engine.adapter_status then
-        return
-    end
-    local output = wallInOne.knownOutputName(fields[2])
-    local id = tostring(fields[3] or "")
-    if output == nil then
-        return
-    end
-    if id == "" or id == "-" then
-        providers.w_engine.current[output] = nil
-    elseif wallInOne.validWorkshopId(id) then
-        local changed = tostring(providers.w_engine.current[output] or "") ~= id
-        providers.w_engine.current[output] = id
-        if changed and wallInOne.settingBool("auto_capture", true) then
-            wallInOne.requestRenderedCapture(output, id, true, false, true)
-        end
-    else
-        return
-    end
-    providers.w_engine.adapter_seen_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    providers.w_engine.adapter_seen_ms = noctalia.nowMs()
-    providers.w_engine.adapter_probe_ms = 0
-    wallInOne.persistRuntimeIfChanged(false)
-    wallInOne.publishStatus()
-end
-
-function wallInOne.receiveCaptureResult(payload)
-    local fields = wallInOne.tabFields(payload)
-    local requestId = tostring(fields[1] or "")
-    local resultStatus = tostring(fields[2] or "")
-    local value = tostring(fields[3] or "")
-    local key = nil
-    local request = nil
-    for candidateKey, candidate in pairs(pendingAdapterCaptures) do
-        if tostring(candidate.request_id or "") == requestId then
-            key = candidateKey
-            request = candidate
-            break
-        end
-    end
-    if key == nil or type(request) ~= "table" then
-        return
-    end
-    if not providers.w_engine.allowed then
-        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_forced_off"))
-        return
-    end
-    if resultStatus ~= "ok" then
-        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter", { detail = wallInOne.boundedDetail(value) }))
-        return
-    end
-    local stagedInfo = value ~= "" and value == request.staging_path and noctalia.fileInfo(value) or nil
-    if type(stagedInfo) ~= "table" or stagedInfo.isDir == true or (tonumber(stagedInfo.size) or 0) <= 0 then
-        wallInOne.finishCapture(key, request, false, noctalia.tr("errors.capture_failed"))
-        return
-    end
-    -- The adapter owns only this request-specific plugin-data staging path.
-    -- The helper decodes it, then atomically promotes it to the known-good
-    -- destination without ever exposing a partial image in the wallpaper tree.
-    wallInOne.releaseCaptureSlot(key)
-    request.spec = { mode = "copy", source = value, value = "", method = "w-engine-adapter-v1" }
-    wallInOne.runCapture(request)
-end
-
 function wallInOne.handleCommand(request)
     if type(request) ~= "table" then
         return
@@ -8578,6 +8141,16 @@ function wallInOne.handleCommand(request)
             request.order,
             request.inherit == true
         )
+    elseif kind == "output_engines" then
+        local engines = request.engines
+        if type(engines) ~= "table" then
+            engines = {
+                layer = request.layer,
+                video = request.video,
+                workshop = request.workshop,
+            }
+        end
+        wallInOne.saveOutputEngines(request.output, engines)
     elseif kind == "pairing_save" then
         wallInOne.savePairing(request.pairing)
     elseif kind == "pairing_delete" then
@@ -8669,7 +8242,8 @@ function wallInOne.handleCommand(request)
     elseif kind == "library_delete" then
         wallInOne.deleteManagedLibraryItem(request.item_id)
     elseif kind == "probe" then
-        wallInOne.probeProviders()
+        wallInOne.refreshAvailability()
+        wallInOne.probeColorScheme()
     end
 end
 
@@ -8705,17 +8279,8 @@ function update()
     if wallInOne.stepLibraryScan() then
         wallInOne.publishStatus()
     end
-    if lastProviderProbeAt == 0 or now == 0 or now - lastProviderProbeAt >= PROVIDER_PROBE_SECONDS then
-        wallInOne.probeProviders()
-    end
-    for key, capture in pairs(captureInFlight) do
-        local deadline = tonumber(capture.deadline) or 0
-        if deadline > 0 and now > deadline then
-            local request = pendingAdapterCaptures[key]
-            if type(request) == "table" then
-                wallInOne.finishCapture(key, request, false, noctalia.tr("errors.w_engine_adapter_timeout"))
-            end
-        end
+    if lastAvailabilityRefreshAt == 0 or now == 0 or now - lastAvailabilityRefreshAt >= AVAILABILITY_REFRESH_SECONDS then
+        wallInOne.refreshAvailability()
     end
     local timedOutRendererCommands = {}
     for nonce, pending in pairs(rendererPending) do
@@ -8727,16 +8292,6 @@ function update()
         local timeoutError = noctalia.tr("errors.renderer_ack_timeout")
         wallInOne.setActionError(timeoutError, "renderer")
         wallInOne.finishRendererPending(nonce, false, timeoutError)
-    end
-    local adapterProbeMs = tonumber(providers.w_engine.adapter_probe_ms) or 0
-    if
-        adapterProbeMs > 0
-        and noctalia.nowMs() - adapterProbeMs >= ADAPTER_PROBE_GRACE_MS
-        and (tonumber(providers.w_engine.adapter_seen_ms) or 0) < adapterProbeMs
-    then
-        wallInOne.clearAdapterState()
-        wallInOne.persistRuntimeIfChanged(true)
-        wallInOne.publishStatus()
     end
     local clockSignature = noctalia.formatTime("%Y-%m-%d %H:%M")
     local scheduledStarts = {}
@@ -8857,15 +8412,12 @@ function onConfigChanged()
         wallInOne.invalidateCycleIntent(output, false)
     end
     wallInOne.applyIntegrationPolicy()
-    -- Preserve the last discovered plugin identity while applying the new
-    -- force-off/panel policy. The asynchronous probe below refreshes discovery.
-    wallInOne.refreshExtraProvider(nil)
     local nextLibraryRootsSignature = wallInOne.currentLibraryRootsSignature()
     if nextLibraryRootsSignature ~= libraryRootsSignature then
         libraryRootsSignature = nextLibraryRootsSignature
         libraryRefreshPending = true
     end
-    wallInOne.probeProviders()
+    wallInOne.refreshAvailability()
     wallInOne.reconcilePaletteAuthority(true)
     -- Plugin settings live on the bounded lifecycle snapshot. The persisted
     -- config domain is dirtied only by saveConfig(), when its document changes.
@@ -8908,13 +8460,8 @@ end
 function onIpc(event, payload)
     local output = wallInOne.targetOutput(nil)
     if event == "status" or event == "probe" then
-        wallInOne.probeProviders()
-    elseif event == "provider-capabilities-v1" then
-        wallInOne.receiveProviderCapabilities(payload)
-    elseif event == "provider-current-v1" then
-        wallInOne.receiveProviderCurrent(payload)
-    elseif event == "capture-result-v1" then
-        wallInOne.receiveCaptureResult(payload)
+        wallInOne.refreshAvailability()
+        wallInOne.probeColorScheme()
     elseif event == "gesture" then
         local gestures = type(config.gestures) == "table" and config.gestures or {}
         wallInOne.dispatchAction(
@@ -8942,8 +8489,8 @@ function onIpc(event, payload)
     elseif event == "capture-id" or event == "capture-id-pair" then
         local id, requestedOutput = tostring(payload or ""):match("^%s*(%d+)%s*(%S*)%s*$")
         local selectedOutput = if requestedOutput ~= nil and requestedOutput ~= "" then requestedOutput else output
-        if providers.w_engine.effective_backend == "internal" then
-            selectedOutput = wallInOne.targetOutput(selectedOutput)
+        selectedOutput = wallInOne.targetOutput(selectedOutput)
+        if selectedOutput ~= nil and wallInOne.internalBackendReady("w_engine", selectedOutput) == true then
             local owned = selectedOutput ~= nil
                     and type(rendererStatus.outputs) == "table"
                     and rendererStatus.outputs[selectedOutput]
@@ -8968,8 +8515,7 @@ function onIpc(event, payload)
                     return selectedOutput ~= nil
                         and backendGeneration.w_engine == backendToken
                         and tonumber(applyGeneration[selectedOutput]) == applyToken
-                        and providers.w_engine.effective_backend == "internal"
-                        and providers.w_engine.apply_available == true
+                        and wallInOne.internalBackendReady("w_engine", selectedOutput) == true
                         and wallInOne.knownOutputName(selectedOutput) ~= nil
                 end
                 if type(owned) == "table" and not sameActive then
@@ -9004,22 +8550,6 @@ function onIpc(event, payload)
                 notify = true,
             })
         end
-    elseif event == "w-engine-next" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "w_engine_next")
-    elseif event == "w-engine-cycle-stop" or event == "w-engine-pause" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "w_engine_cycle_stop")
-    elseif event == "w-engine-stop" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "w_engine_stop")
-    elseif event == "mpvpaper-pause" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_pause")
-    elseif event == "mpvpaper-resume" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_resume")
-    elseif event == "mpvpaper-toggle" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_toggle")
-    elseif event == "mpvpaper-clear" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_clear")
-    elseif event == "mpvpaper-clear-all" then
-        wallInOne.dispatchAction({ producer = "ipc", output = output }, "mpvpaper_clear_all")
     elseif
         event == "playback-pause"
         or event == "playback-resume"
@@ -9057,11 +8587,7 @@ function onIpc(event, payload)
     elseif event == "open-provider" then
         local aliases = {
             native = "native_open",
-            wallhaven = "wallhaven_open",
             motionbgs = "motionbgs_open",
-            w_engine = "w_engine_open",
-            mpvpaper = "mpvpaper_open",
-            extra = "extra_provider_open",
             hub = "hub_open",
         }
         wallInOne.dispatchAction({ producer = "ipc", output = output }, aliases[tostring(payload or "")] or "")
@@ -9393,19 +8919,9 @@ noctalia.state.watch(WALLHAVEN_RESULTS_KEY, function(nextResults)
     wallhavenResults = if type(nextResults) == "table" then nextResults else { items = {}, selected = {} }
 end)
 wallInOne.handleCommand(noctalia.state.get(COMMAND_KEY))
-wallInOne.probeProviders()
+wallInOne.refreshAvailability()
 
 function onExit(_signal, _reason)
-    for _, request in pairs(pendingAdapterCaptures) do
-        if
-            type(request) == "table"
-            and type(request.staging_path) == "string"
-            and request.staging_path ~= ""
-            and noctalia.fileExists(request.staging_path)
-        then
-            noctalia.removeFile(request.staging_path)
-        end
-    end
     for _, request in pairs(pendingInternalCaptures) do
         if
             type(request) == "table"

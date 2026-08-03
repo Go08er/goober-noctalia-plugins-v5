@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract gate for Wall-in-One 0.5.
+"""Offline contract gate for Wall-in-One 0.6.
 
 The test deliberately avoids a compositor and the network.  It pins the
 manifest/state protocols statically, runs each shell helper's local checks,
@@ -51,7 +51,7 @@ def test_manifest_and_translations() -> None:
     manifest = tomllib.loads(manifest_source)
     assert manifest["id"] == "goober/wall-in-one"
     assert manifest["name"] == "Wall-in-One"
-    assert manifest["version"] == "0.5.0"
+    assert manifest["version"] == "0.6.0"
     assert manifest["plugin_api"] == 17
     # Dependencies are catalog metadata, not an enable-time gate. Providers
     # still fail soft if an installation is incomplete, while curl is honestly
@@ -74,13 +74,7 @@ def test_manifest_and_translations() -> None:
     settings = {entry["key"]: entry for entry in manifest["setting"]}
     required = {
         "use_wallhaven",
-        "use_w_engine",
-        "use_mpvpaper",
         "use_motionbgs",
-        "use_extra_provider",
-        "w_engine_backend",
-        "mpvpaper_backend",
-        "internal_renderer_layer",
         "capture_directory",
         "video_directory",
         "auto_capture",
@@ -90,9 +84,28 @@ def test_manifest_and_translations() -> None:
         "wallhaven_api_key",
         "video_source",
         "manual_pair_file",
+        "video_frame_second",
         "workshop_id",
         "workshop_directory",
         "scene_screenshot_delay",
+        "cycle_interval_minutes",
+        "cycle_order",
+        "cycle_start_on_load",
+        "motionbgs_quality",
+        "motionbgs_result_limit",
+        "motionbgs_cache_minutes",
+        "motionbgs_max_download_mb",
+    }
+    assert required == settings.keys(), sorted(required ^ settings.keys())
+    assert "pair_static" not in settings, "pairing is an entry policy, not a global switch"
+    retired_renderer_settings = {
+        "use_w_engine",
+        "use_mpvpaper",
+        "use_extra_provider",
+        "w_engine_backend",
+        "mpvpaper_backend",
+        "internal_renderer_layer",
+        "extra_provider_panel",
         "w_engine_scaling",
         "w_engine_clamp",
         "w_engine_fps",
@@ -110,29 +123,12 @@ def test_manifest_and_translations() -> None:
         "mpv_auto_pause",
         "mpv_auto_pause_mode",
         "mpv_options",
-        "cycle_interval_minutes",
-        "cycle_order",
-        "cycle_start_on_load",
-        "motionbgs_download_directory",
-        "motionbgs_quality",
-        "motionbgs_result_limit",
-        "motionbgs_cache_minutes",
-        "motionbgs_max_download_mb",
     }
-    assert required <= settings.keys(), sorted(required - settings.keys())
-    assert "pair_static" not in settings, "pairing is an entry policy, not a global switch"
-    for key in ("w_engine_backend", "mpvpaper_backend"):
-        assert settings[key]["default"] == "auto"
-        assert [item["value"] for item in settings[key]["options"]] == [
-            "auto",
-            "external",
-            "internal",
-        ]
-    assert settings["internal_renderer_layer"]["default"] == "bottom"
-    assert [item["value"] for item in settings["internal_renderer_layer"]["options"]] == [
-        "bottom",
-        "background",
-    ]
+    assert retired_renderer_settings.isdisjoint(settings)
+    for setting in settings.values():
+        condition = setting.get("visible_when")
+        if condition is not None:
+            assert condition["key"] in settings, f"dangling visible_when for {setting['key']}"
     assert (
         settings["scene_screenshot_delay"]["default"],
         settings["scene_screenshot_delay"]["min"],
@@ -170,10 +166,10 @@ def test_schema_document_fixtures() -> None:
     """Pin the public persisted document shapes with readable JSON fixtures."""
 
     config = {
-        "schema_version": 4,
+        "schema_version": 5,
         "gestures": {
             "left": "hub_open",
-            "middle": "wallhaven_open",
+            "middle": "hub_open",
             "right": "native_next",
         },
         "pairings": {
@@ -234,6 +230,34 @@ def test_schema_document_fixtures() -> None:
                 "quick_choice_playlist": "",
                 "order": "rotate",
                 "interval_seconds": 1800,
+                "engines": {
+                    "layer": "background",
+                    "video": {
+                        "enabled": True,
+                        "mute": False,
+                        "hardware_decode": True,
+                        "auto_pause": True,
+                        "auto_pause_mode": "ACTIVE",
+                        "options": "--profile=fast",
+                    },
+                    "workshop": {
+                        "enabled": True,
+                        "fps": 60,
+                        "volume": 25,
+                        "silent": False,
+                        "scaling": "fill",
+                        "clamp": "border",
+                        "flags": {
+                            "noautomute": True,
+                            "no_audio_processing": False,
+                            "disable_particles": False,
+                            "disable_mouse": True,
+                            "disable_parallax": False,
+                            "no_fullscreen_pause": False,
+                            "fullscreen_pause_only_active": True,
+                        },
+                    },
+                },
                 "schedules": [
                     {
                         "id": "schedule-evening-upper-1",
@@ -338,6 +362,8 @@ def test_schema_document_fixtures() -> None:
     assert set(run["history"] + run["bag"]) <= set(entry_ids)
     output = config_round_trip["outputs"]["HEADLESS-1"]
     assert output["order"] == "rotate" and output["interval_seconds"] == 1800
+    assert output["engines"]["video"]["auto_pause_mode"] == "ACTIVE"
+    assert output["engines"]["workshop"]["flags"]["disable_mouse"] is True
     upper_schedule, lower_schedule = output["schedules"]
     assert upper_schedule["start_minute"] > upper_schedule["end_minute"], (
         "fixture must exercise overnight scheduling"
@@ -386,7 +412,7 @@ def test_coordinator_contract() -> None:
     require_all(
         service,
         (
-            "local CONFIG_SCHEMA = 4",
+            "local CONFIG_SCHEMA = 5",
             "local RUNTIME_SCHEMA = 6",
             "local MAX_PLAYLISTS = 128",
             "local MAX_PLAYLIST_ENTRIES = 512",
@@ -408,7 +434,8 @@ def test_coordinator_contract() -> None:
         "coordinator schema and protocol constants",
     )
 
-    assert service.count('command_available = noctalia.commandExists("mpvpaper")') == 3
+    assert service.count('noctalia.commandExists("mpvpaper")') == 3
+    assert service.count('noctalia.commandExists("linux-wallpaperengine")') == 3
     assert 'noctalia.commandExists("mpv")' not in service
     backend_policy = service[
         service.index("function wallInOne.refreshBackendPolicy") : service.index(
@@ -418,12 +445,74 @@ def test_coordinator_contract() -> None:
     require_all(
         backend_policy,
         (
+            'providers.w_engine.command_available = noctalia.commandExists("linux-wallpaperengine")',
+            'providers.mpvpaper.command_available = noctalia.commandExists("mpvpaper")',
+            'wallInOne.anyOutputEngineEnabled("w_engine")',
+            'wallInOne.anyOutputEngineEnabled("mpvpaper")',
+            "rendererReady",
             "providers.mpvpaper.command_available",
-            'wallInOne.configuredBackend("mpvpaper_backend")',
         ),
-        "mpvpaper executable capability policy",
+        "direct renderer executable capability policy",
     )
-    assert 'noctalia.commandExists("mpvpaper")' not in backend_policy
+
+    direct_gate = service[
+        service.index("function wallInOne.internalBackendReady") : service.index(
+            "function wallInOne.cachedPair"
+        )
+    ]
+    require_all(
+        direct_gate,
+        (
+            "local engines = wallInOne.outputEngineSettings(output)",
+            'provider == "w_engine"',
+            'provider == "mpvpaper"',
+            "settings.enabled ~= true",
+            "rendererStatus.ready ~= true",
+            'not noctalia.commandExists("linux-wallpaperengine")',
+            'not noctalia.commandExists("mpvpaper")',
+        ),
+        "per-output direct renderer gate",
+    )
+    for forbidden in (
+        "noctalia msg plugins list",
+        "noctalia msg plugin ",
+        "tadomika_ari/w-engine",
+        "noctalia/mpvpaper",
+        "provider-capabilities-v1",
+        "provider-current-v1",
+        "capture-result-v1",
+        "pendingAdapterCaptures",
+        "adapterCaptureQueued",
+        "requestRenderedCapture",
+        "refreshExtraProvider",
+        "normalizedExtraPanel",
+    ):
+        assert forbidden not in service, f"retired cross-plugin runtime surface remains: {forbidden}"
+
+    legacy_gestures = service[
+        service.index("local LEGACY_GESTURE_ACTIONS = {") : service.index(
+            "-- Parameterized IPC actions"
+        )
+    ]
+    legacy_mappings = {
+        "wallhaven_open": "hub_open",
+        "w_engine_open": "hub_open",
+        "w_engine_next": "cycle_next",
+        "w_engine_cycle_stop": "cycle_stop",
+        "w_engine_stop": "playback_stop",
+        "mpvpaper_open": "hub_open",
+        "mpvpaper_pause": "playback_pause",
+        "mpvpaper_resume": "playback_resume",
+        "mpvpaper_toggle": "playback_toggle",
+        "mpvpaper_clear": "playback_stop",
+        "mpvpaper_clear_all": "playback_stop_all",
+        "extra_provider_open": "no_action",
+    }
+    for old, replacement in legacy_mappings.items():
+        assert f'{old} = "{replacement}"' in legacy_gestures
+        assert len(re.findall(rf"(?m)^\s*{re.escape(old)}\s*=", service)) == 1, (
+            f"legacy action {old} escaped its migration table"
+        )
 
     gesture_policy = service[
         service.index("local VALID_ACTIONS = {") : service.index("local WORKSHOP_PATHS = {")
@@ -436,6 +525,7 @@ def test_coordinator_contract() -> None:
             "audio_set_volume = true",
             "local VALID_GESTURE_ACTIONS = {}",
             'if action ~= "audio_set_volume" then',
+            "local LEGACY_GESTURE_ACTIONS = {",
         ),
         "gesture and parameterized IPC action separation",
     )
@@ -446,10 +536,66 @@ def test_coordinator_contract() -> None:
             'return id:match("^%d+$") ~= nil and #id <= MAX_WORKSHOP_ID_BYTES',
             "if not VALID_GESTURE_ACTIONS[gestures[button]] then",
             "if not VALID_GESTURE_ACTIONS[action] then",
+            "gestures[button] = LEGACY_GESTURE_ACTIONS[gestures[button]] or gestures[button]",
         ),
         "central input validation",
     )
     assert service.count('match("^%d+$")') == 1, "Workshop ID validation must stay centralized"
+
+    engine_model = service[
+        service.index("function wallInOne.defaultOutputEngines") : service.index(
+            "function wallInOne.configuredPlaylistOrder"
+        )
+    ]
+    require_all(
+        engine_model,
+        (
+            "function wallInOne.defaultOutputEngines()",
+            'layer = "bottom"',
+            "enabled = true",
+            "mute = true",
+            "hardware_decode = true",
+            "auto_pause = true",
+            'auto_pause_mode = "FULL"',
+            'options = ""',
+            "fps = 30",
+            "volume = 0",
+            "silent = true",
+            'scaling = "fill"',
+            'clamp = "border"',
+            "function wallInOne.normalizedOutputEngines(candidate, fallback)",
+            "candidate ~= nil and type(candidate) ~= \"table\"",
+            "not VALID_INTERNAL_LAYERS[layer]",
+            "not VALID_MPV_AUTO_PAUSE_MODES[autoPauseMode]",
+            "#options > 1024",
+            'options:find("[%c]") ~= nil',
+            "not VALID_W_ENGINE_SCALING[scaling]",
+            "not VALID_W_ENGINE_CLAMP[clamp]",
+            "fps < 5",
+            "fps > 144",
+            "volume < 0",
+            "volume > 100",
+            "flags.no_fullscreen_pause and flags.fullscreen_pause_only_active",
+            "function wallInOne.outputEngineSettings(output)",
+        ),
+        "validated per-output engine model",
+    )
+    for legacy_setting in (
+        "use_mpvpaper",
+        "use_w_engine",
+        "internal_renderer_layer",
+        "mpv_mute",
+        "mpv_hardware_decode",
+        "mpv_auto_pause",
+        "mpv_auto_pause_mode",
+        "mpv_options",
+        "w_engine_fps",
+        "w_engine_volume",
+        "w_engine_silent",
+        "w_engine_scaling",
+        "w_engine_clamp",
+    ):
+        assert f'"{legacy_setting}"' not in service, f"retired global engine setting remains: {legacy_setting}"
 
     workshop_options = service[
         service.index("function wallInOne.buildWorkshopRendererCommand") : service.index(
@@ -459,21 +605,18 @@ def test_coordinator_contract() -> None:
     require_all(
         workshop_options,
         (
-            'command.layer = wallInOne.configuredInternalLayer()',
-            'command.fps = wallInOne.settingInt("w_engine_fps", 30, 5, 144)',
-            'command.volume = wallInOne.settingInt("w_engine_volume", 0, 0, 100)',
-            'command.scaling = wallInOne.settingString("w_engine_scaling", "fill")',
-            'command.clamp = wallInOne.settingString("w_engine_clamp", "border")',
-            'command.silent = wallInOne.settingBool("w_engine_silent", true)',
-            'command.noautomute = wallInOne.settingBool("w_engine_noautomute", false)',
-            'command.no_audio_processing = wallInOne.settingBool("w_engine_no_audio_processing", false)',
-            'command.disable_particles = wallInOne.settingBool("w_engine_disable_particles", false)',
-            'command.disable_mouse = wallInOne.settingBool("w_engine_disable_mouse", false)',
-            'command.disable_parallax = wallInOne.settingBool("w_engine_disable_parallax", false)',
-            'command.no_fullscreen_pause = wallInOne.settingBool("w_engine_no_fullscreen_pause", false)',
-            'command.fullscreen_pause_only_active = wallInOne.settingBool(',
+            "local engines = wallInOne.outputEngineSettings(command.output)",
+            "local workshop = engines.workshop",
+            "command.layer = engines.layer",
+            "command.fps = workshop.fps",
+            "command.volume = workshop.volume",
+            "command.scaling = workshop.scaling",
+            "command.clamp = workshop.clamp",
+            "command.silent = workshop.silent",
+            "for _, name in ipairs(WORKSHOP_FLAG_NAMES) do",
+            "command[name] = workshop.flags[name]",
         ),
-        "shared Wallpaper Engine renderer-option builder",
+        "per-output Wallpaper Engine renderer-option builder",
     )
     assert service.count("wallInOne.buildWorkshopRendererCommand({") == 2
 
@@ -529,7 +672,7 @@ def test_coordinator_contract() -> None:
             "totalEntries > MAX_TOTAL_PLAYLIST_ENTRIES",
             "function wallInOne.normalizedMonths(candidate)",
             "function wallInOne.normalizedSchedule(candidate, playlists, allowMissingMonths)",
-            "function wallInOne.normalizedOutputs(candidate, playlists, allowMissingScheduleMonths)",
+            "function wallInOne.normalizedOutputs(candidate, playlists, allowMissingScheduleMonths, defaultEngines)",
             "rawMonths = wallInOne.allMonths()",
             "months = months",
             "if rawOutput.order ~= nil then",
@@ -539,15 +682,20 @@ def test_coordinator_contract() -> None:
             "fallback_playlist = fallback",
             "quick_choice_playlist = quickChoice",
             "schedules = schedules",
+            "engines = wallInOne.normalizedOutputEngines(rawOutput.engines, defaultEngines)",
+            "if normalizedOutput.engines == nil then",
             "function wallInOne.migrateLegacyReels(candidate)",
             'wallInOne.stableIdentifier("migrated", output, outputCount)',
             "wallInOne.legacyEntryBundle(rawEntry, output, index, usedEntryIds)",
-            "if schema ~= 1 and schema ~= 2 and schema ~= 3 and schema ~= CONFIG_SCHEMA then",
+            "if schema ~= 1 and schema ~= 2 and schema ~= 3 and schema ~= 4 and schema ~= CONFIG_SCHEMA then",
+            "local migratedEngines = if schema < CONFIG_SCHEMA then wallInOne.defaultOutputEngines() else nil",
             "pairings = wallInOne.normalizedPairings(candidate.pairings or {})",
             "migratedPairings = candidate.pairings == nil",
+            "elseif schema == 4 then",
+            "wallInOne.normalizedOutputs(candidate.outputs, playlists, false, migratedEngines)",
             "elseif schema == 3 then",
             "pairings = {}",
-            "wallInOne.normalizedOutputs(candidate.outputs, playlists, true)",
+            "wallInOne.normalizedOutputs(candidate.outputs, playlists, true, migratedEngines)",
             "elseif schema == 2 then",
             "playlists, outputs = wallInOne.migrateLegacyReels(candidate.reels)",
             "schema_version = CONFIG_SCHEMA",
@@ -557,10 +705,35 @@ def test_coordinator_contract() -> None:
             "outputs = outputs",
             "if schema == CONFIG_SCHEMA and not migratedPairings then nil else { source_schema = schema }",
         ),
-        "schema-4 calendar/output model and schema-2/3 migration",
+        "schema-5 per-output engine model and schema-2-through-4 migration",
     )
     assert "candidate.priority" not in config_model
     assert "schedule.priority" not in config_model
+    for retired_setting in (
+        "internal_renderer_layer",
+        "use_mpvpaper",
+        "mpv_mute",
+        "mpv_hardware_decode",
+        "mpv_auto_pause",
+        "mpv_auto_pause_mode",
+        "mpv_options",
+        "use_w_engine",
+        "w_engine_fps",
+        "w_engine_volume",
+        "w_engine_silent",
+        "w_engine_noautomute",
+        "w_engine_no_audio_processing",
+        "w_engine_disable_particles",
+        "w_engine_disable_mouse",
+        "w_engine_disable_parallax",
+        "w_engine_no_fullscreen_pause",
+        "w_engine_fullscreen_pause_only_active",
+        "w_engine_scaling",
+        "w_engine_clamp",
+    ):
+        assert f'getConfig("{retired_setting}")' not in service, (
+            f"schema-5 migration reads removed manifest setting {retired_setting!r}"
+        )
     require_all(
         service,
         (
@@ -706,12 +879,14 @@ def test_coordinator_contract() -> None:
         settings_snapshot,
         (
             'if type(settingsSnapshotCache) == "table" then',
-            "local extraPanel = wallInOne.normalizedExtraPanel()",
+            'use_wallhaven = wallInOne.settingBool("use_wallhaven", true)',
+            'use_motionbgs = wallInOne.settingBool("use_motionbgs", true)',
             "settingsSnapshotCache = snapshot",
-            "extra_provider_panel = extraPanel",
         ),
         "cached bounded settings snapshot",
     )
+    for retired in ("extra_provider", "w_engine_backend", "mpvpaper_backend", "internal_renderer_layer", "mpv_mute"):
+        assert retired not in settings_snapshot
     for heavy in (
         "playlists =",
         "outputs =",
@@ -731,15 +906,14 @@ def test_coordinator_contract() -> None:
     assert 'wallInOne.markStateDomain("config")' not in config_changed
     assert "wallInOne.publishStatus()" not in config_changed
     assert "settingsSnapshotCache = nil" in config_changed
-    assert config_changed.index("wallInOne.probeProviders()") < config_changed.index("settingsSnapshotCache = nil")
+    assert config_changed.index("wallInOne.refreshAvailability()") < config_changed.index("settingsSnapshotCache = nil")
     require_all(
         config_changed,
         (
             "wallInOne.applyIntegrationPolicy()",
-            "wallInOne.refreshExtraProvider(nil)",
             "wallInOne.currentLibraryRootsSignature()",
             "libraryRefreshPending = true",
-            "wallInOne.probeProviders()",
+            "wallInOne.refreshAvailability()",
             "settingsStatusPublishPending = true",
         ),
         "bounded settings-change reconciliation",
@@ -802,7 +976,7 @@ def test_coordinator_contract() -> None:
     assert "semanticSignature" not in service, "state publication must not recursively sign bounded domains in Luau"
     color_probe = service[
         service.index("function wallInOne.probeColorScheme") : service.index(
-            "function wallInOne.probeProviders"
+            "-- Local media and Steam Workshop discovery"
         )
     ]
     require_all(
@@ -814,23 +988,24 @@ def test_coordinator_contract() -> None:
         ),
         "mode/error-aware color observation publication",
     )
-    provider_probe = service[
-        service.index("function wallInOne.startPendingProviderProbe") : service.index(
-            "-- Local media and Steam Workshop discovery"
+    availability = service[
+        service.index("function wallInOne.refreshAvailability") : service.index(
+            "function wallInOne.probeColorScheme"
         )
     ]
     require_all(
-        provider_probe,
+        availability,
         (
-            "function wallInOne.startPendingProviderProbe()",
-            "providerProbePending = false",
-            "wallInOne.probeProviders()",
-            "if providerProbeInFlight then",
-            "providerProbePending = true",
+            "lastAvailabilityRefreshAt = wallInOne.nowSeconds()",
+            'providers.noctalia_cli = noctalia.commandExists("noctalia")',
+            'providers.w_engine.steam_available = noctalia.commandExists("steam")',
+            "wallInOne.applyIntegrationPolicy()",
+            "wallInOne.persistRuntimeIfChanged(false)",
+            "wallInOne.publishStatus()",
         ),
-        "bounded provider-probe follow-up latch",
+        "direct executable and bundled-service availability refresh",
     )
-    assert provider_probe.count("wallInOne.startPendingProviderProbe()") >= 3
+    assert "runAsync" not in availability
 
     scheduler = service[
         service.index("function wallInOne.playlistEntryIds") : service.index(
@@ -950,6 +1125,9 @@ def test_coordinator_contract() -> None:
             'kind == "playlist_options"',
             'kind == "output_options"',
             "request.inherit == true",
+            'kind == "output_engines"',
+            "engines = request.engines",
+            "wallInOne.saveOutputEngines(request.output, engines)",
             'kind == "pairing_save"',
             'kind == "pairing_delete"',
             'kind == "playlist_add_pairing"',
@@ -977,9 +1155,52 @@ def test_coordinator_contract() -> None:
     assert "config.reels" not in commands
     assert "runtime.cycles" not in commands
 
+    output_engine_save = service[
+        service.index("function wallInOne.saveOutputEngines") : service.index(
+            "function wallInOne.outputState"
+        )
+    ]
+    require_all(
+        output_engine_save,
+        (
+            "wallInOne.knownOutputName",
+            "local current = wallInOne.outputEngineSettings(output)",
+            "local engines = wallInOne.normalizedOutputEngines(candidate, current)",
+            'fallback_playlist = ""',
+            'quick_choice_playlist = ""',
+            "schedules = {}",
+            "outputConfig.engines = engines",
+            'wallInOne.saveConfig(nextConfig, "output-engines")',
+            "wallInOne.refreshBackendPolicy()",
+            "wallInOne.reconcileRendererOwnership()",
+        ),
+        "validated output_engines save path",
+    )
+
+    video_command = service[
+        service.index("function wallInOne.startInternalVideo") : service.index(
+            "function wallInOne.buildWorkshopRendererCommand"
+        )
+    ]
+    require_all(
+        video_command,
+        (
+            'wallInOne.internalBackendReady("mpvpaper", output)',
+            "local engines = wallInOne.outputEngineSettings(output)",
+            "local video = engines.video",
+            "layer = engines.layer",
+            "mute = video.mute",
+            "hardware_decode = video.hardware_decode",
+            "auto_pause = video.auto_pause",
+            "auto_pause_mode = video.auto_pause_mode",
+            "options = video.options",
+        ),
+        "per-output mpvpaper command resolution",
+    )
+
     palette_transport = service[
         service.index("function wallInOne.nextPalettesNonce") : service.index(
-            "function wallInOne.runWEngineControl"
+            "function wallInOne.actionPanelTarget"
         )
     ]
     require_all(
@@ -1019,7 +1240,7 @@ def test_coordinator_contract() -> None:
             "local LIBRARY_SCAN_BATCH = 4",
             "function wallInOne.stepLibraryScan()",
             "local captureQueued = {}",
-            "local adapterCaptureQueued = {}",
+            "local internalCaptureQueued = {}",
             "local activeCaptureRequests = {}",
         ),
         "coordinator observation and bounded work",
@@ -1035,18 +1256,22 @@ def test_coordinator_contract() -> None:
             "function wallInOne.stepLibraryScan()"
         )
     ]
-    managed_sources = (
-        '"managed-wallhaven"',
-        '"managed-auto"',
-        '"managed-motionbgs"',
-    )
-    for managed_source in managed_sources:
+    for managed_source in ('"managed-wallhaven"', '"managed-auto"'):
         assert library_refresh.index(managed_source) < library_refresh.index(
             "wallInOne.appendLibraryDirectory(mediaEntries, imageRoot"
         )
-        assert library_refresh.index(managed_source) < library_refresh.index(
-            "wallInOne.appendLibraryDirectory(mediaEntries, videoRoot"
+    assert library_refresh.index('"managed-motionbgs"') < library_refresh.index(
+        "wallInOne.appendLibraryDirectory(mediaEntries, videoRoot"
+    )
+    workshop_discovery = library_refresh[
+        library_refresh.index("local workshopCandidates = {}") : library_refresh.index(
+            "table.sort(workshopCandidates"
         )
+    ]
+    assert workshop_discovery.index("if imageRootReady then") < workshop_discovery.index(
+        "wallInOne.candidateWorkshopRoots()"
+    )
+    assert "wallInOne.candidateWorkshopRoots()" not in library_refresh[: library_refresh.index("local workshopCandidates")]
     library_scan = service[
         service.index("function wallInOne.stepLibraryScan()") : service.index(
             "function wallInOne.captureHelper()"
@@ -1061,24 +1286,6 @@ def test_coordinator_contract() -> None:
         ),
         "sidecar-proven shared-root ownership",
     )
-    adapter_protocol = service[
-        service.index("function wallInOne.tabFields") : service.index(
-            "function wallInOne.handleCommand"
-        )
-    ]
-    require_all(
-        adapter_protocol,
-        (
-            "#text > MAX_ADAPTER_PAYLOAD_BYTES",
-            'local withoutTabs = text:gsub("\\t", "")',
-            'withoutTabs:find("[%c]")',
-            "#fields >= ADAPTER_FIELD_COUNT",
-            "#fields == ADAPTER_FIELD_COUNT",
-            "wallInOne.validWorkshopId(id)",
-        ),
-        "strict bounded W Engine adapter replies",
-    )
-    assert adapter_protocol.count("wallInOne.persistRuntimeIfChanged(false)") == 2
     download_fingerprint = service[
         service.index("function wallInOne.completedDownloadFingerprint") : service.index(
             "function wallInOne.shellQuote"
@@ -1544,38 +1751,6 @@ def test_capture_scene_freshness_contract() -> None:
     """A completed capture must never pair a scene that changed mid-flight."""
 
     service = text("service.luau")
-    rendered = service[
-        service.index("wallInOne.requestRenderedCapture = function") : service.index(
-            "function wallInOne.captureCurrent"
-        )
-    ]
-    require_all(
-        rendered,
-        (
-            "local function currentSceneMatches()",
-            "return providers.w_engine.allowed == true",
-            'and tostring(providers.w_engine.current[output] or "") == id',
-            "and wallInOne.knownOutputName(output) ~= nil",
-            "if not providers.w_engine.adapter_capture or not noctalia.commandExists(\"ffmpeg\") then",
-            "wallInOne.captureWorkshopFallback({",
-            "should_apply = currentSceneMatches",
-            "should_apply = function()",
-            "return providers.w_engine.adapter_capture == true and currentSceneMatches()",
-        ),
-        "rendered-capture scene freshness",
-    )
-    fallback = rendered[
-        rendered.index("if not providers.w_engine.adapter_capture") : rendered.index("local key = output")
-    ]
-    assert fallback.count("wallInOne.captureWorkshopFallback({") == 1
-    assert fallback.index("wallInOne.captureWorkshopFallback({") < fallback.index(
-        "should_apply = currentSceneMatches"
-    )
-    adapter_request = rendered[rendered.index("local request = {") :]
-    assert adapter_request.index("should_apply = function()") < adapter_request.index(
-        "pendingAdapterCaptures[key] = request"
-    )
-
     capture_current = service[
         service.index("function wallInOne.captureCurrent") : service.index(
             "function wallInOne.captureVideoPath"
@@ -1584,31 +1759,60 @@ def test_capture_scene_freshness_contract() -> None:
     require_all(
         capture_current,
         (
+            'local owned = output ~= nil and type(rendererStatus.outputs) == "table"',
             'local internalId = type(owned) == "table" and tostring(owned.workshop_id or "") or ""',
-            'local externalId = output ~= nil and tostring(providers.w_engine.current[output] or "") or ""',
+            "local id = if wallInOne.validWorkshopId(internalId) then internalId else nil",
+            "id = wallInOne.configuredWorkshopId()",
             "local observedInternal = wallInOne.validWorkshopId(internalId) and internalId == tostring(id)",
-            'local observedExternal = not observedInternal and externalId ~= "" and externalId == tostring(id)',
             "local function captureStillCurrent()",
             "or tonumber(applyGeneration[output]) ~= applyToken",
-            "or providers.w_engine.allowed ~= true",
             "or wallInOne.knownOutputName(output) == nil",
             "if observedInternal then",
             'and currentOwned.backend == "w-engine"',
             'and tostring(currentOwned.workshop_id or "") == tostring(id)',
-            "if observedExternal then",
-            'return tostring(providers.w_engine.current[output] or "") == tostring(id)',
+            'local ready = output ~= nil and wallInOne.internalBackendReady("w_engine", output) == true',
+            "local backendToken = backendGeneration.w_engine",
+            "return backendGeneration.w_engine == backendToken",
+            'and wallInOne.internalBackendReady("w_engine", output) == true',
             "should_apply = captureStillCurrent",
             "and captureStillCurrent()",
         ),
-        "observed internal/external capture freshness",
+        "owned direct-renderer capture freshness",
     )
-    # The direct internal-capture branch and both fallback branches must carry
-    # freshness predicates. The adapter branch delegates to the independently
-    # guarded requestRenderedCapture function above.
+    # The direct internal-capture branch and both source-fallback branches carry
+    # the same per-output intent predicate.
     assert capture_current.count("should_apply = captureStillCurrent") == 2
     assert capture_current.count("and captureStillCurrent()") == 1
     assert capture_current.count("wallInOne.captureWorkshopFallback({") == 2
-    assert capture_current.count("wallInOne.requestRenderedCapture(") == 1
+    assert capture_current.count("wallInOne.requestInternalCapture({") == 1
+
+    internal_capture = service[
+        service.index("wallInOne.requestInternalCapture = function") : service.index(
+            "function wallInOne.applyVideoWithPair"
+        )
+    ]
+    require_all(
+        internal_capture,
+        (
+            'local ready, reason = wallInOne.internalBackendReady("w_engine", output)',
+            "local function parentStillCurrent()",
+            "local function stillCurrent()",
+            "should_apply = stillCurrent",
+            'spec = { method = "linux-wallpaperengine-fbo-v1" }',
+            "staging_path = stagingPath",
+            "deadline = wallInOne.nowSeconds() + 60",
+            "wallInOne.sendRendererCommand(wallInOne.buildWorkshopRendererCommand({",
+            'action = "capture_w_engine"',
+            'screenshot_delay = math.min(5, wallInOne.settingInt("scene_screenshot_delay", 15, 1, 120))',
+            "ack_timeout_seconds = 45",
+            "request.spec = {",
+            'mode = "copy"',
+            "wallInOne.runCapture(request)",
+        ),
+        "owned renderer capture and fallback protocol",
+    )
+    assert "requestRenderedCapture" not in internal_capture
+    assert "adapter" not in internal_capture.lower()
 
 
 def test_managed_library_ownership_contract() -> None:
@@ -1635,6 +1839,54 @@ def test_managed_library_ownership_contract() -> None:
         "managed library partitions",
     )
     assert 'local MANAGED_DOWNLOAD_SUFFIX = "/Wall-in-One/MotionBGS"' in motionbgs
+
+    root_resolution = service[
+        service.index("function wallInOne.captureDirectory") : service.index(
+            "function wallInOne.managedChildDirectory"
+        )
+    ]
+    require_all(
+        root_resolution,
+        (
+            'wallInOne.settingString("capture_directory", "")',
+            'wallInOne.settingString("video_directory", "")',
+            'if configured == "" then',
+            'wallInOne.normalizedDirectory(noctalia.expandPath(configured)) or ""',
+            "function wallInOne.existingDirectory",
+            "local info = noctalia.fileInfo(directory)",
+            'type(info) == "table" and info.isDir == true',
+        ),
+        "explicit independent media roots",
+    )
+    assert "noctalia.wallpaperDirectory()" not in root_resolution
+    assert "noctalia.pluginDataDir()" not in root_resolution
+    video_resolution = root_resolution[root_resolution.index("function wallInOne.videoDirectory") :]
+    assert "wallInOne.captureDirectory()" not in video_resolution
+
+    managed_initialization = service[
+        service.index("function wallInOne.ensureImageManagedDirectories") : service.index(
+            "function wallInOne.configuredVideoSource"
+        )
+    ]
+    assert managed_initialization.index("wallInOne.existingDirectory(imageRoot)") < managed_initialization.index(
+        "wallInOne.ensureManagedDirectory(entry.path, entry.kind)"
+    )
+
+    library_refresh = service[
+        service.index("wallInOne.refreshLibrary = function()") : service.index(
+            "function wallInOne.stepLibraryScan"
+        )
+    ]
+    require_all(
+        library_refresh,
+        (
+            "local imageRootReady = wallInOne.existingDirectory(imageRoot)",
+            "local videoRootReady = wallInOne.existingDirectory(videoRoot)",
+            "if imageRootReady then",
+            "if videoRootReady then",
+        ),
+        "library scan root gating",
+    )
 
     bounded_reader = service[
         service.index("function wallInOne.readBoundedRegularFile") : service.index(
@@ -1789,7 +2041,7 @@ def test_managed_library_ownership_contract() -> None:
 
     wallhaven_send = service[
         service.index("function wallInOne.sendWallhavenCommand") : service.index(
-            "function wallInOne.runWEngineControl"
+            "function wallInOne.actionPanelTarget"
         )
     ]
     require_all(
@@ -1872,6 +2124,13 @@ def test_palette_inventory_contract() -> None:
             "local function loadCommunityCache()",
             "local function atomicWriteCache(entries, fetchedAt, fetchedAtText)",
             "local function cacheIsFresh()",
+            "local function configuredImageRoot()",
+            'noctalia.getConfig("capture_directory")',
+            "local function clearInventoryState()",
+            "local function deactivateForMissingImageRoot(reason)",
+            "local function initializeForImageRoot(root)",
+            'lastEvent = "waiting-for-image-directory"',
+            'lastEvent = "image-directory-ready"',
             'local FETCH_PROTOCOL = "WIO-FETCH1"',
             "local function boundedFetchHelper()",
             "local function allocateCommunityTransport(operation)",
@@ -1906,8 +2165,8 @@ def test_palette_inventory_contract() -> None:
             "degraded = errorMessage ~= \"\"",
             "counts = {",
             "palettes = {",
-            "wallpaper = PINNED_WALLPAPER",
-            "builtin = PINNED_BUILTIN",
+            "wallpaper = if ready then PINNED_WALLPAPER else {}",
+            "builtin = if ready then PINNED_BUILTIN else {}",
             "community = communityPalettes",
             "custom = customPalettes",
             "if force ~= true and signature == lastPublishedSignature then",
@@ -1928,6 +2187,8 @@ def test_palette_inventory_contract() -> None:
             "noctalia.state.set(STATUS_KEY, {",
             'last_event = "stopped"',
             "ready = false",
+            "available = false",
+            'image_root = ""',
             "refreshing = false",
             "degraded = false",
             'source = "none"',
@@ -1940,6 +2201,29 @@ def test_palette_inventory_contract() -> None:
         "bounded palette-service terminal state",
     )
     assert "publishStatus" not in palette_exit, "palette teardown must not rebuild the full catalog snapshot"
+    palette_startup = palettes[palettes.index("local startupImageRoot") :]
+    require_all(
+        palette_startup,
+        (
+            "local startupImageRoot, startupImageRootError = configuredImageRoot()",
+            "if startupImageRoot ~= nil then",
+            "initializeForImageRoot(startupImageRoot)",
+            "deactivateForMissingImageRoot(startupImageRootError)",
+            'if ready and not consumedCurrentCommand then',
+        ),
+        "explicit image-root palette startup gate",
+    )
+    before_startup_gate = palette_startup[: palette_startup.index("if startupImageRoot ~= nil then")]
+    for forbidden in (
+        "sweepOwnedPreviewFiles()",
+        "loadCommunityCache()",
+        "refreshCustomPalettes()",
+        "refreshCommunity(",
+        "noctalia.pluginDataDir()",
+    ):
+        assert forbidden not in before_startup_gate, (
+            f"palette startup must not perform storage/network work before image-root authorization: {forbidden}"
+        )
     for forbidden in (
         "theme-mode-set",
         "color-scheme-set",
@@ -2051,10 +2335,9 @@ def test_wallhaven_contract() -> None:
         destination,
         (
             'local configured = settingString("capture_directory", "")',
-            "directory = noctalia.expandPath(configured)",
-            "directory = normalizedDirectory(noctalia.wallpaperDirectory())",
-            'directory = dataDirectory .. "/captures"',
-            "return normalizedDirectory(directory)",
+            'if configured == "" then',
+            "return nil",
+            "return normalizedDirectory(noctalia.expandPath(configured))",
             "local root = captureDirectory()",
             'root .. "/" .. MANAGED_PARENT_DIRECTORY .. "/" .. MANAGED_WALLHAVEN_DIRECTORY',
             "local markerPath = directory .. \"/\" .. MANAGED_MARKER_NAME",
@@ -2064,6 +2347,8 @@ def test_wallhaven_contract() -> None:
         ),
         "independently derived Wallhaven managed directory",
     )
+    assert "noctalia.wallpaperDirectory()" not in destination
+    assert "noctalia.pluginDataDir()" not in destination
 
     validated_download = wallhaven[
         wallhaven.index("local function validatedDownload") : wallhaven.index(
@@ -3810,6 +4095,10 @@ def test_motionbgs_contract() -> None:
             'local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"',
             "local MAX_RESULTS = 48",
             "local SEARCH_ANCHORS_PER_TICK = 1",
+            "local SEARCH_PARSE_INTERVAL_MS = 16",
+            "local IDLE_UPDATE_INTERVAL_MS = 250",
+            "local function setUpdateCadence(intervalMs)",
+            "noctalia.setUpdateInterval(intervalMs)",
             "local MAX_QUEUE = 8",
             "local MAX_CACHE_SEARCHES = 8",
             "local MAX_CACHE_DETAILS = 48",
@@ -3820,11 +4109,10 @@ def test_motionbgs_contract() -> None:
             'settingInt("motionbgs_result_limit", MAX_RESULTS, 1, MAX_RESULTS)',
             'settingInt("motionbgs_cache_minutes", 30, 5, 1440)',
             'settingInt("motionbgs_max_download_mb", 256, 16, 512)',
-            'settingString("motionbgs_download_directory", "")',
             'configuredDirectory("video_directory")',
             'videoRoot .. MANAGED_DOWNLOAD_SUFFIX',
+            "local function configuredVideoRootExists()",
             'local function prepareDownloadDirectory()',
-            'if not usesManagedDownloadDirectory() then',
             'if not providerAvailable() then',
             'local rootInfo = videoRoot ~= "" and noctalia.fileInfo(videoRoot) or nil',
             'local made, makeError = noctalia.mkdirAll(directory)',
@@ -3848,6 +4136,7 @@ def test_motionbgs_contract() -> None:
             "advanceSearchOperation(activeOperation)",
             "local function normalizedBrowseRequest(candidate)",
             "local function browseUrl(request)",
+            "local function canonicalSearchSlug(value)",
             "local function listingRouteMatches(request, value)",
             "local function parseListingMeta(html, request, itemCount)",
             'mode ~= "search" and mode ~= "latest" and mode ~= "genre" and mode ~= "4k" and mode ~= "hd"',
@@ -3880,6 +4169,8 @@ def test_motionbgs_contract() -> None:
             "local operationGeneration = 0",
             "local function invalidateOperations(message, forceBarrier)",
             "operationGeneration += 1",
+            "setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)",
+            "setUpdateCadence(SEARCH_PARSE_INTERVAL_MS)",
             "operation.generation ~= operationGeneration",
             'return nil, "protocol", "MotionBGS helper returned a cross-origin or malformed effective URL"',
             "local function cleanupCancelledDownload(operation, result)",
@@ -3895,6 +4186,80 @@ def test_motionbgs_contract() -> None:
         "MotionBGS service",
     )
     assert service.count('local function hasClass(attributes, wanted)') == 1
+
+    def integer_constant(name: str) -> int:
+        match = re.search(rf"^local {re.escape(name)} = ([0-9]+)$", service, re.MULTILINE)
+        assert match is not None, f"MotionBGS service is missing integer constant {name}"
+        return int(match.group(1))
+
+    anchors_per_tick = integer_constant("SEARCH_ANCHORS_PER_TICK")
+    parse_interval_ms = integer_constant("SEARCH_PARSE_INTERVAL_MS")
+    idle_interval_ms = integer_constant("IDLE_UPDATE_INTERVAL_MS")
+    assert anchors_per_tick == 1, "MotionBGS parser must preserve one anchor per callback"
+    assert parse_interval_ms == 16
+    assert idle_interval_ms == 250
+    # A current provider page has about 170 unrelated navigation/footer anchors
+    # in addition to its 36 wallpaper cards. Include the EOF and publication
+    # callbacks so a cadence regression cannot silently restore a ~52s parse.
+    realistic_anchor_count = 170 + 36
+    realistic_parse_callbacks = (realistic_anchor_count + anchors_per_tick - 1) // anchors_per_tick + 2
+    assert realistic_parse_callbacks * parse_interval_ms <= 3500
+
+    cadence_helper = service[
+        service.index("local function setUpdateCadence") : service.index("local previousStatus")
+    ]
+    require_all(
+        cadence_helper,
+        (
+            "currentUpdateIntervalMs == intervalMs",
+            "noctalia.setUpdateInterval(intervalMs)",
+            "currentUpdateIntervalMs = intervalMs",
+        ),
+        "MotionBGS update-cadence helper",
+    )
+    assert service.count("noctalia.setUpdateInterval(") == 1
+
+    invalidation = service[
+        service.index("local function invalidateOperations") : service.index("local function nonceValue")
+    ]
+    assert "setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)" in invalidation
+    finish_operation = service[
+        service.index("local function finishNetworkOperation") : service.index("local function beginSearchOperation")
+    ]
+    assert finish_operation.index("setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)") < finish_operation.index(
+        "activeOperation == operation"
+    )
+    begin_search = service[
+        service.index("local function beginSearchOperation") : service.index("local function advanceSearchOperation")
+    ]
+    assert begin_search.index("operation.search_parse = parser") < begin_search.index(
+        "setUpdateCadence(SEARCH_PARSE_INTERVAL_MS)"
+    )
+    launch_failure = service[
+        service.index("if not accepted then") : service.index("return true", service.index("if not accepted then"))
+    ]
+    assert "finishNetworkOperation(operation)" in launch_failure
+    exit_handler = service[service.index("function onExit") : service.index("initializeStorage()", service.index("function onExit"))]
+    assert "setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)" in exit_handler
+    assert service.count("setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)") >= 4
+
+    route_validation = service[
+        service.index("local function canonicalSearchSlug") : service.index("local function normalizeStillImageUrl")
+    ]
+    require_all(
+        route_validation,
+        (
+            'return validSlug(query:lower():gsub("%s+", "-"))',
+            'actual == "/search"',
+            "local canonicalSlug = canonicalSearchSlug(request.query)",
+            'actual == "/tag:" .. canonicalSlug',
+        ),
+        "exact MotionBGS canonical search redirect",
+    )
+    cache_validation = service[
+        service.index("local function validCachedSearch") : service.index("local function validCachedDetail")
+    ]
+    assert "not listingRouteMatches(request, record.source_url)" in cache_validation
 
     still_parser = service[
         service.index("local function normalizeStillImageUrl") : service.index(
@@ -3982,24 +4347,20 @@ def test_motionbgs_contract() -> None:
     require_all(
         configured_download,
         (
-            'if settingString("motionbgs_download_directory", "") ~= "" then',
-            'return configuredDirectory("motionbgs_download_directory")',
             'local videoRoot = configuredDirectory("video_directory")',
             'videoRoot .. MANAGED_DOWNLOAD_SUFFIX',
         ),
         "MotionBGS download-directory resolution",
     )
+    assert "motionbgs_download_directory" not in service
 
     prepare_download = service[
         service.index("local function prepareDownloadDirectory") : service.index("local function publishStatus")
     ]
-    assert prepare_download.index("if not usesManagedDownloadDirectory() then") < prepare_download.index(
+    assert prepare_download.index('noctalia.fileInfo(videoRoot)') < prepare_download.index(
         "if not providerAvailable() then"
     )
     assert prepare_download.index("if not providerAvailable() then") < prepare_download.index(
-        'noctalia.fileInfo(videoRoot)'
-    )
-    assert prepare_download.index('noctalia.fileInfo(videoRoot)') < prepare_download.index(
         "noctalia.mkdirAll(directory)"
     )
     assert prepare_download.index("noctalia.mkdirAll(directory)") < prepare_download.index(
@@ -4012,11 +4373,17 @@ def test_motionbgs_contract() -> None:
     require_all(
         initialize_storage,
         (
+            "not configuredVideoRootExists()",
+            'not settingBool("use_motionbgs", true)',
+            "or not status.curl_available",
+            "or not status.helper_available",
             'cacheDirectory = dataDirectory .. "/motionbgs"',
-            "if usesManagedDownloadDirectory() then",
             "prepareDownloadDirectory()",
         ),
         "separate MotionBGS metadata and managed-media storage",
+    )
+    assert initialize_storage.index("not configuredVideoRootExists()") < initialize_storage.index(
+        "noctalia.pluginDataDir()"
     )
 
     validated_download = service[
@@ -4217,8 +4584,8 @@ def test_ui_and_documentation_surface() -> None:
             '{ id = "audio_volume_up", label = "actions.audio_volume_up" }',
             'audio_volume_down = "set_volume"',
             'audio_volume_up = "set_volume"',
-            'actionButton("audio_volume_down", "volume-2", "ghost", true)',
-            'actionButton("audio_volume_up", "volume-3", "ghost", true)',
+            'panelUi.iconActionButton("audio_volume_down", "volume-2", output)',
+            'panelUi.iconActionButton("audio_volume_up", "volume-3", output)',
         ),
         "named playlist, schedule, palette, and Wallhaven panel UI",
     )
@@ -4284,9 +4651,10 @@ def test_ui_and_documentation_surface() -> None:
 
     readme = text("README.md").lower()
     for phrase in (
-        "0.5",
-        "internal",
-        "external",
+        "0.6",
+        "directly starts",
+        "does not hand playback",
+        "per-display",
         "mpvpaper",
         "wallpaper engine",
         "motionbgs",
@@ -4294,23 +4662,22 @@ def test_ui_and_documentation_surface() -> None:
         "playlist",
         "schedule",
         "palette",
-        "schema 4",
+        "schema 5",
         "schema 6",
         "quick choice",
         "automatic still",
         "screenshot",
         "background",
-        "a standalone `mpv` executable is not a separate",
-        "unix-socket `-u`",
-        "`--send-only`",
-        "pause/resume uses exact-pid signals",
-        "mute/volume is unavailable",
+        "one api-17 renderer service owns",
+        "exact foreground child pids",
+        "pause/resume/toggle",
+        "unsupported runtime audio",
         "provider-previews/v1",
         "64 entries",
         "64 mib",
         "2 mib",
-        "never follow redirects",
-        "only a local file through `ui.image`",
+        "same-origin redirects",
+        "only as local files",
     ):
         assert phrase in readme, f"README does not document {phrase!r}"
     for retired in (
@@ -4319,6 +4686,41 @@ def test_ui_and_documentation_surface() -> None:
         "thumbnail cache is intentionally left for a later refinement",
     ):
         assert retired not in readme, f"README still advertises the retired preview limitation: {retired!r}"
+
+
+def test_declarative_ui_layout_contract() -> None:
+    """Reject silent v5 layout mistakes that the Luau compiler cannot type-check."""
+
+    panel = text("panel.luau")
+    assert 'variant = "danger"' not in panel, "Noctalia v5 calls the destructive button variant 'destructive'"
+    assert panel.count('variant = if deleteArmed then "destructive" else "ghost"') == 2
+
+    box_calls = re.findall(r"ui\.box\(\{(.*?)\}\)", panel, flags=re.DOTALL)
+    assert len(box_calls) == panel.count("ui.box({"), "ui.box must not receive a child table"
+    for properties in box_calls:
+        assert "align =" not in properties and "justify =" not in properties, (
+            "ui.box is decorative in Noctalia v5; use a row or column for child layout"
+        )
+
+    require_all(
+        panel,
+        (
+            "local BROWSER_GRID_COLUMNS = 4",
+            "function panelUi.appendExplicitGrid(children, items, visible, columns, cardBuilder)",
+            'preview.node("wallhaven", item, 216, 122, "photo")',
+            'preview.node("motionbgs", item, 216, 122, "movie")',
+            "panelUi.appendExplicitGrid(children, items, visible, BROWSER_GRID_COLUMNS",
+            "local firstWeekdays = {}",
+            "local secondWeekdays = {}",
+            "local firstMonthRow = {}",
+            "local secondMonthRow = {}",
+            "local thirdMonthRow = {}",
+        ),
+        "bounded explicit browser grids and split schedule controls",
+    )
+    assert panel.count("panelUi.appendExplicitGrid(") == 4, (
+        "the grid helper must serve Wallhaven, MotionBGS, and all three local libraries"
+    )
 
 
 def main() -> None:
@@ -4341,7 +4743,8 @@ def main() -> None:
     test_renderer_supervisor()
     test_motionbgs_contract()
     test_ui_and_documentation_surface()
-    print("Wall-in-One v0.5 offline contract passed.")
+    test_declarative_ui_layout_contract()
+    print("Wall-in-One v0.6 offline contract passed.")
 
 
 if __name__ == "__main__":

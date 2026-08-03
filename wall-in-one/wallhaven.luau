@@ -293,6 +293,8 @@ local function urlEncode(value)
     return table.concat(encoded)
 end
 
+local captureRootExists
+
 local function refreshAvailability()
     local key, keyError = apiKey()
     status.ready = running
@@ -302,6 +304,7 @@ local function refreshAvailability()
     status.available = running
         and settingBool("use_wallhaven", true)
         and keyError == nil
+        and captureRootExists()
         and noctalia.commandExists("curl")
         and boundedFetchHelper() ~= nil
 end
@@ -332,19 +335,16 @@ end
 
 local function captureDirectory()
     local configured = settingString("capture_directory", "")
-    local directory = nil
-    if configured ~= "" then
-        directory = noctalia.expandPath(configured)
-    else
-        directory = normalizedDirectory(noctalia.wallpaperDirectory())
-        if directory == nil then
-            local dataDirectory = noctalia.pluginDataDir()
-            if type(dataDirectory) == "string" and dataDirectory ~= "" then
-                directory = dataDirectory .. "/captures"
-            end
-        end
+    if configured == "" then
+        return nil
     end
-    return normalizedDirectory(directory)
+    return normalizedDirectory(noctalia.expandPath(configured))
+end
+
+captureRootExists = function()
+    local root = captureDirectory()
+    local info = root ~= nil and noctalia.fileInfo(root) or nil
+    return type(info) == "table" and info.isDir == true
 end
 
 local function wallhavenManagedDirectory()

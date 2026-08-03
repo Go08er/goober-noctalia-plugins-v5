@@ -23,6 +23,8 @@ local MAX_PAGE = 10000
 -- listing card involves several bounded markup scans, so advance one anchor at
 -- a time and let the regular update cadence amortize a full provider page.
 local SEARCH_ANCHORS_PER_TICK = 1
+local SEARCH_PARSE_INTERVAL_MS = 16
+local IDLE_UPDATE_INTERVAL_MS = 250
 local MAX_QUEUE = 8
 local MAX_CACHE_SEARCHES = 8
 local MAX_CACHE_DETAILS = 48
@@ -48,6 +50,7 @@ local dataDirectory = ""
 local cacheDirectory = ""
 local cachePath = ""
 local helperPath = ""
+local currentUpdateIntervalMs = 0
 
 local cache = {
     schema = CACHE_SCHEMA,
@@ -100,6 +103,14 @@ local results = {
     },
     selected = {},
 }
+
+local function setUpdateCadence(intervalMs)
+    if currentUpdateIntervalMs == intervalMs then
+        return
+    end
+    noctalia.setUpdateInterval(intervalMs)
+    currentUpdateIntervalMs = intervalMs
+end
 
 local previousStatus = noctalia.state.get(STATUS_KEY)
 if type(previousStatus) == "table" then
@@ -185,17 +196,14 @@ local function configuredDirectory(key)
 end
 
 local function configuredDownloadDirectory()
-    if settingString("motionbgs_download_directory", "") ~= "" then
-        -- An invalid explicit override fails closed; it must never silently
-        -- redirect a download into the managed default.
-        return configuredDirectory("motionbgs_download_directory")
-    end
     local videoRoot = configuredDirectory("video_directory")
     return if videoRoot == "" then "" else videoRoot .. MANAGED_DOWNLOAD_SUFFIX
 end
 
-local function usesManagedDownloadDirectory()
-    return settingString("motionbgs_download_directory", "") == ""
+local function configuredVideoRootExists()
+    local videoRoot = configuredDirectory("video_directory")
+    local rootInfo = videoRoot ~= "" and noctalia.fileInfo(videoRoot) or nil
+    return type(rootInfo) == "table" and rootInfo.isDir == true
 end
 
 local function cacheTtlSeconds()
@@ -219,6 +227,7 @@ local function providerAvailable()
     return settingBool("use_motionbgs", true)
         and status.curl_available
         and status.helper_available
+        and configuredVideoRootExists()
         and cacheDirectory ~= ""
 end
 
@@ -249,19 +258,16 @@ end
 local function prepareDownloadDirectory()
     local directory = configuredDownloadDirectory()
     if directory == "" then
-        return "", "Select a Wall-in-One video directory or an explicit MotionBGS download directory first"
-    end
-    if not usesManagedDownloadDirectory() then
-        return directory, nil
-    end
-    if not providerAvailable() then
-        return "", "MotionBGS integration is disabled or its local scraper requirements are unavailable"
+        return "", "Select an existing Wall-in-One video directory first"
     end
 
     local videoRoot = configuredDirectory("video_directory")
     local rootInfo = videoRoot ~= "" and noctalia.fileInfo(videoRoot) or nil
     if type(rootInfo) ~= "table" or rootInfo.isDir ~= true then
         return "", "The selected Wall-in-One video directory does not exist"
+    end
+    if not providerAvailable() then
+        return "", "MotionBGS integration is disabled or its local scraper requirements are unavailable"
     end
     local made, makeError = noctalia.mkdirAll(directory)
     if made ~= true then
@@ -353,6 +359,7 @@ local function invalidateOperations(message, forceBarrier)
     end
 
     operationGeneration += 1
+    setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
     local detail = bounded(message, 400)
     for _, operation in ipairs(pendingOperations) do
         cleanupOperationResponse(operation)
@@ -419,6 +426,17 @@ local function normalizedQuery(value)
         return nil
     end
     return query
+end
+
+local function canonicalSearchSlug(value)
+    local query = normalizedQuery(value)
+    if query == nil then
+        return nil
+    end
+    -- MotionBGS canonicalizes an exact tag search by lowercasing its query and
+    -- replacing normalized spaces with hyphens. Keep this deliberately narrow:
+    -- punctuation and other non-slug queries must remain on /search.
+    return validSlug(query:lower():gsub("%s+", "-"))
 end
 
 local function normalizedBrowseRequest(candidate)
@@ -491,7 +509,11 @@ local function listingRouteMatches(request, value)
         return false
     end
     if request.mode == "search" then
-        return actual == "/search"
+        if actual == "/search" then
+            return true
+        end
+        local canonicalSlug = canonicalSearchSlug(request.query)
+        return canonicalSlug ~= nil and actual == "/tag:" .. canonicalSlug
     end
     return actual == sitePath(browseUrl(request))
 end
@@ -1178,6 +1200,7 @@ end
 local pumpQueue
 
 local function finishNetworkOperation(operation)
+    setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
     if activeOperation == operation then
         networkBusy = false
         activeOperation = nil
@@ -1200,6 +1223,7 @@ local function beginSearchOperation(operation, transport)
     end
     operation.search_parse = parser
     operation.search_source_url = transport.effective_url or operation.url
+    setUpdateCadence(SEARCH_PARSE_INTERVAL_MS)
     return true
 end
 
@@ -1530,9 +1554,8 @@ local function launchOperation(operation)
     end, timeout)
 
     if not accepted then
-        networkBusy = false
-        activeOperation = nil
         failNonce(operation.nonce, operation.kind, "launch", "Noctalia refused the MotionBGS helper process")
+        finishNetworkOperation(operation)
         return false
     end
     return true
@@ -1697,6 +1720,14 @@ local function initializeStorage()
         helperPath = pluginDirectory:gsub("/+$", "") .. "/scripts/motionbgs-provider"
         status.helper_available = noctalia.fileExists(helperPath)
     end
+    if
+        not configuredVideoRootExists()
+        or not settingBool("use_motionbgs", true)
+        or not status.curl_available
+        or not status.helper_available
+    then
+        return
+    end
     local directory = noctalia.pluginDataDir()
     if not validAbsolutePath(directory) then
         return
@@ -1711,13 +1742,10 @@ local function initializeStorage()
     noctalia.removeFile(cacheDirectory .. "/cache-v1.json")
     cachePath = cacheDirectory .. "/cache-v2.json"
     loadCache()
-    if usesManagedDownloadDirectory() then
-        -- This is deliberately separate from pluginDataDir()/motionbgs, which
-        -- stores only bounded HTML metadata. Do not create a media directory
-        -- until the integration is enabled, curl/helper storage is ready, and
-        -- the user-selected video root exists.
-        prepareDownloadDirectory()
-    end
+    -- This is deliberately separate from pluginDataDir()/motionbgs, which
+    -- stores only bounded HTML metadata. The explicit video root has already
+    -- been verified, so it is now safe to prepare the managed media child.
+    prepareDownloadDirectory()
 end
 
 function update()
@@ -1731,8 +1759,16 @@ end
 function onConfigChanged()
     status.curl_available = noctalia.commandExists("curl")
     status.helper_available = helperPath ~= "" and noctalia.fileExists(helperPath)
-    if usesManagedDownloadDirectory() then
-        prepareDownloadDirectory()
+    if configuredVideoRootExists() and settingBool("use_motionbgs", true) then
+        if cacheDirectory == "" then
+            initializeStorage()
+        else
+            prepareDownloadDirectory()
+        end
+    else
+        cacheDirectory = ""
+        cachePath = ""
+        dataDirectory = ""
     end
     if not providerAvailable() then
         local invalidated = invalidateOperations("MotionBGS integration was disabled or became unavailable", false)
@@ -1749,6 +1785,7 @@ function onExit(_signal, _reason)
     -- No cleanup subprocess is needed. In-flight runAsync work is cancelled by
     -- the service host, and the helper installs only complete atomic files.
     operationGeneration += 1
+    setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
     local cancellation = "MotionBGS service stopped before the request completed"
     local hadOperations = #pendingOperations > 0
         or (type(activeOperation) == "table" and activeOperation.cancelled ~= true)
@@ -1774,7 +1811,7 @@ function onExit(_signal, _reason)
     noctalia.state.set(STATUS_KEY, status)
 end
 
-noctalia.setUpdateInterval(250)
+setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
 initializeStorage()
 publishResults()
 publishStatus()
