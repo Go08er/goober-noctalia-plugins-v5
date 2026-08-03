@@ -476,6 +476,10 @@ let
     local vmPlaylistId = ""
     local vmPairingPlaylistId = ""
     local vmDefaultPlaylistId = ""
+    local vmAdaptivePairingId = ""
+    local vmVideoPairingId = ""
+    local vmScheduleUpperPlaylistId = ""
+    local vmScheduleLowerPlaylistId = ""
     local vmScheduleMonth = 1
     local vmPreviousAck = noctalia.state.get(COMMAND_ACK_KEY)
     if type(vmPreviousAck) == "table" then
@@ -486,6 +490,27 @@ let
         vmCommandSequence += 1
         request.sequence = vmCommandSequence
         wallInOne.handleCommand(request)
+    end
+
+    local function vmPairingId(kind, source)
+        local selected = ""
+        for id, pairing in pairs(config.pairings) do
+            local media = type(pairing) == "table" and type(pairing.media) == "table"
+                    and pairing.media
+                or nil
+            local still = type(pairing) == "table" and type(pairing.still) == "table"
+                    and pairing.still
+                or {}
+            local matches = if kind == "static"
+                then media == nil and tostring(still.path or "") == source
+                else media ~= nil
+                    and tostring(media.kind or "") == kind
+                    and tostring(media.source or "") == source
+            if matches and (selected == "" or tostring(id) < selected) then
+                selected = tostring(id)
+            end
+        end
+        return selected
     end
 
     function onIpc(event, payload)
@@ -745,6 +770,18 @@ let
                 return
             end
             vmPlaylistId = playlistId
+        elseif event == "vm-cycle-create-schedule-upper" then
+            vmScheduleUpperPlaylistId = wallInOne.createPlaylist(
+                "VM schedule upper",
+                nil,
+                false
+            ) or ""
+        elseif event == "vm-cycle-create-schedule-lower" then
+            vmScheduleLowerPlaylistId = wallInOne.createPlaylist(
+                "VM schedule lower",
+                nil,
+                false
+            ) or ""
         elseif event == "vm-cycle-add-static" then
             vmHandle({
                 kind = "playlist_add_entry",
@@ -795,15 +832,14 @@ let
                 playlist_id = vmPlaylistId,
             })
         elseif event == "vm-cycle-schedule-upper" then
-            local currentMonth = math.max(1, math.min(12, tonumber(noctalia.formatTime("%m")) or 1))
-            vmScheduleMonth = (currentMonth % 12) + 1
             vmHandle({
                 kind = "schedule_save",
                 output = "HEADLESS-1",
+                before_id = "vm-schedule-lower",
                 schedule = {
                     id = "vm-schedule-upper",
                     name = "VM overnight upper",
-                    playlist = vmPlaylistId,
+                    playlist = vmScheduleUpperPlaylistId,
                     enabled = true,
                     weekdays = { 0, 1, 2, 3, 4, 5, 6 },
                     months = { vmScheduleMonth },
@@ -813,13 +849,15 @@ let
                 },
             })
         elseif event == "vm-cycle-schedule-lower" then
+            local currentMonth = math.max(1, math.min(12, tonumber(noctalia.formatTime("%m")) or 1))
+            vmScheduleMonth = (currentMonth % 12) + 1
             vmHandle({
                 kind = "schedule_save",
                 output = "HEADLESS-1",
                 schedule = {
                     id = "vm-schedule-lower",
                     name = "VM overnight lower",
-                    playlist = vmPlaylistId,
+                    playlist = vmScheduleLowerPlaylistId,
                     enabled = true,
                     weekdays = { 0, 1, 2, 3, 4, 5, 6 },
                     months = { vmScheduleMonth },
@@ -833,12 +871,32 @@ let
             local winner = wallInOne.winningScheduleAt(outputConfig, 2, vmScheduleMonth, 15, 1200)
             local missMonth = (vmScheduleMonth % 12) + 1
             local missed = wallInOne.winningScheduleAt(outputConfig, 2, missMonth, 15, 1200)
+            local missPlaylist = if type(missed) == "table"
+                then tostring(missed.playlist or "")
+                else tostring(outputConfig.fallback_playlist or "")
             noctalia.log(
                 "WALL_IN_ONE_VM_SCHEDULE "
                     .. tostring(payload or "")
                     .. " month=" .. tostring(vmScheduleMonth)
                     .. " winner=" .. tostring(type(winner) == "table" and winner.id or "")
+                    .. " winner_is_lower=" .. tostring(
+                        type(winner) == "table"
+                            and tostring(winner.playlist or "") == vmScheduleLowerPlaylistId
+                    )
+                    .. " distinct=" .. tostring(
+                        vmPlaylistId ~= ""
+                            and vmScheduleUpperPlaylistId ~= ""
+                            and vmScheduleLowerPlaylistId ~= ""
+                            and vmPlaylistId ~= vmScheduleUpperPlaylistId
+                            and vmPlaylistId ~= vmScheduleLowerPlaylistId
+                            and vmScheduleUpperPlaylistId ~= vmScheduleLowerPlaylistId
+                    )
                     .. " miss=" .. tostring(missed == nil)
+                    .. " miss_uses_fallback=" .. tostring(
+                        missed == nil
+                            and missPlaylist == tostring(outputConfig.fallback_playlist or "")
+                            and missPlaylist == vmPlaylistId
+                    )
             )
         elseif event == "vm-output-options-override" then
             vmHandle({
@@ -907,6 +965,7 @@ let
                     added_at = "2026-08-02 00:00:00",
                 },
             })
+            vmAdaptivePairingId = vmPairingId("static", "${fixtureStill}")
         elseif event == "vm-pairing-save-video" then
             vmHandle({
                 kind = "pairing_save",
@@ -919,12 +978,13 @@ let
                     added_at = "2026-08-02 00:01:00",
                 },
             })
+            vmVideoPairingId = vmPairingId("video", "${fixtureVideo}")
         elseif event == "vm-pairing-add-adaptive" then
             vmHandle({
                 kind = "playlist_add_pairing",
                 output = "HEADLESS-1",
                 playlist_id = vmPairingPlaylistId,
-                pairing_id = "vm-pairing-adaptive",
+                pairing_id = vmAdaptivePairingId,
                 before_id = "",
             })
         elseif event == "vm-pairing-add-video" then
@@ -932,14 +992,14 @@ let
                 kind = "playlist_add_pairing",
                 output = "HEADLESS-1",
                 playlist_id = vmPairingPlaylistId,
-                pairing_id = "vm-pairing-video",
+                pairing_id = vmVideoPairingId,
                 before_id = "",
             })
         elseif event == "vm-pairing-save-update" then
             vmHandle({
                 kind = "pairing_save",
                 pairing = {
-                    id = "vm-pairing-adaptive",
+                    id = vmAdaptivePairingId,
                     label = "VM adaptive still updated",
                     media = nil,
                     still = { mode = "selected", path = "${fixtureStill}" },
@@ -952,9 +1012,9 @@ let
             local adaptiveId = ""
             local videoId = ""
             for _, entry in ipairs(type(playlist) == "table" and playlist.entries or {}) do
-                if entry.pairing_id == "vm-pairing-adaptive" then
+                if entry.pairing_id == vmAdaptivePairingId then
                     adaptiveId = entry.id
-                elseif entry.pairing_id == "vm-pairing-video" then
+                elseif entry.pairing_id == vmVideoPairingId then
                     videoId = entry.id
                 end
             end
@@ -965,13 +1025,23 @@ let
                 anchor_id = adaptiveId,
                 placement = "before",
             })
-        elseif event == "vm-pairing-delete" then
-            vmHandle({ kind = "pairing_delete", pairing_id = "vm-pairing-adaptive" })
+        elseif event == "vm-pairing-reset" then
+            vmHandle({
+                kind = "pairing_reset",
+                pairing = {
+                    id = vmAdaptivePairingId,
+                    label = "VM adaptive still reset",
+                    media = nil,
+                    still = { mode = "selected", path = "${fixtureStill}" },
+                    theme = { mode = "auto", source = "wallpaper", selection = "m3-rainbow" },
+                    added_at = "2026-08-02 00:00:00",
+                },
+            })
         elseif event == "vm-palette-preview" then
             vmHandle({
                 kind = "palette_preview",
                 key = "vm-adaptive-preview",
-                pairing_id = "vm-pairing-adaptive",
+                pairing_id = vmAdaptivePairingId,
             })
         elseif event == "vm-palette-preview-probe" then
             local paletteStatus = noctalia.state.get(PALETTES_STATUS_KEY)
@@ -1771,6 +1841,57 @@ pkgs.testers.runNixOSTest (
       def noctalia_msg(arguments: str) -> str:
           return machine.succeed(noctalia_command(arguments))
 
+      service_reload_marker = "hot reload: reloaded service '${serviceId}'"
+      service_reload_probe = [0]
+      def reload_service_source(label: str):
+          # Noctalia watches the materialized parent directory for a completed
+          # write or same-directory rename. Let its 100 ms debounce window
+          # expire, then atomically replace the source with a visibly changed,
+          # fully written file. This cannot expose a partial Luau program and
+          # gives a missed inotify event a bounded, actionable failure.
+          machine.sleep(1)
+          reloads_before = int(machine.succeed(
+              f"{journal} | grep -Fc -- {shlex.quote(service_reload_marker)}"
+          ).strip())
+          service_source = "${materializedRoot}/service.luau"
+          service_stage = service_source + f".vm-reload-{service_reload_probe[0]}"
+          service_reload_probe[0] += 1
+          comment = f"-- {label} {service_reload_probe[0]}"
+          machine.succeed(
+              "cp -- "
+              + shlex.quote(service_source)
+              + " "
+              + shlex.quote(service_stage)
+              + " && printf '%s\\n' "
+              + shlex.quote(comment)
+              + " >> "
+              + shlex.quote(service_stage)
+              + " && mv -f -- "
+              + shlex.quote(service_stage)
+              + " "
+              + shlex.quote(service_source)
+              + " && tail -n 1 "
+              + shlex.quote(service_source)
+              + " | grep -Fx -- "
+              + shlex.quote(comment)
+          )
+          machine.wait_until_succeeds(
+              f"test $({journal} | grep -Fc -- {shlex.quote(service_reload_marker)}) "
+              f"-gt {reloads_before}",
+              timeout=60,
+          )
+          reload_token = f"service-reload-{service_reload_probe[0]}"
+          machine.wait_until_succeeds(
+              noctalia_command(
+                  f"plugin ${serviceId} all vm-probe {reload_token}"
+              )
+              + " >/dev/null && "
+              + journal
+              + " | grep -F -- "
+              + shlex.quote(f"WALL_IN_ONE_VM_PROBE {reload_token}"),
+              timeout=60,
+          )
+
       wait_log("layer-shell=yes")
       machine.succeed(
           "runuser -u ${testUser} -- env -i "
@@ -2337,13 +2458,18 @@ pkgs.testers.runNixOSTest (
       # child; later entries exercise owned pause/resume/replacement.
       for event in (
           "vm-cycle-create",
+          "vm-cycle-create-schedule-upper",
+          "vm-cycle-create-schedule-lower",
           "vm-cycle-add-static",
           "vm-cycle-add-video",
           "vm-cycle-add-workshop",
           "vm-cycle-options",
           "vm-cycle-assign",
-          "vm-cycle-schedule-upper",
           "vm-cycle-schedule-lower",
+          # Create the lower rule first, then insert the upper rule before it.
+          # This exercises schedule_save.before_id while preserving the visual
+          # top-to-bottom precedence model used by the display editor.
+          "vm-cycle-schedule-upper",
       ):
           noctalia_msg(f"plugin ${serviceId} all {event}")
       machine.wait_until_succeeds(
@@ -2377,8 +2503,14 @@ pkgs.testers.runNixOSTest (
           "and (.outputs[\"HEADLESS-1\"].schedules | length) == 3 "
           "and ([ .outputs[\"HEADLESS-1\"].schedules[1:][].id ] "
           "== [\"vm-schedule-upper\",\"vm-schedule-lower\"]) "
-          "and ([ .outputs[\"HEADLESS-1\"].schedules[1:][].playlist ] "
-          "| all(. == $record.key)) "
+          "and .playlists[.outputs[\"HEADLESS-1\"].schedules[1].playlist].name "
+          "== \"VM schedule upper\" "
+          "and .playlists[.outputs[\"HEADLESS-1\"].schedules[2].playlist].name "
+          "== \"VM schedule lower\" "
+          "and .outputs[\"HEADLESS-1\"].schedules[1].playlist != $record.key "
+          "and .outputs[\"HEADLESS-1\"].schedules[2].playlist != $record.key "
+          "and .outputs[\"HEADLESS-1\"].schedules[1].playlist "
+          "!= .outputs[\"HEADLESS-1\"].schedules[2].playlist "
           "and ([ .outputs[\"HEADLESS-1\"].schedules[1:][].enabled ] | all) "
           "and (.outputs[\"HEADLESS-1\"].schedules[1].months | length) == 1 "
           "and .outputs[\"HEADLESS-1\"].schedules[1].months "
@@ -2395,7 +2527,10 @@ pkgs.testers.runNixOSTest (
       for fragment in (
           f"WALL_IN_ONE_VM_SCHEDULE {schedule_token}",
           "winner=vm-schedule-lower",
+          "winner_is_lower=true",
+          "distinct=true",
           "miss=true",
+          "miss_uses_fallback=true",
       ):
           wait_log(fragment)
 
@@ -2443,9 +2578,9 @@ pkgs.testers.runNixOSTest (
       )
 
       # Exercise the public catalog command path independently of legacy entry
-      # translation: save, add two reusable records, synchronize an edit across
-      # linked occurrences, place by stable occurrence ID, then safely detach a
-      # deleted drawer record while retaining its last valid snapshot.
+      # translation. Saving customization for media already discovered by the
+      # mixed playlist must reuse the one profile owned by that source, then
+      # synchronize edits and resets across every linked occurrence.
       for event in (
           "vm-pairing-create",
           "vm-pairing-save-adaptive",
@@ -2454,10 +2589,18 @@ pkgs.testers.runNixOSTest (
           noctalia_msg(f"plugin ${serviceId} all {event}")
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e "
-          "'.pairings[\"vm-pairing-adaptive\"].still.path == \"${fixtureStill}\" "
-          "and .pairings[\"vm-pairing-adaptive\"].theme.source == \"wallpaper\" "
-          "and .pairings[\"vm-pairing-video\"].media.kind == \"video\" "
-          "and .pairings[\"vm-pairing-video\"].still.path == \"${fixtureVideoStill}\"' "
+          "'([.pairings | to_entries[] "
+          "| select(.value.media == null "
+          "and .value.still.path == \"${fixtureStill}\")]) as $adaptive "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media.kind == \"video\" "
+          "and .value.media.source == \"${fixtureVideo}\")]) as $video "
+          "| ($adaptive | length) == 1 "
+          "and ($video | length) == 1 "
+          "and $adaptive[0].value.customized == true "
+          "and $adaptive[0].value.theme.source == \"wallpaper\" "
+          "and $video[0].value.customized == true "
+          "and $video[0].value.still.path == \"${fixtureVideoStill}\"' "
           "${pluginDataRoot}/config.json"
       )
       for event in (
@@ -2468,10 +2611,16 @@ pkgs.testers.runNixOSTest (
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e "
           "'(. as $config "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media == null "
+          "and .value.still.path == \"${fixtureStill}\")][0]) as $adaptive "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media.kind == \"video\" "
+          "and .value.media.source == \"${fixtureVideo}\")][0]) as $video "
           "| (.playlists | to_entries | map(select(.value.name == \"VM pairing commands\")) | .[0].value) as $p "
           "| ($p.entries | length) == 2 "
           "and [ $p.entries[].pairing_id ] "
-          "== [\"vm-pairing-adaptive\",\"vm-pairing-video\"] "
+          "== [$adaptive.key,$video.key] "
           "and ([ $p.entries[] as $entry "
           "| $config.pairings[$entry.pairing_id] as $pair "
           "| $entry.id != $pair.id "
@@ -2485,18 +2634,29 @@ pkgs.testers.runNixOSTest (
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e "
           "'(. as $config "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media == null "
+          "and .value.still.path == \"${fixtureStill}\")][0]) as $adaptive "
           "| (.playlists | to_entries | map(select(.value.name == \"VM pairing commands\")) | .[0].value) as $p "
-          "| $config.pairings[\"vm-pairing-adaptive\"].label == \"VM adaptive still updated\" "
-          "and $config.pairings[\"vm-pairing-adaptive\"].theme.mode == \"light\" "
-          "and ($p.entries[] | select(.pairing_id == \"vm-pairing-adaptive\") "
+          "| $adaptive.value.label == \"VM adaptive still updated\" "
+          "and $adaptive.value.customized == true "
+          "and $adaptive.value.theme.mode == \"light\" "
+          "and ($p.entries[] | select(.pairing_id == $adaptive.key) "
           "| .label == \"VM adaptive still updated\" and .theme.mode == \"light\"))' "
           "${pluginDataRoot}/config.json"
       )
       noctalia_msg("plugin ${serviceId} all vm-pairing-place")
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e "
-          "'(.playlists | to_entries | map(select(.value.name == \"VM pairing commands\")) | .[0].value.entries "
-          "| [ .[].pairing_id ]) == [\"vm-pairing-video\",\"vm-pairing-adaptive\"]' "
+          "'([.pairings | to_entries[] "
+          "| select(.value.media == null "
+          "and .value.still.path == \"${fixtureStill}\")][0].key) as $adaptive "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media.kind == \"video\" "
+          "and .value.media.source == \"${fixtureVideo}\")][0].key) as $video "
+          "| (.playlists | to_entries "
+          "| map(select(.value.name == \"VM pairing commands\")) "
+          "| .[0].value.entries | [ .[].pairing_id ]) == [$video,$adaptive]' "
           "${pluginDataRoot}/config.json"
       )
 
@@ -2540,18 +2700,29 @@ pkgs.testers.runNixOSTest (
       assert preview_calls[0][6].startswith("${pluginDataRoot}/palette-preview/preview-")
       assert preview_calls[0][6].endswith(".json")
 
-      noctalia_msg("plugin ${serviceId} all vm-pairing-delete")
+      noctalia_msg("plugin ${serviceId} all vm-pairing-reset")
       machine.wait_until_succeeds(
           "${lib.getExe pkgs.jq} -e "
           "'(. as $config "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media == null "
+          "and .value.still.path == \"${fixtureStill}\")]) as $adaptive "
           "| (.playlists | to_entries | map(select(.value.name == \"VM pairing commands\")) | .[0].value) as $p "
-          "| ($config.pairings | has(\"vm-pairing-adaptive\")) == false "
+          "| ($adaptive | length) == 1 "
+          "and $adaptive[0].value.customized == false "
+          "and $adaptive[0].value.label == \"VM adaptive still reset\" "
+          "and $adaptive[0].value.theme.mode == \"auto\" "
           "and ($p.entries | length) == 2 "
-          "and $p.entries[0].pairing_id == \"vm-pairing-video\" "
-          "and ($p.entries[1] | has(\"pairing_id\")) == false "
-          "and $p.entries[1].label == \"VM adaptive still updated\" "
+          "and $p.entries[1].pairing_id == $adaptive[0].key "
+          "and $p.entries[1].customized == false "
+          "and $p.entries[1].label == \"VM adaptive still reset\" "
           "and $p.entries[1].still.path == \"${fixtureStill}\" "
-          "and $p.entries[1].theme.mode == \"light\")' "
+          "and $p.entries[1].theme.mode == \"auto\" "
+          "and ([.playlists[].entries[] "
+          "| select(.pairing_id == $adaptive[0].key) "
+          "| .customized == false "
+          "and .label == \"VM adaptive still reset\" "
+          "and .theme.mode == \"auto\"] | all))' "
           "${pluginDataRoot}/config.json"
       )
       drive_cycle(
@@ -3080,9 +3251,9 @@ pkgs.testers.runNixOSTest (
       # Animated manual selections are decoded into a durable PNG rather than
       # persisting a transient validation staging path or the animated source.
       set_manual_pair("${fixtureGif}")
+      noctalia_msg("plugin ${serviceId} all pair-manual")
       machine.wait_until_succeeds(
-          noctalia_command("plugin ${serviceId} all pair-manual")
-          + " >/dev/null && ${lib.getExe pkgs.jq} -e "
+          "${lib.getExe pkgs.jq} -e "
           + shlex.quote(
               '.pairs["HEADLESS-1"].provider == "manual" '
               'and .pairs["HEADLESS-1"].dynamic_id == "manual:${fixtureGif}" '
@@ -3102,19 +3273,12 @@ pkgs.testers.runNixOSTest (
           + shlex.quote(gif_still)
           + " -f null -"
       )
-      service_reload_marker = "hot reload: reloaded service '${serviceId}'"
-      gif_reloads_before = machine.succeed(journal).count(service_reload_marker)
-      machine.succeed(
-          "printf '\\n-- VM GIF persistence reload probe\\n' >> ${materializedRoot}/service.luau"
-      )
-      machine.wait_until_succeeds(
-          f"test $({journal} | grep -Fc -- {shlex.quote(service_reload_marker)}) "
-          f"-gt {gif_reloads_before}"
-      )
+      reload_service_source("VM GIF persistence reload probe")
       machine.wait_until_succeeds(
           noctalia_command("wallpaper-get HEADLESS-1")
           + " | grep -Fx -- "
-          + shlex.quote(gif_still)
+          + shlex.quote(gif_still),
+          timeout=60,
       )
       machine.succeed(
           "${lib.getExe pkgs.jq} -e --arg path "
@@ -3148,12 +3312,7 @@ pkgs.testers.runNixOSTest (
       )
       machine.fail("test -e ${pluginDataRoot}/config.json.tmp")
 
-      persistence_reloads_before = machine.succeed(journal).count(service_reload_marker)
-      machine.succeed("printf '\\n-- VM persistence reload probe\\n' >> ${materializedRoot}/service.luau")
-      machine.wait_until_succeeds(
-          f"test $({journal} | grep -Fc -- {shlex.quote(service_reload_marker)}) "
-          f"-gt {persistence_reloads_before}"
-      )
+      reload_service_source("VM persistence reload probe")
       wait_direct(
           wallhaven=True,
           w_command=True,
@@ -3169,6 +3328,12 @@ pkgs.testers.runNixOSTest (
           "${lib.getExe pkgs.jq} -e "
           "'.schema_version == 5 and (.pairings | type) == \"object\" "
           "and (. as $config "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media == null "
+          "and .value.still.path == \"${fixtureStill}\")]) as $adaptive "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.media.kind == \"video\" "
+          "and .value.media.source == \"${fixtureVideo}\")]) as $video "
           "| .outputs[\"HEADLESS-1\"].fallback_playlist as $p "
           "| .playlists[$p].name == \"VM mixed playlist\" "
           "and (.playlists[$p].entries | length) == 3 "
@@ -3176,8 +3341,11 @@ pkgs.testers.runNixOSTest (
           "== ([ .playlists[$p].entries[].id ] | unique | length) "
           "and ([ .playlists[$p].entries[] as $entry "
           "| $config.pairings[$entry.pairing_id].id == $entry.pairing_id ] | all) "
-          "and ($config.pairings | has(\"vm-pairing-adaptive\")) == false "
-          "and $config.pairings[\"vm-pairing-video\"].media.kind == \"video\")' "
+          "and ($adaptive | length) == 1 "
+          "and $adaptive[0].value.customized == false "
+          "and $adaptive[0].value.theme.mode == \"auto\" "
+          "and ($video | length) == 1 "
+          "and $video[0].value.customized == true)' "
           "${pluginDataRoot}/config.json"
       )
       machine.succeed(

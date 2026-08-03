@@ -1052,7 +1052,8 @@ def test_coordinator_contract() -> None:
             'placement ~= "before" and placement ~= "after"',
             "local moving = table.remove(schedules, sourceIndex)",
             'table.insert(schedules, if placement == "before" then anchorIndex else anchorIndex + 1, moving)',
-            'return wallInOne.saveConfig(nextConfig, "schedule-place")',
+            'if not wallInOne.saveConfig(nextConfig, "schedule-place") then',
+            "scheduleReevaluationPending[output] = true",
             "function wallInOne.scheduleMatches(schedule, weekday, month, dayOfMonth, minute)",
             "function wallInOne.monthEnabled(schedule, month)",
             "local previousWeekday = (weekday + 6) % 7",
@@ -1077,7 +1078,10 @@ def test_coordinator_contract() -> None:
         update,
         (
             'local clockSignature = noctalia.formatTime("%Y-%m-%d %H:%M")',
-            "if clockSignature ~= scheduleClockSignature and not scheduledBatchActive then",
+            "local minuteChanged = clockSignature ~= scheduleClockSignature",
+            "if (minuteChanged or next(scheduleReevaluationPending) ~= nil) and not scheduledBatchActive then",
+            "if minuteChanged or scheduleReevaluationPending[output] == true then",
+            "scheduleReevaluationPending[output] = nil",
             "for output in pairs(config.outputs) do",
             "table.sort(scheduledOutputs)",
             "wallInOne.reevaluateOutputSchedule(output, false, true)",
@@ -1133,7 +1137,7 @@ def test_coordinator_contract() -> None:
             "engines = request.engines",
             "wallInOne.saveOutputEngines(request.output, engines)",
             'kind == "pairing_save"',
-            'kind == "pairing_delete"',
+            'kind == "pairing_reset"',
             'kind == "playlist_add_pairing"',
             'kind == "playlist_add_entry"',
             'kind == "playlist_save_entry"',
@@ -1158,6 +1162,9 @@ def test_coordinator_contract() -> None:
     )
     assert "config.reels" not in commands
     assert "runtime.cycles" not in commands
+    assert 'kind == "pairing_delete"' not in commands, (
+        "pairing deletion must not remain exposed through the public command protocol"
+    )
 
     add_playlist_entry = service[
         service.index("function wallInOne.addPlaylistEntry") : service.index(
@@ -1307,8 +1314,12 @@ def test_coordinator_contract() -> None:
             'provider = "local"',
             'candidate.ownership == "managed-motionbgs"',
             'entry.provider = "MotionBGS"',
+            'local pairedPreview = wallInOne.cachedPair("video:" .. path)',
+            'entry.paired_preview = tostring(pairedPreview or "")',
+            'local pairedPreview = wallInOne.cachedPair(tostring(candidate.id or ""))',
+            'paired_preview = tostring(pairedPreview or "")',
         ),
-        "sidecar-proven shared-root ownership",
+        "sidecar-proven shared-root ownership and validated dynamic-pair previews",
     )
     download_fingerprint = service[
         service.index("function wallInOne.completedDownloadFingerprint") : service.index(
@@ -1351,7 +1362,7 @@ def test_coordinator_contract() -> None:
 
 
 def test_reusable_pairing_catalog_contract() -> None:
-    """Pin catalog snapshots, occurrence synchronization, and application."""
+    """Pin identity-owned pairings, synchronized snapshots, and application."""
 
     service = text("service.luau")
     catalog = service[
@@ -1374,16 +1385,25 @@ def test_reusable_pairing_catalog_contract() -> None:
             "local snapshot = wallInOne.pairingFromEntry(pairing, entry.id)",
             "snapshot.pairing_id = pairingId",
             "playlist.entries[index] = snapshot",
+            "function wallInOne.pairingIdentitySelection(nextConfig, candidate)",
+            "local identity = wallInOne.bundleIdentity(candidate)",
+            "function wallInOne.collapsePairingIdentity(nextConfig, canonicalId, includeCustomized)",
+            "occurrence.pairing_id = canonicalId",
+            "nextConfig.pairings[duplicateId] = nil",
+            "wallInOne.syncPairingSnapshots(nextConfig, canonicalId)",
+            "function wallInOne.catalogPairingForEntry(nextConfig, entry)",
+            "wallInOne.pairingIdentitySelection(nextConfig, entry)",
             "function wallInOne.savePairing(rawPairing, customized)",
+            "local explicitlyEdited = type(existing) == \"table\"",
+            "local matchingId, canCollapse, ambiguous = wallInOne.pairingIdentitySelection(nextConfig, pairing)",
+            "id = matchingId",
+            "pairing.id = id",
             "nextConfig.pairings[id] = pairing",
-            "wallInOne.collapseDefaultPairingIdentity(nextConfig, id)",
+            "wallInOne.collapsePairingIdentity(nextConfig, id, true)",
+            "wallInOne.collapsePairingIdentity(nextConfig, id, false)",
             'wallInOne.saveConfig(nextConfig, "pairing-save")',
             "function wallInOne.resetPairing(rawPairing)",
             "return wallInOne.savePairing(rawPairing, false) ~= nil",
-            "function wallInOne.deletePairing(pairingId)",
-            "nextConfig.pairings[pairingId] = nil",
-            "entry.pairing_id = nil",
-            'wallInOne.saveConfig(nextConfig, "pairing-delete")',
             "function wallInOne.addPairingToPlaylist(output, playlistId, pairingId, beforeId)",
             "local entry = wallInOne.pairingFromEntry(pairing, entryId)",
             "entry.pairing_id = pairing.id",
@@ -1391,28 +1411,18 @@ def test_reusable_pairing_catalog_contract() -> None:
             "table.insert(playlist.entries, anchor, entry)",
             'wallInOne.saveConfig(nextConfig, "playlist-add-pairing")',
         ),
-        "reusable pairing catalog and playlist occurrence snapshots",
+        "identity-owned pairing catalog and playlist occurrence snapshots",
     )
 
     save_pairing = catalog[
         catalog.index("function wallInOne.savePairing") : catalog.index(
-            "function wallInOne.deletePairing"
+            "function wallInOne.resetPairing"
         )
     ]
     assert save_pairing.index("nextConfig.pairings[id] = pairing") < save_pairing.index(
-        "wallInOne.collapseDefaultPairingIdentity(nextConfig, id)"
+        "if explicitlyEdited then"
     ) < save_pairing.index('wallInOne.saveConfig(nextConfig, "pairing-save")')
-
-    delete_pairing = catalog[
-        catalog.index("function wallInOne.deletePairing") : catalog.index(
-            "function wallInOne.addPairingToPlaylist"
-        )
-    ]
-    assert "table.remove(playlist.entries" not in delete_pairing
-    for field in ("label", "media", "still", "theme", "customized", "added_at"):
-        assert f"entry.{field} =" not in delete_pairing, (
-            f"catalog deletion rewrote the preserved {field} snapshot"
-        )
+    assert "wallInOne.collapseDefaultPairingIdentity" not in catalog
 
     playlist_application = service[
         service.index("wallInOne.advancePlaylist = function") : service.index(
@@ -1486,36 +1496,38 @@ def test_item_default_provenance_contract() -> None:
     )
 
     catalog = service[
-        service.index("function wallInOne.collapseDefaultPairingIdentity") : service.index(
-            "function wallInOne.deletePairing"
+        service.index("function wallInOne.pairingIdentitySelection") : service.index(
+            "function wallInOne.addPairingToPlaylist"
         )
     ]
     require_all(
         catalog,
         (
-            # Automatic cataloging copies the normalized entry's explicit
-            # false; it must not turn discovery into a user override.
-            "nextConfig.pairings[id] = wallInOne.pairingFromEntry(entry, id)",
-            'local identity = if entry.customized == true then "" else wallInOne.bundleIdentity(entry)',
-            "pairing.customized ~= true",
-            "wallInOne.bundleIdentity(pairing) == identity",
-            "local canonicalId = defaultIds[1]",
+            "function wallInOne.pairingIdentitySelection(nextConfig, candidate)",
+            "local identity = wallInOne.bundleIdentity(candidate)",
+            "local customizedIds = {}",
+            "local exactIds = {}",
+            "return customizedIds[1], false, true",
+            "function wallInOne.collapsePairingIdentity(nextConfig, canonicalId, includeCustomized)",
+            "and (includeCustomized == true or pairing.customized ~= true)",
             "occurrence.pairing_id = canonicalId",
             "nextConfig.pairings[duplicateId] = nil",
-            "wallInOne.collapseDefaultPairingIdentity(nextConfig, canonicalId)",
+            "function wallInOne.catalogPairingForEntry(nextConfig, entry)",
+            "local canonicalId, canCollapse = wallInOne.pairingIdentitySelection(nextConfig, entry)",
+            "wallInOne.collapsePairingIdentity(nextConfig, canonicalId, false)",
+            "nextConfig.pairings[id] = wallInOne.pairingFromEntry(entry, id)",
             "function wallInOne.savePairing(rawPairing, customized)",
             "customized = customized ~= false",
-            "wallInOne.collapseDefaultPairingIdentity(nextConfig, id)",
+            "local matchingId, canCollapse, ambiguous = wallInOne.pairingIdentitySelection(nextConfig, pairing)",
+            "if explicitlyEdited then",
+            "wallInOne.collapsePairingIdentity(nextConfig, id, true)",
+            "wallInOne.collapsePairingIdentity(nextConfig, id, false)",
             "function wallInOne.resetPairing(rawPairing)",
             "return wallInOne.savePairing(rawPairing, false) ~= nil",
         ),
-        "automatic, explicit, and reset item-profile writes",
+        "identity-owned automatic, explicit, and reset item-profile writes",
     )
-    assert catalog.index("wallInOne.collapseDefaultPairingIdentity(nextConfig, canonicalId)") < catalog.index(
-        "return canonicalId"
-    ) < catalog.index("nextConfig.pairings[id] = wallInOne.pairingFromEntry(entry, id)"), (
-        "an existing default identity must update and relink before a new catalog profile is allocated"
-    )
+    assert "collapseDefaultPairingIdentity" not in catalog
     save_pairing = catalog[
         catalog.index("function wallInOne.savePairing") : catalog.index(
             "function wallInOne.resetPairing"
@@ -1523,7 +1535,7 @@ def test_item_default_provenance_contract() -> None:
     ]
     assert save_pairing.index("customized = customized ~= false") < save_pairing.index(
         "nextConfig.pairings[id] = pairing"
-    ) < save_pairing.index("wallInOne.collapseDefaultPairingIdentity(nextConfig, id)")
+    ) < save_pairing.index("if explicitlyEdited then")
 
     commands = service[
         service.index("function wallInOne.handleCommand") : service.index("function update()")
@@ -1538,6 +1550,8 @@ def test_item_default_provenance_contract() -> None:
         ),
         "item-profile command provenance",
     )
+    assert 'kind == "pairing_delete"' not in commands
+    assert "function wallInOne.deletePairing" not in service
 
     open_editor = panel[
         panel.index("local function openLibraryEntryPairing") : panel.index(
@@ -1558,14 +1572,23 @@ def test_item_default_provenance_contract() -> None:
             "panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)",
             'local pairingId = if customized then tostring(existing.id or "") else ""',
             'local profileId = type(existing) == "table" and tostring(existing.id or "") or ""',
-            "local pairingDeleteArmed = customized and pendingDeletePairingId == profileId",
+            "local pairingResetArmed = customized and pendingResetPairingId == profileId",
             "defaultBundle.id = profileId",
             'send({ kind = "pairing_reset", pairing = defaultBundle })',
+            'tooltip = noctalia.tr("panel.pairings.reset")',
+            'variant = if pairingResetArmed then "primary" else "ghost"',
+            'noctalia.tr("panel.pairings.confirm_reset")',
             "panelUi.libraryPaletteSummary(bundle, not customized)",
         ),
-        "library-card default and override provenance",
+        "library-card default and non-destructive override reset",
     )
-    assert "local pairingDeleteArmed = not managed" not in library_card
+    assert "pairingDeleteArmed" not in library_card
+    assert "pendingDeletePairingId" not in library_card
+    reset_controls = library_card[
+        library_card.index("if customized then") : library_card.index("if managed then")
+    ]
+    assert 'kind = "pairing_delete"' not in reset_controls
+    assert 'variant = "destructive"' not in reset_controls
 
     default_bundle = panel[
         panel.index("function panelUi.virtualLibraryPairing") : panel.index(
@@ -1576,11 +1599,14 @@ def test_item_default_provenance_contract() -> None:
         default_bundle,
         (
             "local useAdaptiveColors = settings().sync_colors ~= false",
+            'else { mode = "automatic" }',
             'then { mode = "auto", source = "wallpaper", selection = scheme }',
             'else { mode = "inherit", source = "inherit", selection = "" }',
         ),
         "system default palette policy",
     )
+    assert "libraryItem.preview" not in default_bundle
+    assert "entry.still_path" not in default_bundle
 
     resolver = panel[
         panel.index("local function preferredPairingForLibraryEntry") : panel.index(
@@ -1592,28 +1618,117 @@ def test_item_default_provenance_contract() -> None:
         (
             "local function preferredPairingForLibraryEntry(existing, candidate)",
             "if existingCustomized ~= candidateCustomized then",
-            "selected = preferredPairingForLibraryEntry(selected, pairing)",
+            "local function libraryPairingKey(kind, source)",
+            "local function indexedLibraryPairings()",
+            "local revision = tonumber(state.revision)",
+            "then instance == libraryPairingCache.instance",
+            "and revision == libraryPairingCache.revision",
+            "and pairings == libraryPairingCache.source",
+            "for _, pairing in pairs(pairings) do",
+            "nextIndex[key] = preferredPairingForLibraryEntry(nextIndex[key], pairing)",
+            "libraryPairingCache.index = nextIndex",
+            "return if key ~= nil then indexedLibraryPairings()[key] else nil",
         ),
-        "deterministic library item profile resolver",
+        "snapshot-indexed deterministic library item profile resolver",
     )
+    assert resolver.count("for _, pairing in pairs(pairings) do") == 1
+    assert "sortedPairingIds" not in panel
 
-    library_drawer = panel[
-        panel.index("local function playlistPairingDrawer") : panel.index(
-            "local function playlistPairingDrawers"
+    library_items = panel[
+        panel.index("function panelUi.libraryItems") : panel.index(
+            "function panelUi.libraryDragSignature"
         )
     ]
     require_all(
-        library_drawer,
+        library_items,
         (
-            "local customized = type(existing) == \"table\" and existing.customized == true",
-            "panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)",
-            'local pairingId = if customized then tostring(existing.id or "") else ""',
-            "library_bundle = bundle",
-            "pairing_id = pairingId",
-            "panelUi.libraryPaletteSummary(bundle, not customized)",
+            "local sourceItems = if kind == \"static\"",
+            "for _, sourceItem in ipairs(sourceItems) do",
+            "add(entry, sourceItem, matchingPairingForLibraryEntry(entry))",
+            "return items, currentLibrary",
         ),
-        "playlist-drawer default and override provenance",
+        "source-authoritative indexed library",
     )
+    assert "sortedPairingIds(kind)" not in library_items
+    assert "pairingMap()[id]" not in library_items
+    assert "still_path = tostring(sourceItem.preview" not in library_items
+
+    library_preview = panel[
+        panel.index("function panelUi.libraryPreviewPath") : panel.index(
+            "function panelUi.libraryPaletteSummary"
+        )
+    ]
+    require_all(
+        library_preview,
+        (
+            'local path = if tostring(still.mode or "") == "selected"',
+            "path = tostring(libraryItem.paired_preview or \"\")",
+            "path = tostring(libraryItem.preview or \"\")",
+            "local withOutput = entryForOutput(entry, output)",
+        ),
+        "explicit, paired, provider, and current-output thumbnail precedence",
+    )
+    assert library_preview.index('tostring(still.mode or "") == "selected"') < library_preview.index(
+        "libraryItem.paired_preview"
+    ) < library_preview.index("libraryItem.preview") < library_preview.index("entryForOutput(entry, output)")
+
+    pairing_editor = panel[
+        panel.index("local function pairingEditor") : panel.index(
+            "function panelUi.playlistPairingLibrary"
+        )
+    ]
+    require_all(
+        pairing_editor,
+        (
+            'noctalia.tr("panel.pairings.source_locked")',
+            "ui.label({ text = source, fontSize = 9, maxLines = 2 })",
+        ),
+        "read-only media identity in the pairing editor",
+    )
+    assert 'key = "pairing-source-"' not in pairing_editor
+    still_path_change = pairing_editor.index('entryStillPathDraft = tostring(value or "")')
+    preview_request = pairing_editor.index("requestPairingAdaptivePreview", still_path_change)
+    assert still_path_change < preview_request < pairing_editor.index("render()", preview_request)
+
+    compact_swatch = panel[
+        panel.index("function panelUi.compactPaletteSwatch") : panel.index(
+            "local function pairingKindLabel"
+        )
+    ]
+    require_all(
+        compact_swatch,
+        (
+            'ui.glyph({ name = "palette", size = 14, color = "on_surface_variant" })',
+            "local colors = normalizedPreviewMode(preview, \"dark\")",
+        ),
+        "neutral unresolved compact palette cue",
+    )
+    assert 'fill = token' not in compact_swatch
+    assert '"surface", "primary", "secondary", "tertiary"' not in compact_swatch
+
+    pairing_library = panel[
+        panel.index("function panelUi.playlistPairingLibrary") : panel.index(
+            "local function playlistInsertionZone"
+        )
+    ]
+    require_all(
+        pairing_library,
+        (
+            'for _, kind in ipairs({ "static", "video", "workshop" }) do',
+            'if playlistLibraryFilter == "all" or playlistLibraryFilter == kind then',
+            "panelUi.appendExplicitGrid(children, items, playlistLibraryVisible, PLAYLIST_LIBRARY_COLUMNS",
+            "panelUi.libraryThumbnail(",
+            "compactPaletteSwatch(bundle, pairingId)",
+            'local pairingId = if customized then tostring(existing.id or "") else ""',
+            'dragType = "wio-library-item"',
+            "payload = dragToken",
+            "previewAncestor = 2",
+            "openLibraryEntryPairing(entry, metadata)",
+        ),
+        "unified visual pairing library",
+    )
+    assert "playlistPairingDrawer" not in panel
+    assert "playlistPairingDrawers" not in panel
 
 
 def test_renderer_crash_backoff_contract() -> None:
@@ -1833,9 +1948,12 @@ def test_coordinator_apply_serialization_contract() -> None:
         schedule_gate,
         (
             "local scheduledStarts = {}",
-            "if clockSignature ~= scheduleClockSignature and not scheduledBatchActive then",
+            "local minuteChanged = clockSignature ~= scheduleClockSignature",
+            "if (minuteChanged or next(scheduleReevaluationPending) ~= nil) and not scheduledBatchActive then",
             "scheduleClockSignature = clockSignature",
+            "if minuteChanged or scheduleReevaluationPending[output] == true then",
             "table.sort(scheduledOutputs)",
+            "scheduleReevaluationPending[output] = nil",
             "wallInOne.reevaluateOutputSchedule(output, false, true)",
             "table.insert(scheduledStarts, { output = output, playlist_id = playlistId })",
         ),
@@ -4780,9 +4898,7 @@ def test_ui_and_documentation_surface() -> None:
             'kind = "playlist_options"',
             'kind = "output_options"',
             'kind = "playlist_add_entry"',
-            'kind = "playlist_save_entry"',
             'kind = "playlist_remove_entry"',
-            'kind = "playlist_move_entry"',
             'kind = "playlist_apply_entry"',
             'kind = "playlist_action"',
             'kind = "schedule_save"',
@@ -4922,7 +5038,8 @@ def test_declarative_ui_layout_contract() -> None:
     assert 'variant = "danger"' not in panel, "Noctalia v5 calls the destructive button variant 'destructive'"
     assert "current.daemons" not in panel
     assert 'noctalia.tr("diagnostics.daemons"' not in panel
-    assert panel.count('variant = if pairingDeleteArmed then "destructive" else "ghost"') == 1
+    assert 'variant = if pairingDeleteArmed then "destructive" else "ghost"' not in panel
+    assert 'variant = if pairingResetArmed then "primary" else "ghost"' in panel
     assert panel.count('variant = if managedDeleteArmed then "destructive" else "ghost"') == 1
 
     box_calls = re.findall(r"ui\.box\(\{(.*?)\}\)", panel, flags=re.DOTALL)
@@ -4948,8 +5065,8 @@ def test_declarative_ui_layout_contract() -> None:
         ),
         "bounded explicit browser grids and split schedule controls",
     )
-    assert panel.count("panelUi.appendExplicitGrid(") == 4, (
-        "the grid helper must serve Wallhaven, MotionBGS, and all three local libraries"
+    assert panel.count("panelUi.appendExplicitGrid(") == 6, (
+        "the grid helper must serve providers, local libraries, the pairing library, and display playlists"
     )
 
     explicit_grid = panel[
@@ -5071,15 +5188,15 @@ def test_display_navigation_and_drag_contract() -> None:
     require_all(
         display_page,
         (
-            'key = "screen-default-playlist-" .. output',
-            'send({ kind = "playlist_assign", output = output, playlist_id = id })',
-            "table.insert(children, schedulesSection(output, playlistId))",
+            "panelUi.displayPlaylistLibrary(output)",
+            "schedulesSection(output, playlistId)",
         ),
-        "combined display playlist and schedule page",
+        "combined visual display playlist and priority page",
     )
-    assert display_page.index('key = "screen-default-playlist-" .. output') < display_page.index(
-        "table.insert(children, schedulesSection(output, playlistId))"
-    ), "the pinned default playlist must precede every scheduled override"
+    assert display_page.index("panelUi.displayPlaylistLibrary(output)") < display_page.index(
+        "schedulesSection(output, playlistId)"
+    )
+    assert 'key = "screen-default-playlist-" .. output' not in display_page
     active_sections = panel[
         panel.index("function panelPages.activePageSections()") : panel.index("render = function()")
     ]
@@ -5107,18 +5224,28 @@ def test_display_navigation_and_drag_contract() -> None:
     require_all(
         token_reconciliation,
         (
+            "local nextPlaylistByToken = {}",
+            "local nextPlaylistTokenById = {}",
+            "playlist.quick_choice ~= true",
+            'nextDragToken("r")',
+            "nextPlaylistByToken[token] = id",
+            "nextPlaylistTokenById[id] = token",
             'local namespace = "@schedule:" .. output',
             'nextDragToken("s")',
             'nextDragToken("q")',
             "schedule_output = output",
             "schedule_id = scheduleId",
+            'targetTokens["@default"] = defaultToken',
+            'display_role = "default"',
+            "dragPlaylistByToken = nextPlaylistByToken",
+            "dragPlaylistTokenById = nextPlaylistTokenById",
         ),
-        "opaque schedule drag tokens",
+        "opaque playlist and schedule drag tokens",
     )
 
     schedule_drop = panel[
         panel.index("function onScheduleDrop(payload, value)") : panel.index(
-            "local function pairingThemeText"
+            "function onDisplayPlaylistDrop(payload, value)"
         )
     ]
     require_all(
@@ -5131,6 +5258,27 @@ def test_display_navigation_and_drag_contract() -> None:
             'placement = tostring(target.schedule_placement or "end")',
         ),
         "schedule drop command",
+    )
+    display_drop = panel[
+        panel.index("function onDisplayPlaylistDrop(payload, value)") : panel.index(
+            "local function adaptivePreviewSession"
+        )
+    ]
+    require_all(
+        display_drop,
+        (
+            "local playlistId = dragPlaylistByToken[payloadToken]",
+            "if playlistId == nil then",
+            "onScheduleDrop(payload, value)",
+            'if target.display_role == "default" and target.display_output == selectedScreen then',
+            'send({ kind = "playlist_assign", output = selectedScreen, playlist_id = playlistId })',
+            'if tostring(target.schedule_output or "") ~= selectedScreen then',
+            "resetScheduleDraft(playlistId)",
+            'scheduleNameDraft = tostring(playlistMap()[playlistId].name or playlistId)',
+            'scheduleInsertBeforeDraft = tostring(target.schedule_before_id or "")',
+            "scheduleEditorOpen = true",
+        ),
+        "display playlist drop assigns row one or opens a positioned schedule editor",
     )
     service = text("service.luau")
     schedule_placement = service[
@@ -5146,51 +5294,141 @@ def test_display_navigation_and_drag_contract() -> None:
             'if sourceIndex == nil or (placement ~= "end" and anchorIndex == nil) then',
             'if placement == "end" then',
             "table.insert(schedules, moving)",
-            'return wallInOne.saveConfig(nextConfig, "schedule-place")',
+            'if not wallInOne.saveConfig(nextConfig, "schedule-place") then',
+            "scheduleReevaluationPending[output] = true",
         ),
-        "schedule end-zone append semantics",
+        "schedule end-zone append and post-save reevaluation semantics",
     )
+    first_place_save = schedule_placement.index('if not wallInOne.saveConfig(nextConfig, "schedule-place") then')
+    first_place_pending = schedule_placement.index("scheduleReevaluationPending[output] = true")
+    second_place_save = schedule_placement.index(
+        'if not wallInOne.saveConfig(nextConfig, "schedule-place") then', first_place_save + 1
+    )
+    second_place_pending = schedule_placement.index(
+        "scheduleReevaluationPending[output] = true", first_place_pending + 1
+    )
+    assert first_place_save < first_place_pending < second_place_save < second_place_pending
+    assert "return false" in schedule_placement[first_place_save:first_place_pending]
+    assert "return false" in schedule_placement[second_place_save:second_place_pending]
+    schedule_upsert = service[
+        service.index("function wallInOne.upsertSchedule") : service.index(
+            "function wallInOne.deleteSchedule"
+        )
+    ]
+    require_all(
+        schedule_upsert,
+        (
+            "function wallInOne.upsertSchedule(output, rawSchedule, beforeId)",
+            'local requestedAnchor = tostring(beforeId or "")',
+            'if tostring(schedule.id or "") == requestedAnchor then',
+            "anchor = index",
+            "table.insert(outputConfig.schedules, normalized)",
+            "table.insert(outputConfig.schedules, anchor, normalized)",
+            'if not wallInOne.saveConfig(nextConfig, "schedule-save") then',
+            "scheduleReevaluationPending[output] = true",
+        ),
+        "new scheduled playlist insertion and post-save reevaluation",
+    )
+    upsert_save = schedule_upsert.index('if not wallInOne.saveConfig(nextConfig, "schedule-save") then')
+    upsert_pending = schedule_upsert.index("scheduleReevaluationPending[output] = true")
+    assert upsert_save < upsert_pending
+    assert "return false" in schedule_upsert[upsert_save:upsert_pending]
+    schedule_delete = service[
+        service.index("function wallInOne.deleteSchedule") : service.index(
+            "function wallInOne.placeSchedule"
+        )
+    ]
+    delete_save = schedule_delete.index('local saved = wallInOne.saveConfig(nextConfig, "schedule-delete")')
+    delete_guard = schedule_delete.index("if not saved then", delete_save)
+    delete_pending = schedule_delete.index("scheduleReevaluationPending[output] = true", delete_guard)
+    assert delete_save < delete_guard < delete_pending
+    assert "return false" in schedule_delete[delete_guard:delete_pending]
+    commands = service[
+        service.index("function wallInOne.handleCommand") : service.index("function update()")
+    ]
+    assert "wallInOne.upsertSchedule(request.output, request.schedule, request.before_id)" in commands
+    assert 'kind == "pairing_delete"' not in commands
     schedule_ui = panel[
-        panel.index("local function scheduleInsertionZone") : panel.index("local function playlistsSection")
+        panel.index("local function scheduleInsertionZone") : panel.index(
+            "function panelUi.displayPlaylistLibrary"
+        )
     ]
     require_all(
         schedule_ui,
         (
-            'accepts = { "wio-schedule" }',
-            'onDrop = "onScheduleDrop"',
+            'accepts = { "wio-playlist", "wio-schedule" }',
+            'onDrop = "onDisplayPlaylistDrop"',
+            "function panelUi.defaultPlaylistDropZone(output)",
+            'accepts = { "wio-playlist" }',
+            'key = "display-default-row-" .. output .. "-" .. fallbackId',
+            'text = "1. " .. fallbackName',
             'dragType = "wio-schedule"',
             "payload = dragToken",
+            'text = tostring(scheduleIndex + 1) .. ". " .. scheduledPlaylistName',
             "table.insert(children, scheduleInsertionZone(output, scheduleId))",
             'table.insert(children, scheduleInsertionZone(output, ""))',
+            "local scheduleEditorPositioned = false",
+            'if scheduleEditorOpen and editingScheduleId == "" and scheduleInsertBeforeDraft == scheduleId then',
+            "scheduleEditorPositioned = true",
+            "if not scheduleEditorPositioned then",
         ),
-        "schedule drag-and-drop rows",
+        "fixed default row, positioned schedule editor, and playlist-aware priority rows",
+    )
+    assert schedule_ui.index('text = "1. " .. fallbackName') < schedule_ui.index(
+        "for index, schedule in ipairs(schedules) do"
     )
     assert "panel.schedules.move_up" not in schedule_ui
     assert "panel.schedules.move_down" not in schedule_ui
 
-    library_drawer = panel[
-        panel.index("local function playlistPairingDrawer") : panel.index(
-            "local function playlistPairingDrawers"
+    display_library = panel[
+        panel.index("function panelUi.displayPlaylistLibrary") : panel.index(
+            "local function playlistsSection"
         )
     ]
     require_all(
-        library_drawer,
+        display_library,
         (
-            "local items = panelUi.libraryItems(kind)",
-            "local customized = type(existing) == \"table\" and existing.customized == true",
-            "local bundle = panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)",
-            "local signature = panelUi.libraryDragSignature(entry)",
-            'dragToken = nextDragToken("l")',
-            "dragPairingByToken[dragToken] = {",
-            "library_bundle = bundle",
-            "panelUi.libraryPreviewPath(entry, metadata, bundle, output)",
-            "panelUi.libraryPaletteSummary(bundle, not customized)",
-            'dragType = "wio-library-item"',
+            "function panelUi.displayPlaylistLibrary(output)",
+            "local ids = sortedPlaylistIds(false)",
+            "panelUi.appendExplicitGrid(children, ids, displayPlaylistVisible, 2",
+            "previewPath = panelUi.playlistEntryVisualState(first, output)",
+            "panelUi.compactPaletteSwatch(first, tostring(first.pairing_id or \"\"))",
+            "local dragToken = dragPlaylistTokenById[playlistId]",
+            'dragType = "wio-playlist"',
             "payload = dragToken",
+            "previewAncestor = 2",
+            'send({ kind = "playlist_assign", output = output, playlist_id = playlistId })',
+            "resetScheduleDraft(playlistId)",
+            "scheduleEditorOpen = true",
         ),
-        "library-backed playlist drawers",
+        "visual draggable playlist library for a display",
     )
-    assert "sortedPairingIds(kind)" not in library_drawer
+
+    playlist_rendering = panel[
+        panel.index("local function playlistsSection") : panel.index(
+            "local function diagnosticsSection"
+        )
+    ]
+    require_all(
+        playlist_rendering,
+        (
+            "panelUi.playlistPairingLibrary(playlistId, output)",
+            "local previewPath, sourceAvailable = panelUi.playlistEntryVisualState(entry, output)",
+            "playlistEntryPreview(kind, previewPath, active)",
+            "panelUi.compactPaletteSwatch(entry, tostring(entry.pairing_id or \"\"))",
+            'noctalia.tr("panel.playlists.entry.missing_source")',
+            'dragType = "wio-entry"',
+            'kind = "playlist_remove_entry"',
+        ),
+        "read-only visual playlist rows with missing-source state",
+    )
+    assert "entryEditor(" not in playlist_rendering
+    assert "editEntryDraft(" not in playlist_rendering
+    assert 'noctalia.tr("panel.playlists.entry_edit")' not in playlist_rendering
+    assert 'noctalia.tr("panel.playlists.entry_move_up")' not in playlist_rendering
+    assert 'noctalia.tr("panel.playlists.entry_move_down")' not in playlist_rendering
+    assert 'kind = "playlist_move_entry"' not in playlist_rendering
+
     playlist_zone = panel[
         panel.index("local function playlistInsertionZone") : panel.index(
             "local function scheduleSelectionSummary"

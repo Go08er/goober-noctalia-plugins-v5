@@ -34,7 +34,7 @@ All notable staging changes will be recorded here.
 ## Unreleased — Wall-in-One 0.6.0
 
 - Replace the attached all-in-one scroll with a full-size floating routed panel:
-  Home; Displays with per-output Overview/Engines/Schedule; Library with
+  Home with one inset route per display; Library with
   Images/Videos/Wallpaper Engine; Shops with
   Wallhaven/MotionBGS/Steam Workshop; per-playlist routes; and Diagnostics.
 - Render local libraries and both provider stores as four-column still-led
@@ -44,6 +44,13 @@ All notable staging changes will be recorded here.
 - Present image, video, and Workshop inventory as still-led pairing cards with
   selected/automatic representative behavior and an adaptive wallpaper palette
   by default.
+- Make indexed media identity authoritative: each file or Workshop scene is an
+  implicit pairing, its source is read-only in the item editor, orphan profiles
+  cannot reappear as fake Library cards, and public pairing deletion is removed.
+- Replace stacked playlist drawers and display selectors with visual draggable
+  libraries. Playlist pages accept pairing cards into one reorderable entry
+  list; display pages accept playlist cards into a fixed row-1 default followed
+  by ordered scheduled overrides, where the lowest matching row wins.
 - Make Wall-in-One the direct owner of all dynamic playback through `mpvpaper`
   and `linux-wallpaperengine`. Retire plugin discovery, renderer handoff modes,
   provider control relays, the configurable provider-panel slot, and renderer

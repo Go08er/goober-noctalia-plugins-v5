@@ -22,8 +22,9 @@ uses one normal full-size floating panel and local route state instead. Only the
 selected route is rendered:
 
 - **Home** shows setup and readiness, with each detected display nested beneath
-  it. Selecting a display opens one combined page for its pinned default
-  playlist, draggable scheduled overrides, playback policy, and engine settings.
+  it. Selecting a display opens one combined page with a visual playlist
+  library, one ordered default-plus-schedule priority list, playback policy,
+  and engine settings.
 - **Library** → **Images**, **Videos**, **Wallpaper Engine**.
 - **Shops** → **Wallhaven**, **MotionBGS**, **Steam Workshop**.
 - **Playlists** → each named playlist.
@@ -58,12 +59,14 @@ The main workflows are:
    rotate/shuffle and interval policy, a pinned default playlist, ordered
    calendar overrides, and its owned mpvpaper and `linux-wallpaperengine`
    settings. Editing one display does not rewrite another.
-4. Add or drag library items directly into named playlists. Optional item
-   customization is reused wherever that item appears; each playlist occurrence
-   keeps a stable ID and validated snapshot.
-5. Drag scheduled overrides beneath the pinned default row. Month, weekday, and
-   local-time rules are evaluated in visible order, with the lowest matching
-   override taking priority. Playback state and schedules persist per display.
+4. Add or drag cards from the playlist's visual pairing library into its
+   ordered list, then drag existing rows to reorder them. A media file or scene
+   is the pairing: its still and palette are edited only on its Library card.
+   Duplicate or remove the source itself to add or remove library identities.
+5. On a display page, drag a playlist onto row 1 to make it the unscheduled
+   default, or between later rows to configure a scheduled override. Month,
+   weekday, and local-time rules are evaluated in visible order, with the
+   lowest matching override taking priority.
 
 Direct **Apply** creates or replaces that display's one-entry **Quick Choice**
 playlist, so manual and scheduled changes share the same executor and safety
@@ -255,14 +258,16 @@ separate scheduled services communicating through bounded versioned state.
 
 `config.json` schema 5 stores item profiles, playlist snapshots, per-display
 engine settings, fallback assignments, and ordered schedules. Its internal
-`pairings` map is plumbing rather than a required user-created catalog: library
-items synthesize defaults, while a saved override records `customized = true`.
+`pairings` map is plumbing rather than a required user-created catalog: the
+authoritative library index supplies one implicit identity for each media file
+or Workshop scene, while a saved override records `customized = true`.
 Reset rewrites that stable profile with the item's derived defaults,
 `customized = false`, and synchronizes linked playlist snapshots. A playlist
 add after defaults change reuses the same medium/source profile, refreshes all
-linked snapshots, and collapses any older duplicate default records. A playlist
-occurrence retains its own stable entry ID and last validated bundle if its
-profile is actually removed.
+linked snapshots, and does not allocate a second same-source profile. An
+unindexed source no longer appears as a fake Library card; an existing playlist
+occurrence retains its stable ID and last validated snapshot so it can be
+removed deliberately or become usable again if the source returns.
 
 `runtime.json` schema 6 stores capture provenance, independent run state,
 palette diagnostics, and exact owned Workshop state. Older action values are

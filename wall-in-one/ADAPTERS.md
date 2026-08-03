@@ -15,9 +15,10 @@ not a collection of simultaneously rendered sections:
 
 - **Home** — readiness, setup, and concise status, followed by one inset route
   per detected display;
-- each display route — one combined page containing renderer controls,
-  rotate/shuffle and interval policy, a pinned default playlist, draggable
-  scheduled overrides, and per-display video/Workshop engine settings;
+- each display route — one combined page containing a visual playlist library,
+  renderer controls, rotate/shuffle and interval policy, one ordered
+  default-plus-schedule priority list, and per-display video/Workshop engine
+  settings;
 - **Library** → **Images**, **Videos**, **Wallpaper Engine**;
 - **Shops** → **Wallhaven**, **MotionBGS**, **Steam Workshop**;
 - **Playlists** → each named playlist; and
@@ -60,18 +61,23 @@ validated default bundle. Saving a customization creates or updates the stable
 profile with `customized = true`; records predating explicit provenance are
 normalized as customized to preserve their old behavior. Reset writes the same
 profile ID with freshly derived defaults and `customized = false`, then
-synchronizes every linked occurrence. Non-custom profiles are keyed by the
-static path or dynamic medium/source identity, so changing defaults updates one
-record instead of accumulating hidden duplicates.
+synchronizes every linked occurrence. All profiles are keyed by the static path
+or dynamic medium/source identity, so customization and default changes update
+one record instead of accumulating hidden duplicates. The source is display-only
+in the editor: filesystem and Steam inventory own library identity.
 
 A playlist occurrence has its own stable entry ID, a validated bundle snapshot,
 and an optional `pairing_id` link. Linked edits and resets refresh those
-snapshots. Actual record deletion is a separate internal operation: it clears
-the links but deliberately leaves each last valid snapshot and media intact.
+snapshots. There is no public pairing-delete command. If a source disappears
+from the authoritative index, the panel stops presenting an orphan Library card
+while existing playlist snapshots remain visible as missing until removed or
+restored.
 
 Each display stores a pinned default playlist, ordered schedule rules, optional
-playlist playback overrides, and its own engine configuration. Scheduled rows
-are draggable; when multiple enabled rules match, the lowest visible row wins.
+playlist playback overrides, and its own engine configuration. Playlist cards
+can be dragged onto the fixed first row or into the scheduled suffix; scheduled
+rows are draggable, and when multiple enabled rules match, the lowest visible
+row wins.
 All of these controls share the display's combined page beneath **Home**.
 Schema 1–4 outputs receive the documented schema-5 engine defaults during
 migration; afterward the settings live only with that display. This avoids

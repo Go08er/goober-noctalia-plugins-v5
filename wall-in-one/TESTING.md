@@ -185,27 +185,29 @@ fail before changing playback.
 
 Apply and add one default item of each kind without an up-front create step.
 Customize one item of each kind and assert its schema-5 `pairings` plumbing
-records `customized = true`; linked occurrences in two playlists must retain
-stable entry IDs and receive the edited validated snapshot. Reset the item and
+records `customized = true`; the source identity must remain read-only, and
+linked occurrences in two playlists must retain stable entry IDs and receive
+the edited validated snapshot. Reset the item and
 assert the same profile ID is rewritten with derived defaults and
 `customized = false`, with linked snapshots synchronized. Then exercise
 the same default medium/source with a different palette and assert the original
-non-custom profile is reused, every linked snapshot is refreshed, and duplicate
-default records are collapsed. Separately exercise
-internal record deletion and verify occurrences lose their `pairing_id` links
-but retain their last valid snapshots and media. Drag/drop and explicit buttons
-must produce identical bounded commands; drag payloads never carry trusted paths
-or deletion authority.
+profile is reused, every linked snapshot is refreshed, and duplicate records
+are not created. Remove a source from the indexed library and verify that it no
+longer produces an orphan Library card; an existing playlist snapshot remains
+visibly marked missing until the source is restored or that occurrence is
+removed. Drag/drop and explicit buttons must produce identical bounded
+commands; drag payloads never carry trusted paths or deletion authority.
 
 Test named playlist create/rename/duplicate/delete, stable-ID reorder, rotate,
 shuffle bag, start/pause/resume/stop/next/previous/random, Quick Choice, and
 one-entry parking. Assign one playlist to two displays and verify independent
 cursor, history, due time, engine settings, and manual pin.
 
-The pinned default playlist must remain above draggable scheduled overrides.
-Schedule rules use visible order, month/weekday sets, all-day or bounded time,
-and overnight prior-date semantics; the lowest matching row wins. Test reorder,
-DST/time changes, resume schedule, and no burst replay of missed swaps.
+The display's visual playlist library must support dropping onto the fixed row-1
+default and between scheduled rows. Schedule rules use visible order,
+month/weekday sets, all-day or bounded time, and overnight prior-date semantics;
+the lowest matching row wins. Test insertion, reorder, DST/time changes, resume
+schedule, and no burst replay of missed swaps.
 
 Palette previews use a real validated still, exact non-applying Noctalia theme
 CLI, SHA-256-aware bounded caching, stale callback rejection, and one global
