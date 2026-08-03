@@ -139,6 +139,8 @@ local communityPalettes = {}
 local customPalettes = {}
 local communityInFlight = false
 local ready = false
+local imageRoot = ""
+local configurationError = ""
 local cacheLoaded = false
 local cacheSource = "none"
 local cacheFetchedAt = 0
@@ -204,6 +206,26 @@ local function validAbsolutePath(value)
         and value:find("/../", 1, true) == nil
         and value:match("/%.$") == nil
         and value:match("/%.%.$") == nil
+end
+
+local function configuredImageRoot()
+    local configured = noctalia.getConfig("capture_directory")
+    if type(configured) ~= "string" or configured:find("%S") == nil then
+        return nil, "Select an existing wallpaper image directory first"
+    end
+    local expanded = noctalia.expandPath(configured)
+    if type(expanded) ~= "string" then
+        return nil, "The selected wallpaper image directory is not a safe absolute path"
+    end
+    expanded = expanded:gsub("/+$", "")
+    if expanded == "" or expanded == "/" or not validAbsolutePath(expanded) then
+        return nil, "The selected wallpaper image directory is not a safe absolute path"
+    end
+    local info = noctalia.fileInfo(expanded)
+    if type(info) ~= "table" or info.isDir ~= true then
+        return nil, "The selected wallpaper image directory does not exist"
+    end
+    return expanded, nil
 end
 
 local function shellQuote(value)
@@ -747,6 +769,8 @@ local function statusSignature()
     return table.concat({
         INSTANCE_ID,
         tostring(ready),
+        imageRoot,
+        configurationError,
         tostring(communityInFlight),
         combinedError(),
         lastErrorAt,
@@ -780,6 +804,9 @@ local function statusSnapshot()
         instance_id = INSTANCE_ID,
         revision = statusRevision,
         ready = ready,
+        available = ready,
+        image_root = imageRoot,
+        configuration_error = configurationError,
         refreshing = communityInFlight,
         degraded = errorMessage ~= "",
         error = errorMessage,
@@ -810,15 +837,15 @@ local function statusSnapshot()
             ttl_seconds = COMMUNITY_TTL_SECONDS,
         },
         counts = {
-            wallpaper = #PINNED_WALLPAPER,
-            builtin = #PINNED_BUILTIN,
+            wallpaper = if ready then #PINNED_WALLPAPER else 0,
+            builtin = if ready then #PINNED_BUILTIN else 0,
             community = #communityPalettes,
             custom = #customPalettes,
             invalid_custom = customInvalidCount,
         },
         palettes = {
-            wallpaper = PINNED_WALLPAPER,
-            builtin = PINNED_BUILTIN,
+            wallpaper = if ready then PINNED_WALLPAPER else {},
+            builtin = if ready then PINNED_BUILTIN else {},
             community = communityPalettes,
             custom = customPalettes,
         },
@@ -1569,6 +1596,65 @@ local function refreshCommunity(force, reason)
     return true
 end
 
+local function clearInventoryState()
+    communityPalettes = {}
+    customPalettes = {}
+    cacheLoaded = false
+    cacheSource = "none"
+    cacheFetchedAt = 0
+    cacheFetchedAtText = ""
+    customDirectory = ""
+    customInvalidCount = 0
+    communityError = ""
+    customError = ""
+    cacheError = ""
+    commandError = ""
+    lastErrorAt = ""
+    lastRefreshAt = ""
+    lastCommunitySuccessAt = ""
+    lastCustomRefreshAt = ""
+    pendingPreviewRequest = nil
+    previewCache = {}
+    previewCacheOrder = {}
+    previewStatus = {
+        state = "idle",
+        key = "",
+        path = "",
+        scheme = "",
+        fingerprint = "",
+        preview = nil,
+        error = "",
+    }
+end
+
+local function deactivateForMissingImageRoot(reason)
+    communityGeneration += 1
+    nextPreviewGeneration()
+    cleanupCommunityTransport(activeCommunityOperation, false)
+    cleanupPreviewOperation(activePreviewOperation)
+    activeCommunityOperation = nil
+    activePreviewOperation = nil
+    communityInFlight = false
+    ready = false
+    imageRoot = ""
+    configurationError = bounded(reason or "Select an existing wallpaper image directory first", MAX_ERROR_BYTES)
+    clearInventoryState()
+    lastEvent = "waiting-for-image-directory"
+end
+
+local function initializeForImageRoot(root)
+    -- Reaching plugin-owned cache or Noctalia's custom palette directory is
+    -- permitted only after the user-selected image root has been validated.
+    imageRoot = root
+    configurationError = ""
+    clearInventoryState()
+    sweepOwnedPreviewFiles()
+    loadCommunityCache()
+    refreshCustomPalettes()
+    ready = true
+    lastEvent = "image-directory-ready"
+end
+
 local function commandNonce(command)
     local nonce = type(command) == "table" and tonumber(command.nonce) or nil
     if nonce == nil or nonce % 1 ~= 0 or nonce <= 0 or nonce > MAX_NONCE then
@@ -1597,6 +1683,22 @@ local function handleCommand(command)
         return true
     end
 
+    if ready then
+        local currentRoot, rootError = configuredImageRoot()
+        if currentRoot == nil or currentRoot ~= imageRoot then
+            deactivateForMissingImageRoot(rootError or "Wallpaper image directory changed")
+        end
+    end
+    if not ready then
+        commandError = if configurationError ~= ""
+            then configurationError
+            else "Select an existing wallpaper image directory first"
+        lastErrorAt = nowText()
+        lastEvent = "command-unavailable"
+        publishStatus(false)
+        return true
+    end
+
     if action == "refresh" then
         refreshCustomPalettes()
         refreshCommunity(command.force == true, "refresh-started")
@@ -1608,8 +1710,25 @@ local function handleCommand(command)
 end
 
 function onConfigChanged()
-    -- Environment/config changes can move the custom palette directory. They
-    -- never create a second network operation or bypass the community TTL.
+    local configuredRoot, rootError = configuredImageRoot()
+    if configuredRoot == nil then
+        deactivateForMissingImageRoot(rootError)
+        publishStatus(false)
+        return
+    end
+    if not ready or configuredRoot ~= imageRoot then
+        if ready then
+            deactivateForMissingImageRoot("Wallpaper image directory changed")
+        end
+        initializeForImageRoot(configuredRoot)
+        -- A newly authorized root gets one normal TTL-gated catalog refresh.
+        refreshCommunity(false, "image-directory-ready")
+        publishStatus(false)
+        return
+    end
+
+    -- Unrelated config changes preserve the previous service behavior: custom
+    -- palette inventory is rescanned without bypassing the community TTL.
     refreshCustomPalettes()
     lastEvent = "custom-refreshed"
     publishStatus(false)
@@ -1627,6 +1746,8 @@ function onExit(_signal, _reason)
     previewCacheOrder = {}
     communityInFlight = false
     ready = false
+    imageRoot = ""
+    configurationError = ""
     lastEvent = "stopped"
     previewStatus = {
         state = "idle",
@@ -1647,6 +1768,9 @@ function onExit(_signal, _reason)
         instance_id = INSTANCE_ID,
         revision = statusRevision,
         ready = false,
+        available = false,
+        image_root = "",
+        configuration_error = "",
         refreshing = false,
         degraded = false,
         error = "",
@@ -1698,11 +1822,15 @@ if type(previousStatus) == "table" and tonumber(previousStatus.protocol) == PROT
         lastCommandNonce = math.floor(previousNonce)
     end
 end
+local startupImageRoot, startupImageRootError = configuredImageRoot()
 noctalia.state.set(STATUS_KEY, {
     protocol = PROTOCOL,
     instance_id = INSTANCE_ID,
     revision = 0,
     ready = false,
+    available = false,
+    image_root = "",
+    configuration_error = tostring(startupImageRootError or ""),
     last_nonce = lastCommandNonce,
     preview = {
         state = "idle",
@@ -1715,17 +1843,19 @@ noctalia.state.set(STATUS_KEY, {
     },
 })
 
-sweepOwnedPreviewFiles()
-loadCommunityCache()
-refreshCustomPalettes()
-ready = true
 noctalia.state.watch(COMMAND_KEY, handleCommand)
+
+if startupImageRoot ~= nil then
+    initializeForImageRoot(startupImageRoot)
+else
+    deactivateForMissingImageRoot(startupImageRootError)
+end
 
 -- Watches do not replay a command that landed during service replacement.
 -- Consume it once if its nonce is newer; otherwise perform one TTL-gated
 -- startup refresh. There is intentionally no periodic network poller.
 local consumedCurrentCommand = handleCommand(noctalia.state.get(COMMAND_KEY))
-if not consumedCurrentCommand then
+if ready and not consumedCurrentCommand then
     refreshCommunity(false, "startup-refresh")
 end
 publishStatus(false)

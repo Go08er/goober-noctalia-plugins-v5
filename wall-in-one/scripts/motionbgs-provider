@@ -10,7 +10,7 @@ set -uo pipefail
 
 readonly protocol='WIO-MBG1'
 readonly origin='https://motionbgs.com'
-readonly user_agent='Wall-in-One/0.5 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
+readonly user_agent='Wall-in-One/0.6 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
 readonly html_limit=$((1024 * 1024))
 readonly html_timeout=20
 readonly max_redirects=3

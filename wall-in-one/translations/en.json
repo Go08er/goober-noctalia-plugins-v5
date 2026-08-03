@@ -6,9 +6,6 @@
     "audio_unmute": "Unmute active wallpaper audio",
     "audio_volume_down": "Lower active wallpaper volume",
     "audio_volume_up": "Raise active wallpaper volume",
-    "backend_activate": "Activate {provider} backend",
-    "backend_force_off": "Force {provider} off",
-    "backend_hotswap": "Switch active wallpaper backend",
     "capture_backing": "Export current Noctalia backing",
     "capture_current": "Export W Engine still",
     "capture_pair": "Export + pair W Engine still",
@@ -25,16 +22,9 @@
     "cycle_start": "Start playlist",
     "cycle_stop": "Stop playlist",
     "configured_unavailable": "{action} — configured but unavailable",
-    "extra_provider_open": "Open custom provider",
     "hub_open": "Open Wall-in-One",
     "manual_pair": "Pair selected still",
     "managed_delete": "Delete managed wallpaper",
-    "mpvpaper_clear": "Clear this output",
-    "mpvpaper_clear_all": "Clear all outputs",
-    "mpvpaper_open": "Open mpvpaper",
-    "mpvpaper_pause": "Pause mpvpaper",
-    "mpvpaper_resume": "Resume mpvpaper",
-    "mpvpaper_toggle": "Toggle mpvpaper",
     "motionbgs_open": "Browse MotionBGS",
     "native_next": "Next static",
     "native_open": "Open Noctalia wallpapers",
@@ -51,22 +41,14 @@
     "video_capture": "Export configured video still",
     "video_capture_pair": "Export + pair configured video",
     "video_apply_pair": "Play + pair configured video",
-    "w_engine_cycle_stop": "Stop W Engine rotation",
-    "w_engine_next": "Next W Engine wallpaper",
-    "w_engine_open": "Open W Engine",
-    "w_engine_stop": "Stop W Engine wallpaper",
     "workshop_apply_pair": "Play + pair Workshop item",
-    "wallhaven_open": "Open Wallhaven plugin",
     "wallhaven_site": "Open wallhaven.cc"
   },
   "availability": {
     "backing": "No focused output or Noctalia command client is available for reading the current backing wallpaper.",
-    "current_scene": "No Workshop ID is active in Wall-in-One's renderer, supplied by the W Engine adapter, or configured as a fallback.",
+    "current_scene": "No Workshop ID is active in Wall-in-One's renderer or configured as a fallback.",
     "cycle": "This output's assigned playlist has no entries.",
-    "extra": "The custom provider panel is not configured or its plugin is disabled.",
     "manual_pair": "Choose a readable static image to pair first.",
-    "mpvpaper": "The official mpvpaper plugin is not enabled.",
-    "mpvpaper_ipc": "The official mpvpaper service or Noctalia command client is unavailable.",
     "motionbgs": "No desktop browser opener is available.",
     "native_cli": "Noctalia's command client is unavailable.",
     "output": "No focused output is available for this command.",
@@ -76,31 +58,8 @@
     "unknown": "The configured action is unknown.",
     "video": "Choose a readable video source. Video and animated-image extraction also requires the optional ffmpeg command.",
     "video_apply": "Internal mpvpaper playback is unavailable, conflicted, or no readable video is selected.",
-    "w_engine": "The W Engine plugin is not enabled.",
-    "w_engine_forced_off": "W Engine integration is force-disabled in Wall-in-One settings.",
-    "w_engine_ipc": "The W Engine plugin or Noctalia command client is unavailable.",
-    "wallhaven": "The official Wallhaven plugin is not enabled.",
     "wallhaven_site": "No desktop URL opener is available for wallhaven.cc.",
     "workshop_apply": "Internal Wallpaper Engine playback is unavailable, conflicted, or no Workshop ID is selected."
-  },
-  "capture": {
-    "backing_behavior": "Exports the public wallpaper path currently reported by Noctalia for this output. When W Engine color sync is enabled, this is the representative preview or video frame W Engine already paired; Wall-in-One validates and copies it without reading W Engine's private cache schema.",
-    "directory": "Image directory: {path}",
-    "in_progress": "Still export in progress: {path}",
-    "last": "Last export: {provider} at {time}\n{path}",
-    "manual_behavior": "Manual pairing validates the selected image and applies it immediately as a standalone static backing; it does not rewrite a playlist entry. To bind a still to video or a Workshop scene, choose Selected still in that entry's editor. Ordinary images keep their durable original path; animated GIFs are decoded to a persistent static PNG, and AVIF validation requires optional ffmpeg.",
-    "manual_source": "Selected static backing: {path}",
-    "none": "No still has been exported yet.",
-    "video_requirement": "Configured-video export is deterministic and uses the optional ffmpeg command at the selected frame time. Without ffmpeg, only video and animated-image extraction is unavailable; static pairing and provider controls still work.",
-    "video_source": "Configured video: {path}\nFrame time: {second}s",
-    "w_engine_adapter_boundary": "The cooperative W Engine adapter reports the active Workshop ID and owns rendered capture. After successful provider discovery, Wall-in-One sends wall-in-one-probe-v1; the adapter must re-send capabilities and current output state, or stale adapter flags clear after 10 seconds. Each capture request names a unique PNG under Wall-in-One's pluginDataDir()/staging directory, and the adapter must return exactly that requested path. Optional ffmpeg performs decode validation; without it Wall-in-One uses the Workshop source/preview fallback. Wall-in-One never reaches into provider-private state or signals the live renderer directly.",
-    "w_engine_adapter_capture": "W Engine adapter reports Workshop {id} on {output}; rendered capture is available when optional ffmpeg can decode-validate its PNG, otherwise export uses the source/preview fallback.",
-    "w_engine_adapter_status": "W Engine adapter reports Workshop {id} on {output}; capture is not advertised, so export uses the safe source/preview fallback.",
-    "w_engine_configured": "Configured Workshop fallback: {id}",
-    "w_engine_fallback_boundary": "Without a cooperative capture adapter, Wall-in-One does not claim to capture the live frame. It exports a real frame from Workshop video projects or copies the Workshop preview for scene/web projects.",
-    "w_engine_internal_boundary": "Internal capture sequentially replaces only Wall-in-One's exact owned Wallpaper Engine child, asks linux-wallpaperengine for its rendered FBO, validates the private staging PNG, and installs it atomically. No foreign renderer is inspected or signalled.",
-    "w_engine_internal_capture": "Wall-in-One owns Workshop {id} on {output}; native rendered still capture is available.",
-    "w_engine_unavailable": "No internally active, adapter-reported, or configured numeric Workshop ID is available. Configure an ID, select a static backing, or use configured-video export."
   },
   "common": {
     "all_outputs": "all outputs",
@@ -119,7 +78,7 @@
   "diagnostics": {
     "last_action_error": "Last action error: {error}",
     "daemons": "Detected wallpaper control commands: {commands}",
-    "ownership": "Noctalia owns persisted stills and color generation. External plugins keep their processes; Wall-in-One owns only its runStream renderer children and never signals a foreign process.",
+    "ownership": "Noctalia owns persisted stills and color generation. Wall-in-One controls only its exact owned renderer children and never signals unrelated processes.",
     "palette_applied": "Applied: {mode} · {source} · {selection}\nResolution: {resolution} · fallback: {fallback} · {time}",
     "palette_authority": "Global palette authority: {output}",
     "palette_error": "Palette warning or error: {error}",
@@ -132,9 +91,9 @@
       "requested": "requested"
     },
     "palette_title": "Palette transition",
-    "probe_error": "Provider discovery failed: {error}",
-    "probe_ok": "Enabled-plugin discovery completed at {time}.",
-    "probing": "Checking enabled plugins and public command capabilities...",
+    "probe_error": "Capability refresh failed: {error}",
+    "probe_ok": "Capability refresh completed at {time}.",
+    "probing": "Checking renderer, command, and shop capabilities...",
     "renderer": "Owned renderer: {state} · active outputs: {count} · {error}",
     "storage_error": "Wall-in-One storage is disabled. Config: {config} Runtime: {runtime}",
     "storage_ok": "Schema-v4 pairing, playlist, and schedule config plus schema-v6 runtime storage are healthy. Older supported state is migrated through one recoverable two-document transaction."
@@ -153,7 +112,6 @@
     "capture_failed_detail": "Still export failed: {detail}",
     "capture_helper": "The Wall-in-One still-export helper is missing.",
     "capture_replaced": "A newer still request replaced this pending export.",
-    "capture_busy": "A W Engine adapter capture is already in progress for this output.",
     "capture_callback": "Still export completed, but its follow-up action failed: {detail}",
     "capture_source": "Workshop item {id} has no usable video source or preview fallback.",
     "capture_start": "Could not start the still-export helper.",
@@ -174,9 +132,7 @@
     "encode": "Could not encode plugin data.",
     "ffmpeg": "ffmpeg is required to export a frame from this video.",
     "install": "Could not install the atomic data update.",
-    "internal_conflict": "The {provider} plugin is still enabled, so Wall-in-One will not start a competing internal renderer. Disable the external plugin or select its external backend.",
-    "internal_unavailable": "The internal {provider} backend is not ready or its renderer command is missing.",
-    "external_apply_boundary": "The external {provider} plugin does not expose public apply-by-source IPC. Select the internal backend after disabling the external plugin.",
+    "internal_unavailable": "The owned {provider} engine is not ready or its renderer command is missing.",
     "manual_pair": "The selected static backing is missing or could not be validated as an image by the Wall-in-One helper.",
     "managed_delete": "The managed wallpaper could not be deleted.",
     "managed_directory": "The selected wallpaper root cannot host Wall-in-One's managed subfolders.",
@@ -186,21 +142,14 @@
     "managed_path": "The automatic still destination is outside Wall-in-One's managed still directory.",
     "managed_sidecar": "The adjacent ownership sidecar is missing or invalid, so Wall-in-One will not delete this file.",
     "managed_sidecar_delete": "The wallpaper was removed, but its managed metadata sidecar could not be deleted.",
-    "mpvpaper_ipc": "mpvpaper control failed: {detail}",
-    "mpvpaper_ipc_start": "Could not start the mpvpaper control command.",
-    "mpvpaper_forced_off": "mpvpaper integration is force-disabled in Wall-in-One settings.",
     "native_switch": "Static wallpaper switch failed: {detail}",
     "native_switch_start": "Could not start the Noctalia wallpaper command.",
     "motionbgs_open": "Could not open MotionBGS: {detail}",
-    "motionbgs_action": "The MotionBGS adapter received an unsupported request.",
+    "motionbgs_action": "The MotionBGS browser received an unsupported request.",
     "motionbgs_start": "Could not launch the desktop browser for MotionBGS.",
-    "motionbgs_unavailable": "The unofficial MotionBGS public-page adapter is disabled or unavailable. The direct https://motionbgs.com/ fallback remains available.",
-    "no_current_scene": "No numeric Workshop ID is active internally, reported by the adapter, or configured as a fallback.",
+    "motionbgs_unavailable": "The unofficial MotionBGS public-page browser is disabled or unavailable. The direct https://motionbgs.com/ fallback remains available.",
+    "no_current_scene": "No numeric Workshop ID is active in Wall-in-One's renderer or configured as a fallback.",
     "noctalia_cli": "The noctalia command client is unavailable.",
-    "provider_probe": "The enabled-plugin query returned no result.",
-    "provider_probe_detail": "Enabled-plugin discovery failed: {detail}",
-    "provider_probe_start": "Could not start enabled-plugin discovery.",
-    "provider_probe_timeout": "Enabled-plugin discovery timed out.",
     "palettes_unavailable": "The palette inventory service is unavailable. Pinned built-in and wallpaper choices remain usable; community and custom choices cannot be verified.",
     "palette_authority_restore": "The global palette authority could not be restored safely.",
     "palette_missing": "Requested {source} palette '{selection}' is missing; using built-in Noctalia for this transition.",
@@ -230,7 +179,7 @@
     "renderer_ack_timeout": "The owned renderer did not acknowledge the requested start before the safety deadline.",
     "renderer_callback": "The owned renderer acknowledged a command, but its coordinator callback failed: {detail}",
     "renderer_unavailable": "Wall-in-One's owned renderer service is not ready.",
-    "provider_forced_off": "The {provider} integration is force-disabled in Wall-in-One settings.",
+    "provider_forced_off": "The {provider} engine is disabled for this display.",
     "cycle_apply": "The playlist entry could not be applied.",
     "cycle_empty": "Add at least one wallpaper to this output's assigned playlist first.",
     "cycle_entry": "The playlist entry is invalid.",
@@ -248,18 +197,11 @@
     "steam_start": "Could not start Steam or the desktop URL opener.",
     "video_source": "Choose a readable configured video source first.",
     "video_source_degraded": "Video is missing or unreadable, so its static representative was applied and the live layer was stopped: {path}",
-    "w_engine_ipc": "W Engine control failed: {detail}",
-    "w_engine_ipc_start": "Could not start the W Engine control command.",
-    "w_engine_forced_off": "W Engine integration is force-disabled in Wall-in-One settings.",
-    "w_engine_pause_conflict": "Never-pause and active-fullscreen-only pause cannot both be enabled for Wallpaper Engine.",
-    "w_engine_adapter": "The cooperative W Engine capture request failed or returned something other than the exact requested staging path: {detail}",
-    "w_engine_adapter_start": "Could not start the cooperative W Engine capture request.",
-    "w_engine_adapter_timeout": "The cooperative W Engine capture request did not return its exact requested staging PNG before the deadline.",
     "wallhaven_action": "The Wallhaven service received an unsupported request.",
     "wallhaven_open": "Could not open wallhaven.cc: {detail}",
     "wallhaven_result": "Select a wallpaper from the current Wallhaven result set first.",
     "wallhaven_start": "Could not launch the desktop browser for wallhaven.cc.",
-    "wallhaven_unavailable": "Native Wallhaven search is disabled or unavailable. The optional official-plugin panel remains a separate fallback when installed.",
+    "wallhaven_unavailable": "Native Wallhaven search is disabled or unavailable. The direct wallhaven.cc link remains available.",
     "wallpaper_apply": "Noctalia could not apply the static wallpaper: {detail}",
     "wallpaper_apply_start": "The Noctalia wallpaper command could not start.",
     "write": "Could not write the temporary data file."
@@ -268,39 +210,75 @@
     "captured": "Still exported to {path}",
     "paired": "Still exported and paired through Noctalia: {path}"
   },
-  "pairing": {
-    "automatic_summary": "Automatic still pairing: {automatic} · Legacy wallpaper-color default: {colors}",
-    "behavior": "Pairing applies the exported still as Noctalia's persisted wallpaper, so the lock screen, overview/backdrop, compositor blur or xray integrations, theme generation, and wallpaper hooks have a real image while a live provider renders above it.",
-    "current": "Paired backing for {output}: {provider}\n{path}",
-    "global_palette": "Noctalia has one global palette. With multiple outputs, choose a palette leader or the most recently paired output determines the generated colors.",
-    "last_applied": "last applied output",
-    "lockscreen_override": "An explicit lock-screen wallpaper path overrides the paired Noctalia wallpaper. Clear or update that override in Noctalia if the lock screen does not follow the pair.",
-    "none": "No static backing is recorded for {output}.",
-    "palette": "Configured scheme: {configured}\nPalette leader: {leader}\nCurrent Noctalia color state: {active}",
-    "settings": "Automatic still pairing: {automatic} · Legacy wallpaper-color default: {colors}"
-  },
   "panel": {
     "browse": {
       "show_fewer": "Show fewer",
       "show_more": "Show {count} more"
     },
-    "capture": {
-      "description": "Create representative stills in the automatic-stills managed subfolder, or save manual exports directly in the selected image wallpaper directory, then persist a pair through Noctalia.",
-      "title": "Still export"
-    },
     "close": "Close",
     "nav": {
-      "main": "Main settings",
-      "stills": "Stills",
-      "videos": "Videos",
-      "engine": "Wallpaper Engine",
+      "main": "Home",
       "playlists": "Playlists",
-      "screens": "Screens",
+      "screens": "Displays",
+      "library": "Library",
+      "library_images": "Images",
+      "library_videos": "Videos",
+      "library_engine": "Wallpaper Engine",
+      "shops": "Shops",
+      "shop_wallhaven": "Wallhaven",
+      "shop_motionbgs": "MotionBGS",
+      "shop_steam": "Steam Workshop",
+      "display_overview": "Overview",
+      "display_engines": "Engines",
+      "display_schedule": "Schedule",
+      "diagnostics": "Diagnostics",
       "disconnected": "{name} (disconnected)"
     },
     "diagnostics": {
       "description": "Storage health, capability discovery, and ownership boundaries.",
       "title": "Diagnostics"
+    },
+    "engines": {
+      "auto_pause": "Auto-pause",
+      "border": "Border",
+      "clamp": "Clamp",
+      "description": "Renderer behavior for {output}. These values apply only to this display.",
+      "disable_mouse": "Disable mouse input",
+      "disable_parallax": "Disable parallax",
+      "disable_particles": "Disable particles",
+      "enabled": "Engine enabled",
+      "fps": "FPS (5–144)",
+      "fullscreen_pause_only_active": "Pause only for fullscreen on this display",
+      "hardware_decode": "Hardware decoding",
+      "layer": "Wallpaper layer",
+      "layer_background": "Background",
+      "layer_bottom": "Bottom",
+      "mute": "Mute audio",
+      "no_audio_processing": "Disable audio processing",
+      "no_fullscreen_pause": "Never pause for fullscreen",
+      "noautomute": "Disable automatic mute",
+      "options": "Additional mpv options",
+      "pause_active": "Pause for fullscreen on this display",
+      "pause_full": "Pause for any fullscreen window",
+      "pause_max": "Pause for maximized or fullscreen windows",
+      "repeat_texture": "Repeat",
+      "save": "Save display engine settings",
+      "scale_default": "Default scale",
+      "scale_fill": "Fill",
+      "scale_fit": "Fit",
+      "scale_stretch": "Stretch",
+      "silent": "Silent mode",
+      "title": "Display engines",
+      "video": "Video",
+      "volume": "Volume (0–100)",
+      "workshop": "Wallpaper Engine"
+    },
+    "home": {
+      "choose_library": "Choose an item from the Library to create the display's Quick Choice pairing.",
+      "current_pairing": "Current pairing",
+      "description": "The selected display, its current pairing, and Wall-in-One-owned playback.",
+      "no_pairing": "No pairing is active",
+      "title": "Wallpapers"
     },
     "cycle": {
       "add_current": "Add selected sources",
@@ -321,12 +299,14 @@
       "browse_motionbgs": "Browse MotionBGS",
       "delete_managed": "Delete managed wallpaper",
       "delete_managed_confirm": "Delete {name} and its Wall-in-One metadata? Managed videos also remove their generated stills.",
+      "default_pairing": "Default pairing",
+      "default_pairing_note": "Every item has a default still and Noctalia palette. Editing or adding it saves that pairing for reuse.",
       "description": "User-owned image and video directories, Wall-in-One-managed downloads, and Wallpaper Engine's Steam Workshop cache are indexed as separate ownership classes.",
       "directory_layout": {
         "automatic_stills": "Automatic stills: plugin-managed subfolder under the image wallpaper directory; generated pairs follow their video or Workshop source.",
         "description": "Image and video roots may be the same directory. Wall-in-One classifies entries by media type and keeps managed content in clearly named subfolders.",
         "image_root": "Image wallpaper directory: user-owned stills and manual still exports",
-        "motionbgs_managed": "MotionBGS cache: plugin-managed subfolder under the video wallpaper directory, created only while the integrated adapter is usable",
+        "motionbgs_managed": "MotionBGS cache: plugin-managed subfolder under the video wallpaper directory, created only while the integrated browser is usable",
         "shared_root": "Shared image/video root: supported files remain separated by media type in the library",
         "video_root": "Video wallpaper directory: user-owned video wallpapers",
         "wallhaven_managed": "Wallhaven cache: plugin-managed subfolder under the image wallpaper directory"
@@ -334,19 +314,41 @@
       "launch_steam": "Launch Wallpaper Engine in Steam",
       "managed": "Managed by Wall-in-One",
       "managed_delete_policy": "Only files inside Wall-in-One-managed subfolders can be deleted here. Removing a managed live wallpaper also removes its automatic still pair.",
-      "motionbgs_boundary": "Online text search and latest/genre/4K page browsing are best effort. The direct fallback is always https://motionbgs.com/; the managed MotionBGS cache is used only while the adapter remains practical.",
+      "motionbgs_boundary": "Online text search and latest/genre/4K page browsing are best effort. The direct fallback is always https://motionbgs.com/; the managed MotionBGS cache is used only while the scraper remains practical.",
       "no_stills": "No supported still images were found in {path}.",
       "no_videos": "No supported videos were found in {path}.",
       "no_workshops": "No Wallpaper Engine projects were found in the Steam Workshop cache.",
       "open_workshop": "Open Wallpaper Engine Workshop",
       "refresh": "Refresh library",
+      "pairing_browser_description": "Browse visual pairing cards. Video and Wallpaper Engine items use their selected, cached, or project preview still.",
+      "saved_pairing": "Saved pairing",
       "steam_owned": "Managed by Steam",
+      "still_automatic": "Still: generated automatically when first needed",
+      "still_preview": "Still: project or cached preview",
+      "still_selected": "Still: selected representative image",
+      "still_source": "Still: original image",
       "stills": "Still images ({count})",
       "title": "Live wallpaper library",
       "user_owned": "User-owned file",
       "user_owned_policy": "User files can be browsed and applied, but Wall-in-One never offers to delete them.",
       "videos": "Local videos ({count})",
+      "workshop_id": "Workshop {id}",
       "workshops": "Wallpaper Engine cache ({count})"
+    },
+    "medium_settings": {
+      "automatic_stills": "Automatic stills",
+      "image_defaults": "Defaults — automatic stills: {automatic} · color sync: {colors} · generator: {scheme}",
+      "image_title": "Image settings and locations",
+      "motionbgs_library": "Managed MotionBGS library",
+      "open_settings": "Edit these values in plugin settings",
+      "video_defaults": "Defaults — MotionBGS download: {quality} · still frame: {second}s · automatic stills: {automatic} · color sync: {colors}",
+      "video_title": "Video settings and locations",
+      "wallhaven_library": "Managed Wallhaven library",
+      "workshop_auto_discovery": "Automatic Steam library discovery",
+      "workshop_defaults": "Defaults — capture delay: {delay}s · automatic stills: {automatic} · color sync: {colors}",
+      "workshop_display_note": "Playback options are per display under Displays → Engines. This page owns Workshop discovery and representative-still defaults.",
+      "workshop_source": "Workshop discovery source",
+      "workshop_title": "Wallpaper Engine settings and locations"
     },
     "motionbgs": {
       "browse": "Browse",
@@ -359,7 +361,7 @@
       "download_default": "Download {quality}",
       "download_hd": "Download HD",
       "empty": "Search or catalog-page results will appear here. No background crawling or bulk detail requests are performed.",
-      "error": "MotionBGS adapter: {error}",
+      "error": "MotionBGS browser: {error}",
       "fallback": "Permanent fallback: https://motionbgs.com/ — use it whenever the public-page parser is unavailable or the site changes.",
       "genre_placeholder": "Genre/tag slug, e.g. nature or anime",
       "genre_presets": {
@@ -393,13 +395,13 @@
       "previous_page": "Previous page",
       "quality_4k_note": "Pageable 4K catalog",
       "quality_hd_note": "HD catalog (first page only)",
-      "ready": "Unofficial public-page adapter ready. Requests are serialized, cached, same-origin, and size/time limited.",
+      "ready": "Unofficial public-page browser ready. Requests are serialized, cached, same-origin, and size/time limited.",
       "search": "Search",
       "search_meta": "{count} results in MotionBGS's single search response",
       "search_placeholder": "Search video wallpapers",
       "search_unpaged": "MotionBGS does not expose pagination for text search. Latest, genre/tag, and 4K catalog modes have real page navigation.",
       "title": "MotionBGS video wallpapers",
-      "unavailable": "The adapter is unavailable; the direct site fallback remains independent. Check curl, settings, and Diagnostics."
+      "unavailable": "The browser is unavailable; the direct site fallback remains independent. Check curl, settings, and Diagnostics."
     },
     "palettes": {
       "builtin": "Built-in palettes",
@@ -663,21 +665,34 @@
       "unavailable": "Native Wallhaven search is unavailable. Check its enable setting and API-key validation."
     },
     "open": "Open",
-    "pairing": {
-      "description": "Keep a real static wallpaper behind dynamic providers for colors, lock screen, overview, blur, xray, and wallpaper hooks.",
-      "title": "Static pairing and colors"
+    "renderer": {
+      "audio": "Audio",
+      "inactive": "No Wall-in-One renderer is active on this display.",
+      "playback": "Playback",
+      "status": "{backend} · {state}",
+      "title": "Owned renderer"
     },
-    "providers": {
-      "active_backend": "Active backend: {provider}",
-      "audio_controls": "Wallpaper audio",
-      "backend_controls": "Backend selection",
-      "control_boundary": "Provider buttons call documented Noctalia plugin IPC. Wall-in-One does not infer playback state or mutate provider-private files.",
-      "description": "Detected integrations are enabled by default. Auto prefers an enabled external plugin; internal playback starts only when no external owner conflicts.",
-      "mpvpaper_controls": "mpvpaper service",
-      "native_controls": "Noctalia static rotation",
-      "playback_controls": "Playback",
-      "title": "Providers",
-      "w_engine_controls": "W Engine service"
+    "setup": {
+      "direct_link_note": "The external site can still be opened explicitly, but Wall-in-One will not search, download, or index it until its matching location is ready.",
+      "home_required": "Choose existing image and video locations before Wall-in-One scans libraries, prepares caches, or starts a shop.",
+      "image_required": "Choose an existing image wallpaper location before using this library or shop.",
+      "no_hidden_work": "Opening this panel does not probe providers, refresh palettes, scan libraries, or prepare shop caches while setup is incomplete.",
+      "open_settings": "Choose location in Settings",
+      "title": "Finish wallpaper setup",
+      "video_required": "Choose an existing video wallpaper location before using this library or shop."
+    },
+    "steam": {
+      "description": "Open Wallpaper Engine or its Workshop explicitly. Installed projects appear as pairing cards in the Wallpaper Engine library.",
+      "library_note": "Wall-in-One reads installed Workshop projects only after the image location needed for representative stills is ready.",
+      "open_library": "Open Wallpaper Engine library",
+      "title": "Steam Workshop"
+    },
+    "storage": {
+      "image_root": "Image wallpaper location",
+      "motion_cache": "MotionBGS metadata cache",
+      "palette_cache": "Palette catalog cache",
+      "thumbnail_cache": "Shop thumbnail cache",
+      "video_root": "Video wallpaper location"
     },
     "reprobe": "Refresh capabilities",
     "settings": "Open plugin settings",
@@ -694,72 +709,13 @@
   "plugin": {
     "title": "Wall-in-One"
   },
-  "providers": {
-    "backend": {
-      "coexist": "mpvpaper and linux-wallpaperengine may both be installed. Wall-in-One keeps at most one internally owned dynamic backend active per output.",
-      "conflict": "Internal mode is selected, but the external plugin is still enabled. Disable the external plugin before Wall-in-One starts a renderer.",
-      "external": "External plugin owns playback. Public controls work, but apply-by-source and mixed live cycling are unavailable.",
-      "hotswap": "Switching providers stops only Wall-in-One's exact owned child for that output before the replacement starts; foreign renderer processes are never signalled.",
-      "internal": "Wall-in-One owns playback on the configured background or bottom layer; Noctalia's paired still remains active underneath.",
-      "missing": "No usable renderer backend is available. Install the command or enable the external plugin."
-    },
-    "extra": {
-      "available": "Custom public panel is available: {panel}",
-      "disabled": "Configured plugin {id} is not enabled.",
-      "forced_off": "The custom provider was detected but is force-disabled in Wall-in-One settings.",
-      "name": "Custom provider panel",
-      "unconfigured": "No full plugin:panel ID is configured."
-    },
-    "mpvpaper": {
-      "available": "Official mpvpaper picker and documented service IPC are available.",
-      "disabled": "The official mpvpaper plugin is not enabled.",
-      "forced_off": "mpvpaper was detected but is force-disabled in Wall-in-One settings.",
-      "missing_commands": "The plugin is enabled, but mpvpaper or mpv is missing; the picker opens but playback cannot start.",
-      "name": "mpvpaper"
-    },
-    "motionbgs": {
-      "available": "Wallpaper-focused catalog and permanent fallback: https://motionbgs.com/",
-      "disabled": "The public-page adapter is force-disabled. The direct https://motionbgs.com/ fallback remains available.",
-      "fallback": "The public-page adapter is unavailable; use the permanent https://motionbgs.com/ fallback.",
-      "integrated": "Unofficial bounded text search, latest/genre/4K page browsing, and download are ready. Permanent fallback: https://motionbgs.com/",
-      "name": "MotionBGS",
-      "site_changed": "MotionBGS returned a challenge or changed markup. No bypass was attempted; use https://motionbgs.com/ directly."
-    },
-    "native": {
-      "available": "Noctalia's persisted wallpaper, selector, transitions, and hooks.",
-      "name": "Noctalia static wallpapers"
-    },
-    "probe_failed": "Availability is unknown because enabled-plugin discovery failed.",
-    "w_engine": {
-      "adapter_full": "W Engine adapter v{version} advertises current-status and rendered-capture support. Rendered capture requires optional ffmpeg for decode validation; source/preview fallback remains available without it.",
-      "adapter_status": "W Engine adapter v{version} reports current Workshop IDs; still export uses source/preview fallback.",
-      "disabled": "W Engine is not enabled.",
-      "forced_off": "W Engine was detected but is force-disabled in Wall-in-One settings.",
-      "missing_renderer": "W Engine is enabled, but linux-wallpaperengine is missing; its panel opens but playback may not start.",
-      "name": "W Engine",
-      "no_adapter": "W Engine is enabled and retains its own cycle and color-sync backing. No fresh cooperative adapter response is connected; use Export current Noctalia backing or configure a Workshop ID for source/preview export. Adapter flags and current output state expire 10 seconds after an unanswered Wall-in-One refresh probe."
-    },
-    "wallhaven": {
-      "available": "The separate official Wallhaven plugin is enabled and its browser can be opened as an optional fallback.",
-      "disabled": "The separate official Wallhaven plugin is not enabled; Wall-in-One's native API service is independent.",
-      "forced_off": "Wallhaven integration is force-disabled in Wall-in-One settings.",
-      "name": "Wallhaven"
-    }
-  },
   "settings": {
-    "backends": {
-      "options": {
-        "auto": "Auto (prefer detected plugin)",
-        "external": "External plugin only",
-        "internal": "Wall-in-One internal"
-      }
-    },
     "auto_capture": {
       "description": "Default on. Automatically create a representative still for each video or Wallpaper Engine scene, save it in the managed automatic-stills subfolder, and pair it through Noctalia unless that playlist entry selects a specific still.",
       "label": "Automatically create and pair stills"
     },
     "capture_directory": {
-      "description": "Root for user-owned still wallpapers and manual still exports. Wallhaven downloads and automatic video/scene stills use separate Wall-in-One-managed subfolders. This may be the same folder as the video wallpaper directory.",
+      "description": "Select an existing root for user-owned still wallpapers and manual exports. Wall-in-One does not fall back to another directory or create this root; Wallhaven and automatic-still subfolders remain inactive until it is selected. This may be the same folder as the video wallpaper directory.",
       "label": "Image wallpaper directory"
     },
     "cycle_interval_minutes": {
@@ -798,21 +754,9 @@
         "vibrant": "Vibrant"
       }
     },
-    "extra_provider_panel": {
-      "description": "Optional full panel ID, such as vendor/plugin:panel. Wall-in-One can discover and open it but assumes no private control or status API.",
-      "label": "Custom provider panel ID"
-    },
     "glyph": {
       "description": "Choose a glyph with Noctalia's native searchable glyph selector.",
       "label": "Glyph"
-    },
-    "internal_renderer_layer": {
-      "description": "Layer used by both internally owned mpvpaper and Wallpaper Engine children. Bottom is the portable safe default; Background works with niri's place-within-backdrop rule but remains compositor-dependent.",
-      "label": "Internal renderer layer",
-      "options": {
-        "background": "Background (niri backdrop)",
-        "bottom": "Bottom (safe default)"
-      }
     },
     "label": {
       "description": "Text displayed beside the glyph for this placement.",
@@ -825,10 +769,6 @@
     "motionbgs_cache_minutes": {
       "description": "Keep bounded search, catalog-page, and detail results locally for this many minutes before fetching their public pages again.",
       "label": "MotionBGS cache duration (minutes)"
-    },
-    "motionbgs_download_directory": {
-      "description": "Optional override for the Wall-in-One-managed MotionBGS cache. Leave empty to use a managed subfolder of the video wallpaper directory. No cache folder is needed when the public-page adapter is unavailable or disabled.",
-      "label": "MotionBGS download directory"
     },
     "motionbgs_max_download_mb": {
       "description": "Reject a MotionBGS download above this hard size cap before atomically installing it.",
@@ -846,41 +786,12 @@
       "description": "Maximum cards retained from one MotionBGS search or catalog page. The default 48 preserves every card on the site's current 36-item listing pages; details remain lazy.",
       "label": "MotionBGS result limit"
     },
-    "mpvpaper_backend": {
-      "description": "Auto keeps the detected official plugin as owner. Internal enables apply-by-path and mixed cycling only when that external plugin is disabled.",
-      "label": "mpvpaper backend"
-    },
-    "mpv_auto_pause": {
-      "description": "Ask internally owned mpvpaper to pause when the output is occluded.",
-      "label": "mpvpaper auto-pause"
-    },
-    "mpv_auto_pause_mode": {
-      "description": "Choose the visibility class used by mpvpaper auto-pause. FULL watches fullscreen windows; MAX also includes maximized windows; ACTIVE uses upstream's active-window mode when the installed mpvpaper supports it.",
-      "label": "mpvpaper auto-pause mode",
-      "options": {
-        "active": "Active window",
-        "full": "Fullscreen",
-        "max": "Fullscreen or maximized"
-      }
-    },
-    "mpv_hardware_decode": {
-      "description": "Enable mpv hardware decoding for internally owned video wallpapers.",
-      "label": "mpv hardware decode"
-    },
-    "mpv_mute": {
-      "description": "Disable audio for internally owned video wallpapers.",
-      "label": "Mute video wallpapers"
-    },
-    "mpv_options": {
-      "description": "Additional mpv options passed as one mpvpaper -o argument. Shell syntax is never evaluated; control characters and oversized values are rejected.",
-      "label": "Additional mpv options"
-    },
     "palette_output": {
       "description": "Optional output connector whose successful entry transitions may update Noctalia's single global palette. A disconnected leader falls back deterministically until it returns; leave empty for latest successful switch wins.",
       "label": "Global palette leader output"
     },
     "scene_screenshot_delay": {
-      "description": "Capture delay from 1 to 120 frames. Cooperative adapters receive the full value; internally owned linux-wallpaperengine capture clamps it to upstream's five-frame maximum. This does not affect source-video or preview fallback exports.",
+      "description": "Capture delay from 1 to 120 frames. Wall-in-One's owned linux-wallpaperengine capture clamps it to upstream's five-frame maximum. This does not affect source-video or preview fallback exports.",
       "label": "Wallpaper Engine screenshot delay"
     },
     "show_label": {
@@ -891,24 +802,12 @@
       "description": "Legacy/default policy for newly captured Quick Choice entries: select Noctalia's wallpaper source and the generator below. Named entries store their own complete theme policy.",
       "label": "Default to adaptive wallpaper colors"
     },
-    "use_extra_provider": {
-      "description": "Use the configured custom panel when its plugin is detected. Turn this off to force-disable only Wall-in-One's integration; it does not disable or uninstall the provider plugin.",
-      "label": "Use detected custom provider"
-    },
-    "use_mpvpaper": {
-      "description": "Gate both cooperative external mpvpaper integration and Wall-in-One's internally owned mpvpaper backend. Turning this off never stops or disables a foreign provider process.",
-      "label": "Enable mpvpaper integration"
-    },
     "use_motionbgs": {
-      "description": "Enable the unofficial bounded MotionBGS public-page adapter. Turning it off does not remove the permanent direct-site fallback.",
-      "label": "Use MotionBGS public-page adapter"
-    },
-    "use_w_engine": {
-      "description": "Gate both cooperative W Engine integration and Wall-in-One's internally owned linux-wallpaperengine backend, controls, and Workshop capture paths. Turning this off never stops or disables a foreign provider process.",
-      "label": "Enable Wallpaper Engine integration"
+      "description": "Enable the unofficial bounded MotionBGS public-page browser. Turning it off does not remove the permanent direct-site fallback.",
+      "label": "Use MotionBGS browser"
     },
     "use_wallhaven": {
-      "description": "Enable Wall-in-One's native official-API search, detail, and managed download service. Turning this off does not disable or uninstall the separate official Noctalia Wallhaven plugin.",
+      "description": "Enable Wall-in-One's native official-API search, detail, and managed download service. The direct wallhaven.cc link remains available when search is disabled.",
       "label": "Use native Wallhaven integration"
     },
     "wallhaven_api_key": {
@@ -916,7 +815,7 @@
       "label": "Wallhaven API key"
     },
     "video_directory": {
-      "description": "Root for user-owned video wallpapers. Wall-in-One-managed MotionBGS downloads use a separate cache subfolder when the adapter is usable. This may be the same folder as the image wallpaper directory; files are sorted by media type.",
+      "description": "Select an existing root for user-owned video wallpapers. Wall-in-One does not inherit or create this root; MotionBGS storage and its managed download subfolder remain inactive until it is selected. This may be the same folder as the image wallpaper directory; files are sorted by media type.",
       "label": "Video wallpaper directory"
     },
     "video_frame_second": {
@@ -932,71 +831,8 @@
       "label": "Additional Workshop directory"
     },
     "workshop_id": {
-      "description": "Numeric Wallpaper Engine Workshop item used when no cooperative W Engine status adapter reports the active item. Video projects export a frame; scene/web projects use their preview.",
+      "description": "Numeric Wallpaper Engine Workshop item used when no owned renderer scene is active. Video projects export a frame; scene/web projects use their preview.",
       "label": "Workshop ID fallback"
-    },
-    "w_engine_backend": {
-      "description": "Auto keeps the detected W Engine plugin as owner. Internal enables apply-by-ID and mixed cycling only when that external plugin is disabled.",
-      "label": "Wallpaper Engine backend"
-    },
-    "w_engine_clamp": {
-      "description": "Texture edge behavior for Wall-in-One's internally owned linux-wallpaperengine renderer.",
-      "label": "Wallpaper Engine edge mode",
-      "options": {
-        "border": "Border",
-        "clamp": "Clamp",
-        "repeat": "Repeat"
-      }
-    },
-    "w_engine_disable_mouse": {
-      "description": "Disable mouse input in internally owned Wallpaper Engine scenes.",
-      "label": "Disable scene mouse input"
-    },
-    "w_engine_disable_parallax": {
-      "description": "Disable parallax in internally owned Wallpaper Engine scenes.",
-      "label": "Disable scene parallax"
-    },
-    "w_engine_disable_particles": {
-      "description": "Disable particles in internally owned Wallpaper Engine scenes.",
-      "label": "Disable scene particles"
-    },
-    "w_engine_fps": {
-      "description": "Frame-rate limit for internally owned Wallpaper Engine scenes.",
-      "label": "Wallpaper Engine FPS"
-    },
-    "w_engine_fullscreen_pause_only_active": {
-      "description": "Pause only for the active fullscreen window. Do not enable together with Never pause for fullscreen.",
-      "label": "Pause only for active fullscreen"
-    },
-    "w_engine_no_audio_processing": {
-      "description": "Disable Wallpaper Engine audio processing for internally owned scenes.",
-      "label": "Disable scene audio processing"
-    },
-    "w_engine_no_fullscreen_pause": {
-      "description": "Never pause the internal Wallpaper Engine renderer for fullscreen windows. Do not enable together with active-fullscreen-only pause.",
-      "label": "Never pause for fullscreen"
-    },
-    "w_engine_noautomute": {
-      "description": "Disable linux-wallpaperengine's automatic mute behavior.",
-      "label": "Disable Wallpaper Engine auto-mute"
-    },
-    "w_engine_scaling": {
-      "description": "Scaling used by Wall-in-One's internally owned linux-wallpaperengine renderer.",
-      "label": "Wallpaper Engine scaling",
-      "options": {
-        "default": "Default",
-        "fill": "Fill",
-        "fit": "Fit",
-        "stretch": "Stretch"
-      }
-    },
-    "w_engine_silent": {
-      "description": "Launch internally owned Wallpaper Engine scenes without audio. When off, the configured volume is used.",
-      "label": "Silent Wallpaper Engine"
-    },
-    "w_engine_volume": {
-      "description": "Audio volume for internally owned Wallpaper Engine scenes when silent mode is off.",
-      "label": "Wallpaper Engine volume"
     }
   },
   "shortcut": {
