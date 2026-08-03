@@ -892,7 +892,7 @@ function wallInOne.settingsSnapshot()
         automatic_stills_directory = wallInOne.automaticStillDirectory(),
         motionbgs_managed_directory = wallInOne.motionBgsManagedDirectory(),
         auto_capture = wallInOne.settingBool("auto_capture", true),
-        sync_colors = wallInOne.settingBool("sync_colors", false),
+        sync_colors = wallInOne.settingBool("sync_colors", true),
         color_scheme = wallInOne.configuredColorScheme(),
         palette_output = wallInOne.settingString("palette_output", ""),
         video_source = wallInOne.configuredVideoSource(),
@@ -1009,7 +1009,7 @@ function wallInOne.normalizedLegacyEntry(candidate)
 end
 
 function wallInOne.legacyThemePolicy()
-    if wallInOne.settingBool("sync_colors", false) then
+    if wallInOne.settingBool("sync_colors", true) then
         return { mode = "auto", source = "wallpaper", selection = wallInOne.configuredColorScheme() }
     end
     return { mode = "inherit", source = "inherit", selection = "" }
@@ -1096,6 +1096,7 @@ function wallInOne.normalizedEntryBundle(candidate)
         still = still,
         theme = theme,
         added_at = wallInOne.boundedDetail(candidate.added_at or ""),
+        customized = candidate.customized == true,
     }
     if candidate.pairing_id ~= nil and tostring(candidate.pairing_id or "") ~= "" then
         if not wallInOne.validPersistedKey(candidate.pairing_id) then
@@ -1126,6 +1127,26 @@ function wallInOne.bundleSignature(candidate)
     }, "|")
 end
 
+-- Library defaults are keyed by the medium they describe, independently of
+-- the current still/palette defaults. This lets a changed global default
+-- refresh one existing non-custom profile instead of accumulating another
+-- hidden record for the same file or Workshop scene.
+function wallInOne.bundleIdentity(candidate)
+    local media = type(candidate) == "table" and type(candidate.media) == "table" and candidate.media or nil
+    local still = type(candidate) == "table" and type(candidate.still) == "table" and candidate.still or {}
+    local function field(value)
+        local text = tostring(value or "")
+        return tostring(#text) .. ":" .. text
+    end
+    if media ~= nil and tostring(media.kind or "") ~= "" and tostring(media.source or "") ~= "" then
+        return "dynamic|" .. field(media.kind) .. "|" .. field(media.source)
+    end
+    if media == nil and tostring(still.mode or "") == "selected" and tostring(still.path or "") ~= "" then
+        return "static|" .. field(still.path)
+    end
+    return ""
+end
+
 function wallInOne.pairingFromEntry(entry, pairingId)
     return {
         id = pairingId,
@@ -1143,6 +1164,7 @@ function wallInOne.pairingFromEntry(entry, pairingId)
             selection = entry.theme.selection,
         },
         added_at = entry.added_at,
+        customized = entry.customized == true,
     }
 end
 
@@ -1164,6 +1186,10 @@ function wallInOne.normalizedPairings(candidate)
             return nil
         end
         pairing.pairing_id = nil
+        -- Pairings written before provenance existed came from the old,
+        -- explicitly-created pairing UI. Preserve them as custom overrides;
+        -- newly synthesized library defaults always persist an explicit false.
+        pairing.customized = if rawPairing.customized == nil then true else rawPairing.customized == true
         pairings[id] = pairing
     end
     return pairings
@@ -5569,6 +5595,41 @@ function wallInOne.syncPairingSnapshots(nextConfig, pairingId)
     end
 end
 
+-- Default profiles are generated plumbing, so older duplicates for the same
+-- medium/source can be safely coalesced. Customized legacy profiles are never
+-- removed here: they may intentionally preserve different stills or palettes.
+function wallInOne.collapseDefaultPairingIdentity(nextConfig, canonicalId)
+    local canonical = type(nextConfig.pairings) == "table" and nextConfig.pairings[canonicalId] or nil
+    local identity = wallInOne.bundleIdentity(canonical)
+    if type(canonical) ~= "table" or canonical.customized == true or identity == "" then
+        wallInOne.syncPairingSnapshots(nextConfig, canonicalId)
+        return
+    end
+    local duplicateIds = {}
+    for id, pairing in pairs(nextConfig.pairings) do
+        if
+            id ~= canonicalId
+            and type(pairing) == "table"
+            and pairing.customized ~= true
+            and wallInOne.bundleIdentity(pairing) == identity
+        then
+            table.insert(duplicateIds, id)
+        end
+    end
+    table.sort(duplicateIds)
+    for _, duplicateId in ipairs(duplicateIds) do
+        for _, playlist in pairs(nextConfig.playlists) do
+            for _, occurrence in ipairs(playlist.entries) do
+                if tostring(occurrence.pairing_id or "") == duplicateId then
+                    occurrence.pairing_id = canonicalId
+                end
+            end
+        end
+        nextConfig.pairings[duplicateId] = nil
+    end
+    wallInOne.syncPairingSnapshots(nextConfig, canonicalId)
+end
+
 function wallInOne.catalogPairingForEntry(nextConfig, entry)
     local requestedId = tostring(entry.pairing_id or "")
     if requestedId ~= "" and type(nextConfig.pairings[requestedId]) == "table" then
@@ -5580,6 +5641,35 @@ function wallInOne.catalogPairingForEntry(nextConfig, entry)
         table.insert(ids, id)
     end
     table.sort(ids)
+
+    local identity = if entry.customized == true then "" else wallInOne.bundleIdentity(entry)
+    if identity ~= "" then
+        local defaultIds = {}
+        for _, id in ipairs(ids) do
+            local pairing = nextConfig.pairings[id]
+            if
+                type(pairing) == "table"
+                and pairing.customized ~= true
+                and wallInOne.bundleIdentity(pairing) == identity
+            then
+                table.insert(defaultIds, id)
+            end
+        end
+        if #defaultIds > 0 then
+            local canonicalId = defaultIds[1]
+            local previous = nextConfig.pairings[canonicalId]
+            local replacement = wallInOne.pairingFromEntry(entry, canonicalId)
+            if type(previous) == "table" and tostring(previous.added_at or "") ~= "" then
+                replacement.added_at = previous.added_at
+            end
+            nextConfig.pairings[canonicalId] = replacement
+
+            wallInOne.collapseDefaultPairingIdentity(nextConfig, canonicalId)
+            entry.pairing_id = canonicalId
+            return canonicalId
+        end
+    end
+
     for _, id in ipairs(ids) do
         if wallInOne.bundleSignature(nextConfig.pairings[id]) == signature then
             entry.pairing_id = id
@@ -5605,7 +5695,7 @@ function wallInOne.catalogPairingForEntry(nextConfig, entry)
     return id
 end
 
-function wallInOne.savePairing(rawPairing)
+function wallInOne.savePairing(rawPairing, customized)
     if type(rawPairing) ~= "table" then
         wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "pairing-save")
         return nil
@@ -5637,6 +5727,7 @@ function wallInOne.savePairing(rawPairing)
         media = rawPairing.media,
         still = rawPairing.still,
         theme = rawPairing.theme,
+        customized = customized ~= false,
         added_at = if tostring(rawPairing.added_at or "") ~= ""
             then rawPairing.added_at
             elseif type(existing) == "table" and tostring(existing.added_at or "") ~= ""
@@ -5650,11 +5741,20 @@ function wallInOne.savePairing(rawPairing)
     end
     pairing.pairing_id = nil
     nextConfig.pairings[id] = pairing
-    wallInOne.syncPairingSnapshots(nextConfig, id)
+    wallInOne.collapseDefaultPairingIdentity(nextConfig, id)
     if not wallInOne.saveConfig(nextConfig, "pairing-save") then
         return nil
     end
     return id
+end
+
+function wallInOne.resetPairing(rawPairing)
+    local pairingId = type(rawPairing) == "table" and tostring(rawPairing.id or "") or ""
+    if pairingId == "" or type(config.pairings[pairingId]) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "pairing-reset")
+        return false
+    end
+    return wallInOne.savePairing(rawPairing, false) ~= nil
 end
 
 function wallInOne.deletePairing(pairingId)
@@ -5783,7 +5883,7 @@ function wallInOne.ensureEditablePlaylist(output, requestedId)
     return if id ~= nil then config.playlists[id] else nil, id, selectedOutput
 end
 
-function wallInOne.addPlaylistEntry(output, playlistId, rawEntry)
+function wallInOne.addPlaylistEntry(output, playlistId, rawEntry, beforeId)
     local selectedId = tostring(playlistId or "")
     local selectedOutput = tostring(output or "")
     if type(config.playlists[selectedId]) ~= "table" then
@@ -5821,7 +5921,12 @@ function wallInOne.addPlaylistEntry(output, playlistId, rawEntry)
         return false
     end
     entry = wallInOne.materializedPlaylistEntry(entry, nextConfig.pairings)
-    table.insert(nextPlaylist.entries, entry)
+    local anchor = wallInOne.entryIndexById(nextPlaylist, tostring(beforeId or ""))
+    if anchor == nil then
+        table.insert(nextPlaylist.entries, entry)
+    else
+        table.insert(nextPlaylist.entries, anchor, entry)
+    end
     return wallInOne.saveConfig(nextConfig, "playlist-add")
 end
 
@@ -6994,6 +7099,7 @@ function wallInOne.savePlaylistEntry(playlistId, rawEntry)
     end
     local pairingId = tostring(entry.pairing_id or "")
     if pairingId ~= "" and type(nextConfig.pairings[pairingId]) == "table" then
+        entry.customized = true
         nextConfig.pairings[pairingId] = wallInOne.pairingFromEntry(entry, pairingId)
         wallInOne.syncPairingSnapshots(nextConfig, pairingId)
     else
@@ -7184,11 +7290,16 @@ function wallInOne.placeSchedule(output, scheduleId, anchorId, placement)
     scheduleId = tostring(scheduleId or "")
     anchorId = tostring(anchorId or "")
     placement = tostring(placement or "")
-    if output == nil or scheduleId == "" or anchorId == "" or (placement ~= "before" and placement ~= "after") then
+    if
+        output == nil
+        or scheduleId == ""
+        or (placement ~= "before" and placement ~= "after" and placement ~= "end")
+        or (placement ~= "end" and anchorId == "")
+    then
         wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-place")
         return false
     end
-    if scheduleId == anchorId then
+    if placement ~= "end" and scheduleId == anchorId then
         return true
     end
     local nextConfig = wallInOne.editableConfig()
@@ -7208,7 +7319,7 @@ function wallInOne.placeSchedule(output, scheduleId, anchorId, placement)
             anchorIndex = index
         end
     end
-    if sourceIndex == nil or anchorIndex == nil then
+    if sourceIndex == nil or (placement ~= "end" and anchorIndex == nil) then
         wallInOne.setActionError(noctalia.tr("errors.schedule_invalid"), "schedule-place")
         return false
     end
@@ -7216,6 +7327,10 @@ function wallInOne.placeSchedule(output, scheduleId, anchorId, placement)
     -- Work only on the normalized editable copy, then persist once. Recompute
     -- the anchor after removal so moves across either side cannot drift by one.
     local moving = table.remove(schedules, sourceIndex)
+    if placement == "end" then
+        table.insert(schedules, moving)
+        return wallInOne.saveConfig(nextConfig, "schedule-place")
+    end
     anchorIndex = nil
     for index, schedule in ipairs(schedules) do
         if schedule.id == anchorId then
@@ -8153,6 +8268,8 @@ function wallInOne.handleCommand(request)
         wallInOne.saveOutputEngines(request.output, engines)
     elseif kind == "pairing_save" then
         wallInOne.savePairing(request.pairing)
+    elseif kind == "pairing_reset" then
+        wallInOne.resetPairing(request.pairing)
     elseif kind == "pairing_delete" then
         wallInOne.deletePairing(request.pairing_id)
     elseif kind == "playlist_add_pairing" then
@@ -8163,7 +8280,7 @@ function wallInOne.handleCommand(request)
             request.before_id
         )
     elseif kind == "playlist_add_entry" then
-        wallInOne.addPlaylistEntry(request.output, request.playlist_id, request.entry)
+        wallInOne.addPlaylistEntry(request.output, request.playlist_id, request.entry, request.before_id)
     elseif kind == "playlist_save_entry" then
         wallInOne.savePlaylistEntry(request.playlist_id, request.entry)
     elseif kind == "playlist_remove_entry" then

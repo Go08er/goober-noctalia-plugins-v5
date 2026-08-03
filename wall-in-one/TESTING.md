@@ -1,8 +1,9 @@
 # Wall-in-One test record
 
 Wall-in-One `0.6.0` is tested as one owned wallpaper stack: routed UI, provider
-services, persisted pairing/playback state, and exact renderer children. Tests
-must not require another wallpaper plugin, private state, or cross-plugin IPC.
+services, persisted item-profile/playback state, and exact renderer children.
+Tests must not require another wallpaper plugin, private state, or cross-plugin
+IPC.
 
 ## Automated checks
 
@@ -29,7 +30,9 @@ window entry or page-stack primitive.
 Open the panel and traverse exactly these local routes:
 
 - Home;
-- Displays → each output → Overview / Engines / Schedule;
+- each detected display nested beneath Home, opening one combined page for its
+  renderer controls, rotate/shuffle and interval policy, pinned default
+  playlist, draggable scheduled overrides, and engine settings;
 - Library → Images / Videos / Wallpaper Engine;
 - Shops → Wallhaven / MotionBGS / Steam Workshop;
 - Playlists → each named playlist; and
@@ -43,9 +46,10 @@ panel merely to keep it beside another panel.
 
 Library cards should render a bounded still thumbnail in a consistent grid. A
 static defaults to itself; video/Workshop uses a valid preview or automatic
-still; all three get an explicit adaptive wallpaper theme policy. Apply,
-playlist-add, pairing edit, and sidecar-gated delete remain distinct compact
-actions with two-step destructive confirmation.
+still; all three get an implicit adaptive wallpaper theme policy and can be
+applied or added without first creating a profile. Optional Customize, Reset to
+defaults, and sidecar-gated managed-media deletion remain distinct compact
+actions. Reset and managed deletion require two-step destructive confirmation.
 
 ## Explicit roots and storage gating
 
@@ -142,11 +146,17 @@ HTML, three redirects, and 16–512 MiB MP4 bounds.
 
 The parser must preserve one anchor per callback, switch to 16ms only while
 parser state is active, and restore 250ms on success, parse error, cancellation,
-configuration disable, launch refusal, and exit. Use a realistic listing with
-170 irrelevant anchors plus 36 cards. Including EOF and publication callbacks,
-the schedule must remain at or below 3.5 seconds; the old 250ms behavior would
-take about 52 seconds. Repeat at least three large cold parses and reject any
-Noctalia CPU-budget error.
+configuration disable, launch refusal, and exit. Use the live-like listing with
+355 irrelevant anchors plus 36 cards (391 anchors total). Including EOF and
+publication, 393 callbacks take about 6.3 seconds and must remain at or below
+seven seconds; the 250ms cadence would take about 98 seconds. Repeat at least
+three large cold parses and reject any Noctalia CPU-budget error.
+
+Assert listing metadata performs exactly one pass over `<link>` elements in only
+the first 16 KiB of the document, stops after 32 links, and derives the total
+hint from that same prefix. Reject a return to full-document pagination passes;
+that work previously exceeded Noctalia's 25 ms callback deadline after card
+parsing.
 
 Test `/search?q=night` with effective URL `/tag:night/` as accepted. Reject
 `/tag:nature/`, malformed/cross-origin destinations, and canonical tags that do
@@ -164,26 +174,38 @@ and one small download through the panel. Stop on a challenge or changed access
 policy. Confirm the video lands beneath the selected video root and remains a
 normal local-library item without the network afterward.
 
-## Pairings, palettes, playlists, and schedules
+## Item profiles, palettes, playlists, and schedules
 
 For static, video, and Workshop library cards, verify the default selected or
-automatic still and adaptive palette. A live apply must persist the still before
-theme IPC and before renderer start. Missing media may degrade to a validated
-representative; without one it must fail before changing playback.
+automatic still and adaptive palette while the default color toggle is enabled;
+with it disabled, verify that an uncustomized item keeps the current theme. A
+live apply must persist the still before theme IPC and before renderer start.
+Missing media may degrade to a validated representative; without one it must
+fail before changing playback.
 
-Create one reusable pairing of each kind, link it into two playlists, edit it,
-then delete the catalog record. Occurrences retain stable IDs and their last
-valid snapshots. Drag/drop and explicit buttons must produce identical bounded
-commands; drag payloads never carry trusted paths or deletion authority.
+Apply and add one default item of each kind without an up-front create step.
+Customize one item of each kind and assert its schema-5 `pairings` plumbing
+records `customized = true`; linked occurrences in two playlists must retain
+stable entry IDs and receive the edited validated snapshot. Reset the item and
+assert the same profile ID is rewritten with derived defaults and
+`customized = false`, with linked snapshots synchronized. Then exercise
+the same default medium/source with a different palette and assert the original
+non-custom profile is reused, every linked snapshot is refreshed, and duplicate
+default records are collapsed. Separately exercise
+internal record deletion and verify occurrences lose their `pairing_id` links
+but retain their last valid snapshots and media. Drag/drop and explicit buttons
+must produce identical bounded commands; drag payloads never carry trusted paths
+or deletion authority.
 
 Test named playlist create/rename/duplicate/delete, stable-ID reorder, rotate,
 shuffle bag, start/pause/resume/stop/next/previous/random, Quick Choice, and
 one-entry parking. Assign one playlist to two displays and verify independent
 cursor, history, due time, engine settings, and manual pin.
 
+The pinned default playlist must remain above draggable scheduled overrides.
 Schedule rules use visible order, month/weekday sets, all-day or bounded time,
-and overnight prior-date semantics; the lowest matching row wins. Test DST/time
-changes, resume schedule, and no burst replay of missed swaps.
+and overnight prior-date semantics; the lowest matching row wins. Test reorder,
+DST/time changes, resume schedule, and no burst replay of missed swaps.
 
 Palette previews use a real validated still, exact non-applying Noctalia theme
 CLI, SHA-256-aware bounded caching, stale callback rejection, and one global

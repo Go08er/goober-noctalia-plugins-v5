@@ -77,7 +77,6 @@
   },
   "diagnostics": {
     "last_action_error": "Last action error: {error}",
-    "daemons": "Detected wallpaper control commands: {commands}",
     "ownership": "Noctalia owns persisted stills and color generation. Wall-in-One controls only its exact owned renderer children and never signals unrelated processes.",
     "palette_applied": "Applied: {mode} · {source} · {selection}\nResolution: {resolution} · fallback: {fallback} · {time}",
     "palette_authority": "Global palette authority: {output}",
@@ -96,7 +95,7 @@
     "probing": "Checking renderer, command, and shop capabilities...",
     "renderer": "Owned renderer: {state} · active outputs: {count} · {error}",
     "storage_error": "Wall-in-One storage is disabled. Config: {config} Runtime: {runtime}",
-    "storage_ok": "Schema-v4 pairing, playlist, and schedule config plus schema-v6 runtime storage are healthy. Older supported state is migrated through one recoverable two-document transaction."
+    "storage_ok": "Schema-v5 item, playlist, display, and schedule config plus schema-v6 runtime storage are healthy. Older supported state is migrated through one recoverable two-document transaction."
   },
   "errors": {
     "action_unavailable": "Configured action '{action}' is unavailable: {reason}",
@@ -159,7 +158,7 @@
     "playlist_entry": "The playlist entry is incomplete or invalid.",
     "playlist_entry_limit": "A playlist is limited to {limit} entries.",
     "playlist_entry_missing": "The selected playlist entry no longer exists.",
-    "pairing_limit": "Wall-in-One is limited to {limit} reusable pairings.",
+    "pairing_limit": "Wall-in-One is limited to {limit} reusable item profiles.",
     "playlist_limit": "Wall-in-One is limited to {limit} named playlists.",
     "playlist_missing": "The selected playlist no longer exists.",
     "playlist_name": "Enter a non-empty playlist name within the supported length limit.",
@@ -274,10 +273,10 @@
       "workshop": "Wallpaper Engine"
     },
     "home": {
-      "choose_library": "Choose an item from the Library to create the display's Quick Choice pairing.",
-      "current_pairing": "Current pairing",
-      "description": "The selected display, its current pairing, and Wall-in-One-owned playback.",
-      "no_pairing": "No pairing is active",
+      "choose_library": "Choose an item from the Library to apply it with its built-in defaults.",
+      "current_pairing": "Current wallpaper",
+      "description": "The selected display, its current wallpaper, and Wall-in-One-owned playback.",
+      "no_pairing": "No wallpaper is active",
       "title": "Wallpapers"
     },
     "cycle": {
@@ -299,8 +298,8 @@
       "browse_motionbgs": "Browse MotionBGS",
       "delete_managed": "Delete managed wallpaper",
       "delete_managed_confirm": "Delete {name} and its Wall-in-One metadata? Managed videos also remove their generated stills.",
-      "default_pairing": "Default pairing",
-      "default_pairing_note": "Every item has a default still and Noctalia palette. Editing or adding it saves that pairing for reuse.",
+      "default_pairing": "Default",
+      "default_pairing_note": "Every item is ready to use with a default still and Noctalia palette. Customize only the items that need different behavior.",
       "description": "User-owned image and video directories, Wall-in-One-managed downloads, and Wallpaper Engine's Steam Workshop cache are indexed as separate ownership classes.",
       "directory_layout": {
         "automatic_stills": "Automatic stills: plugin-managed subfolder under the image wallpaper directory; generated pairs follow their video or Workshop source.",
@@ -320,8 +319,8 @@
       "no_workshops": "No Wallpaper Engine projects were found in the Steam Workshop cache.",
       "open_workshop": "Open Wallpaper Engine Workshop",
       "refresh": "Refresh library",
-      "pairing_browser_description": "Browse visual pairing cards. Video and Wallpaper Engine items use their selected, cached, or project preview still.",
-      "saved_pairing": "Saved pairing",
+      "pairing_browser_description": "Browse media directly. Video and Wallpaper Engine items use their selected, cached, or project preview still.",
+      "saved_pairing": "Customized",
       "steam_owned": "Managed by Steam",
       "still_automatic": "Still: generated automatically when first needed",
       "still_preview": "Still: project or cached preview",
@@ -383,7 +382,6 @@
         "tv": "TV"
       },
       "hd_unpaged": "MotionBGS currently redirects HD page 2 into its unfiltered catalog, so Wall-in-One deliberately exposes only the trustworthy first HD page.",
-      "last_download": "Last MotionBGS download",
       "latest_note": "Pageable newest-wallpapers catalog",
       "mode_4k": "4K catalog",
       "mode_genre": "Genre / tag",
@@ -412,7 +410,7 @@
       "custom_directory": "Custom palette directory: {path}",
       "degraded": "Palette inventory is degraded: {error}",
       "description": "Choose the theme mode and palette stored with each entry. Community results use a bounded six-hour cache; custom palettes come from Noctalia's palette directory.",
-      "inherit": "Keep current theme (migrated entries only)",
+      "inherit": "Keep current theme",
       "missing": "Missing — runtime fallback: Noctalia",
       "mode_auto": "Auto",
       "mode_dark": "Dark",
@@ -431,21 +429,21 @@
       "wallpaper": "Wallpaper generators"
     },
     "pairings": {
-      "title": "Pairings",
-      "description": "A pairing combines one still or live source, its real static representative, and one Noctalia palette policy. Reuse it in any playlist.",
-      "stills_description": "Create still-image and palette pairings, or manage stills downloaded from Wallhaven.",
-      "videos_description": "Create video, representative-image, and palette pairings, or manage MotionBGS downloads.",
-      "engine_description": "Create Wallpaper Engine scene, representative-image, and palette pairings from Steam Workshop projects.",
-      "new": "New pairing",
-      "edit": "Edit pairing",
-      "save": "Save pairing",
+      "title": "Item defaults",
+      "description": "Customize the representative still and Noctalia palette for this library item.",
+      "stills_description": "Customize a still image and its palette behavior.",
+      "videos_description": "Customize a video, representative image, and palette behavior.",
+      "engine_description": "Customize a Wallpaper Engine scene, representative image, and palette behavior.",
+      "new": "Customize item",
+      "edit": "Edit item",
+      "save": "Save item defaults",
       "cancel": "Cancel",
-      "delete": "Delete pairing",
-      "confirm_delete": "Delete pairing? Playlist copies keep their last valid snapshot.",
-      "empty": "No {kind} pairings have been created yet.",
+      "delete": "Reset to defaults",
+      "confirm_delete": "Reset this item and update its linked playlist entries?",
+      "empty": "No {kind} items were found in the configured library.",
       "add": "Add to playlist",
       "drag": "Drag into the playlist",
-      "drag_hint": "Drag a pairing by its grip into an insertion line, or use Add for keyboard access.",
+      "drag_hint": "Drag any library item by its grip into an insertion line, or use Add for keyboard access.",
       "image_drawer": "Image drawer",
       "video_drawer": "Video drawer",
       "engine_drawer": "Engine drawer",
@@ -453,11 +451,11 @@
       "palette_preview_auto": "Auto mode preview (dark and light)",
       "palette_preview_dark": "Dark palette preview",
       "palette_preview_light": "Light palette preview",
-      "palette_preview_wallpaper": "Generated from this pairing's representative still—not the current desktop wallpaper.",
-      "palette_preview_loading": "Generating this pairing's exact Noctalia palette…",
+      "palette_preview_wallpaper": "Generated from this item's representative still—not the current desktop wallpaper.",
+      "palette_preview_loading": "Generating this item's exact Noctalia palette…",
       "palette_preview_error": "Palette preview failed: {error}",
       "palette_preview_unavailable": "No preview colors are available for this palette.",
-      "snapshot_notice": "Playlist occurrences follow this pairing while it exists and retain their last valid snapshot if it is deleted."
+      "snapshot_notice": "Playlist entries follow customized item defaults; resetting an item updates its linked entries to the current defaults."
     },
     "playlists": {
       "apply": "Apply now",
@@ -468,17 +466,17 @@
       "create_first": "Create the first playlist",
       "default_name": "Playlist",
       "delete": "Delete playlist",
-      "description": "Build reusable ordered sets by dragging still, video, and Wallpaper Engine pairings from the drawers.",
+      "description": "Build reusable ordered sets by dragging still, video, and Wallpaper Engine items from the library drawers.",
       "duplicate": "Duplicate playlist",
-    "empty": "This playlist has no entries.",
-    "empty_rotation": "Timing and order become available after at least two entries are added.",
+      "empty": "This playlist has no entries.",
+      "empty_rotation": "Timing and order become available after at least two entries are added.",
       "entries": "Entries",
       "entry": {
         "add_save": "Add entry",
         "cancel": "Cancel",
         "edit_save": "Save changes",
         "edit_title": "Edit playlist entry",
-        "keep_theme": "Keep current theme (migration compatibility)",
+        "keep_theme": "Keep current theme",
         "kind_still": "Still image",
         "label_placeholder": "Entry label",
         "media_still": "Still only",
@@ -528,12 +526,14 @@
       "title": "Playlists",
       "drop_here": "Drop here",
       "drag_reorder": "Drag to reorder",
-      "drawer_hint": "Pairings remain reusable; adding one creates an ordered playlist occurrence.",
+      "drawer_hint": "Every library item already has working defaults; item customizations are reused automatically.",
       "move_to": "Move to position"
     },
     "screens": {
       "title": "Screens",
       "description": "Assign a default playlist and ordered calendar overrides for each display.",
+      "automation": "Playlist automation",
+      "automation_description": "The first row is the always-available default. Drag scheduled overrides below it; lower matching rows take priority.",
       "default_playlist": "Default playlist",
       "no_default": "No default playlist",
       "playback": "Playback on this screen",
@@ -574,6 +574,7 @@
       "precedence": "Lower rules win when active windows overlap",
       "move_up": "Move rule up",
       "move_down": "Move rule down",
+      "drag": "Drag to reorder this scheduled playlist",
       "all_months": "All months",
       "months": "Months",
       "month_jan": "Jan",
@@ -594,7 +595,7 @@
       "start": "Start time",
       "summary": "{months} · {days} · {window} · {state}",
       "time_window": "Time window",
-      "title": "Schedule",
+      "title": "Scheduled overrides",
       "to": "to",
       "validation_time": "Use 24-hour times in HH:MM format.",
       "validation_month": "Select at least one month.",
@@ -621,7 +622,6 @@
       "error": "Wallhaven: {error}",
       "exact_placeholder": "Exact, e.g. 1920x1080,2560x1440",
       "filters": "Filters",
-      "last_download": "Last Wallhaven download",
       "minimum_placeholder": "Minimum, e.g. 2560x1440",
       "next_page": "Next page",
       "order_asc": "Ascending",
@@ -674,15 +674,15 @@
     },
     "setup": {
       "direct_link_note": "The external site can still be opened explicitly, but Wall-in-One will not search, download, or index it until its matching location is ready.",
-      "home_required": "Choose existing image and video locations before Wall-in-One scans libraries, prepares caches, or starts a shop.",
+      "home_required": "Choose existing image and video locations to unlock every library and shop. Each medium remains independent while the other is unset.",
       "image_required": "Choose an existing image wallpaper location before using this library or shop.",
-      "no_hidden_work": "Opening this panel does not probe providers, refresh palettes, scan libraries, or prepare shop caches while setup is incomplete.",
+      "no_hidden_work": "Each image or video feature waits for its matching location; configured features may continue independently while the other location is unset.",
       "open_settings": "Choose location in Settings",
       "title": "Finish wallpaper setup",
       "video_required": "Choose an existing video wallpaper location before using this library or shop."
     },
     "steam": {
-      "description": "Open Wallpaper Engine or its Workshop explicitly. Installed projects appear as pairing cards in the Wallpaper Engine library.",
+      "description": "Open Wallpaper Engine or its Workshop explicitly. Installed projects appear as media cards in the Wallpaper Engine library.",
       "library_note": "Wall-in-One reads installed Workshop projects only after the image location needed for representative stills is ready.",
       "open_library": "Open Wallpaper Engine library",
       "title": "Steam Workshop"
@@ -739,7 +739,7 @@
       "label": "Color"
     },
     "color_scheme": {
-      "description": "Noctalia scheme selected when an exported still is paired.",
+      "description": "Wallpaper generator used by uncustomized items while adaptive colors are the system default.",
       "label": "Wallpaper color scheme",
       "options": {
         "dysfunctional": "Dysfunctional",
@@ -799,7 +799,7 @@
       "label": "Show label"
     },
     "sync_colors": {
-      "description": "Legacy/default policy for newly captured Quick Choice entries: select Noctalia's wallpaper source and the generator below. Named entries store their own complete theme policy.",
+      "description": "System default for uncustomized library items and new Quick Choice entries. Disable it to keep the current theme; customized items store their own complete policy.",
       "label": "Default to adaptive wallpaper colors"
     },
     "use_motionbgs": {

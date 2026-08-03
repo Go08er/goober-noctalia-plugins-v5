@@ -5,7 +5,7 @@ plugin_api = 17
 author = "goober"
 license = "MIT"
 icon = "library-photo"
-description = "Build reusable wallpaper pairings and playlists with live media, schedules, and exact Noctalia palette previews."
+description = "Organize stills, videos, and Workshop scenes into playlists with per-item palettes and display schedules."
 deprecated = false
 tags = ["wallpaper", "bar", "panel", "shortcut", "theming", "video", "service", "utility"]
 dependencies = ["bash", "curl", "sha256sum"]
@@ -104,7 +104,7 @@ key = "sync_colors"
 type = "bool"
 label_key = "settings.sync_colors.label"
 description_key = "settings.sync_colors.description"
-default = false
+default = true
 
 [[setting]]
 key = "color_scheme"

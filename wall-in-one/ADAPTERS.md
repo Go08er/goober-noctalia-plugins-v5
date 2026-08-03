@@ -13,8 +13,11 @@ therefore uses one normal panel configured as a full-size floating view
 (`width = "fill"`, `height = "fill"`). Its hierarchy is local Luau route state,
 not a collection of simultaneously rendered sections:
 
-- **Home** — readiness, setup, and concise status;
-- **Displays** → each output → **Overview**, **Engines**, **Schedule**;
+- **Home** — readiness, setup, and concise status, followed by one inset route
+  per detected display;
+- each display route — one combined page containing renderer controls,
+  rotate/shuffle and interval policy, a pinned default playlist, draggable
+  scheduled overrides, and per-display video/Workshop engine settings;
 - **Library** → **Images**, **Videos**, **Wallpaper Engine**;
 - **Shops** → **Wallhaven**, **MotionBGS**, **Steam Workshop**;
 - **Playlists** → each named playlist; and
@@ -28,10 +31,11 @@ panel so ordinary controls, including selects, remain available.
 Library cards use a still image as their visual identity. A static image selects
 itself as its still. A video or Workshop project uses a validated selected
 preview when one exists and otherwise defaults to automatic still generation.
-Every card is presented as a pairing with an explicit theme policy; new virtual
-pairings default to adaptive wallpaper colors rather than an untracked media-only
-row. Applying, adding to a playlist, and editing all pass through the same
-validated pairing bundle.
+Every card synthesizes a complete default item profile, using adaptive wallpaper
+colors by default or keep-current when that installation-wide default is
+disabled. Applying or adding it to a playlist never requires a separate create
+step. Customization is optional. Apply, playlist add, drag/drop, and customize
+all pass through the same validated bundle boundary.
 
 ## Coordinator and persisted state
 
@@ -41,7 +45,7 @@ referenced by revision:
 
 | State key | Contents |
 | --- | --- |
-| `wall_in_one_config_state_v1` | schema-5 pairings, playlists, output assignments, per-display engines, schedules, and gestures |
+| `wall_in_one_config_state_v1` | schema-5 item-profile records, playlist snapshots, output assignments, per-display engines, schedules, and gestures |
 | `wall_in_one_runtime_state_v1` | schema-6 pair provenance, playlist runs, output state, palette diagnostics, active Workshop IDs, and last capture |
 | `wall_in_one_library_state_v1` | bounded image, video, and Workshop inventories plus incremental scan state |
 
@@ -50,16 +54,29 @@ match the lifecycle object. Commands carry monotonically increasing nonces and
 are never replayed automatically. The renderer, palette, Wallhaven, and
 MotionBGS services use their own bounded versioned state keys.
 
-Schema 5 keeps a reusable pairing catalog. A playlist occurrence has a stable
-entry ID, a validated bundle snapshot, and an optional link to a catalog pairing.
-Editing a linked pairing updates its occurrences; deleting the catalog record
-detaches existing occurrences without deleting their snapshots or media.
+Schema 5 retains the field name `pairings`, but this is item-profile and snapshot
+plumbing rather than a catalog users must populate. Library items synthesize a
+validated default bundle. Saving a customization creates or updates the stable
+profile with `customized = true`; records predating explicit provenance are
+normalized as customized to preserve their old behavior. Reset writes the same
+profile ID with freshly derived defaults and `customized = false`, then
+synchronizes every linked occurrence. Non-custom profiles are keyed by the
+static path or dynamic medium/source identity, so changing defaults updates one
+record instead of accumulating hidden duplicates.
 
-Each display stores a fallback playlist, ordered schedule rules, optional
-playlist playback overrides, and its own engine configuration. Schema 1–4
-outputs receive the documented schema-5 engine defaults during migration;
-afterward the settings live only with that display. This avoids reading removed,
-undeclared manifest keys, which current Noctalia intentionally rejects.
+A playlist occurrence has its own stable entry ID, a validated bundle snapshot,
+and an optional `pairing_id` link. Linked edits and resets refresh those
+snapshots. Actual record deletion is a separate internal operation: it clears
+the links but deliberately leaves each last valid snapshot and media intact.
+
+Each display stores a pinned default playlist, ordered schedule rules, optional
+playlist playback overrides, and its own engine configuration. Scheduled rows
+are draggable; when multiple enabled rules match, the lowest visible row wins.
+All of these controls share the display's combined page beneath **Home**.
+Schema 1–4 outputs receive the documented schema-5 engine defaults during
+migration; afterward the settings live only with that display. This avoids
+reading removed, undeclared manifest keys, which current Noctalia intentionally
+rejects.
 
 ## Per-display engine configuration
 
@@ -213,9 +230,14 @@ Listing parsing preserves one anchor per update callback so one complex card
 cannot consume the host's callback CPU budget. The service switches from its
 250ms idle cadence to 16ms only while parser state is active, then restores the
 idle cadence on success, error, cancellation, configuration disable, launch
-refusal, or exit. A live-like page containing 170 unrelated anchors and 36
-cards therefore schedules about 208 small callbacks, roughly 3.3 seconds,
-instead of about 52 seconds at the idle cadence.
+refusal, or exit. The live-like fixture contains 355 unrelated anchors and 36
+cards: 391 anchors plus EOF and publication schedule 393 small callbacks, or
+roughly 6.3 seconds instead of roughly 98 seconds at the idle cadence.
+
+Pagination metadata is extracted in one pass over at most 32 `<link>` elements
+within the first 16 KiB of the document head; the title-derived total hint uses
+that same prefix. The bound removes the former full-document pagination scans
+that could breach Noctalia's 25 ms update-callback deadline after card parsing.
 
 MotionBGS may canonicalize an exact text tag search from `/search?q=X` to
 `/tag:<slug>/`. Wall-in-One accepts that redirect only on the same origin and

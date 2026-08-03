@@ -134,7 +134,7 @@ def test_manifest_and_translations() -> None:
         settings["scene_screenshot_delay"]["min"],
         settings["scene_screenshot_delay"]["max"],
     ) == (15, 1, 120)
-    assert settings["sync_colors"]["default"] is False
+    assert settings["sync_colors"]["default"] is True
     assert settings["cycle_start_on_load"]["default"] is False
     assert (settings["cycle_interval_minutes"]["min"], settings["cycle_interval_minutes"]["max"]) == (
         1,
@@ -183,6 +183,7 @@ def test_schema_document_fixtures() -> None:
                     "source": "wallpaper",
                     "selection": "m3-tonal-spot",
                 },
+                "customized": True,
                 "added_at": "2026-08-01 20:00:00",
             }
         },
@@ -204,6 +205,7 @@ def test_schema_document_fixtures() -> None:
                             "source": "wallpaper",
                             "selection": "m3-tonal-spot",
                         },
+                        "customized": True,
                         "added_at": "2026-08-01 20:00:00",
                     },
                     {
@@ -219,6 +221,7 @@ def test_schema_document_fixtures() -> None:
                             "source": "builtin",
                             "selection": "Nord",
                         },
+                        "customized": True,
                         "added_at": "2026-08-01 20:01:00",
                     },
                 ],
@@ -354,7 +357,7 @@ def test_schema_document_fixtures() -> None:
     occurrence = playlist["entries"][0]
     assert occurrence["pairing_id"] == pairing["id"]
     assert occurrence["id"] != pairing["id"]
-    for field in ("label", "media", "still", "theme"):
+    for field in ("label", "media", "still", "theme", "customized"):
         assert occurrence[field] == pairing[field]
     assert "pairing_id" not in pairing, "catalog records are reusable bundles, not occurrences"
     run = runtime_round_trip["runs"]["HEADLESS-1"]["playlist-evening-1"]
@@ -881,6 +884,7 @@ def test_coordinator_contract() -> None:
             'if type(settingsSnapshotCache) == "table" then',
             'use_wallhaven = wallInOne.settingBool("use_wallhaven", true)',
             'use_motionbgs = wallInOne.settingBool("use_motionbgs", true)',
+            'sync_colors = wallInOne.settingBool("sync_colors", true)',
             "settingsSnapshotCache = snapshot",
         ),
         "cached bounded settings snapshot",
@@ -1155,6 +1159,26 @@ def test_coordinator_contract() -> None:
     assert "config.reels" not in commands
     assert "runtime.cycles" not in commands
 
+    add_playlist_entry = service[
+        service.index("function wallInOne.addPlaylistEntry") : service.index(
+            "function wallInOne.effectivePlaylistOrder"
+        )
+    ]
+    require_all(
+        add_playlist_entry,
+        (
+            "function wallInOne.addPlaylistEntry(output, playlistId, rawEntry, beforeId)",
+            'local anchor = wallInOne.entryIndexById(nextPlaylist, tostring(beforeId or ""))',
+            "table.insert(nextPlaylist.entries, anchor, entry)",
+            "table.insert(nextPlaylist.entries, entry)",
+        ),
+        "library item insertion at the requested playlist zone",
+    )
+    assert (
+        "wallInOne.addPlaylistEntry(request.output, request.playlist_id, request.entry, request.before_id)"
+        in commands
+    ), "playlist_add_entry must pass the insertion-zone anchor through dispatch"
+
     output_engine_save = service[
         service.index("function wallInOne.saveOutputEngines") : service.index(
             "function wallInOne.outputState"
@@ -1350,10 +1374,12 @@ def test_reusable_pairing_catalog_contract() -> None:
             "local snapshot = wallInOne.pairingFromEntry(pairing, entry.id)",
             "snapshot.pairing_id = pairingId",
             "playlist.entries[index] = snapshot",
-            "function wallInOne.savePairing(rawPairing)",
+            "function wallInOne.savePairing(rawPairing, customized)",
             "nextConfig.pairings[id] = pairing",
-            "wallInOne.syncPairingSnapshots(nextConfig, id)",
+            "wallInOne.collapseDefaultPairingIdentity(nextConfig, id)",
             'wallInOne.saveConfig(nextConfig, "pairing-save")',
+            "function wallInOne.resetPairing(rawPairing)",
+            "return wallInOne.savePairing(rawPairing, false) ~= nil",
             "function wallInOne.deletePairing(pairingId)",
             "nextConfig.pairings[pairingId] = nil",
             "entry.pairing_id = nil",
@@ -1374,7 +1400,7 @@ def test_reusable_pairing_catalog_contract() -> None:
         )
     ]
     assert save_pairing.index("nextConfig.pairings[id] = pairing") < save_pairing.index(
-        "wallInOne.syncPairingSnapshots(nextConfig, id)"
+        "wallInOne.collapseDefaultPairingIdentity(nextConfig, id)"
     ) < save_pairing.index('wallInOne.saveConfig(nextConfig, "pairing-save")')
 
     delete_pairing = catalog[
@@ -1383,7 +1409,7 @@ def test_reusable_pairing_catalog_contract() -> None:
         )
     ]
     assert "table.remove(playlist.entries" not in delete_pairing
-    for field in ("label", "media", "still", "theme", "added_at"):
+    for field in ("label", "media", "still", "theme", "customized", "added_at"):
         assert f"entry.{field} =" not in delete_pairing, (
             f"catalog deletion rewrote the preserved {field} snapshot"
         )
@@ -1430,6 +1456,164 @@ def test_reusable_pairing_catalog_contract() -> None:
     assert renderer_recovery.count(
         "local state, entry = wallInOne.activePlaylistRunAndEntry(output)"
     ) == 2
+
+
+def test_item_default_provenance_contract() -> None:
+    """Distinguish synthesized defaults from deliberate per-item overrides."""
+
+    service = text("service.luau")
+    panel = text("panel.luau")
+
+    entry_model = service[
+        service.index("function wallInOne.normalizedEntryBundle") : service.index(
+            "function wallInOne.normalizedPlaylists"
+        )
+    ]
+    require_all(
+        entry_model,
+        (
+            # A newly normalized library/playlist bundle has no override unless
+            # the caller deliberately supplies the boolean provenance bit.
+            "customized = candidate.customized == true",
+            "customized = entry.customized == true",
+            "function wallInOne.bundleIdentity(candidate)",
+            # Missing provenance has different meaning only inside the legacy
+            # pairing-map boundary. Old explicit records remain overrides,
+            # while an explicit false survives normalization unchanged.
+            "pairing.customized = if rawPairing.customized == nil then true else rawPairing.customized == true",
+        ),
+        "contextual item-default provenance normalization",
+    )
+
+    catalog = service[
+        service.index("function wallInOne.collapseDefaultPairingIdentity") : service.index(
+            "function wallInOne.deletePairing"
+        )
+    ]
+    require_all(
+        catalog,
+        (
+            # Automatic cataloging copies the normalized entry's explicit
+            # false; it must not turn discovery into a user override.
+            "nextConfig.pairings[id] = wallInOne.pairingFromEntry(entry, id)",
+            'local identity = if entry.customized == true then "" else wallInOne.bundleIdentity(entry)',
+            "pairing.customized ~= true",
+            "wallInOne.bundleIdentity(pairing) == identity",
+            "local canonicalId = defaultIds[1]",
+            "occurrence.pairing_id = canonicalId",
+            "nextConfig.pairings[duplicateId] = nil",
+            "wallInOne.collapseDefaultPairingIdentity(nextConfig, canonicalId)",
+            "function wallInOne.savePairing(rawPairing, customized)",
+            "customized = customized ~= false",
+            "wallInOne.collapseDefaultPairingIdentity(nextConfig, id)",
+            "function wallInOne.resetPairing(rawPairing)",
+            "return wallInOne.savePairing(rawPairing, false) ~= nil",
+        ),
+        "automatic, explicit, and reset item-profile writes",
+    )
+    assert catalog.index("wallInOne.collapseDefaultPairingIdentity(nextConfig, canonicalId)") < catalog.index(
+        "return canonicalId"
+    ) < catalog.index("nextConfig.pairings[id] = wallInOne.pairingFromEntry(entry, id)"), (
+        "an existing default identity must update and relink before a new catalog profile is allocated"
+    )
+    save_pairing = catalog[
+        catalog.index("function wallInOne.savePairing") : catalog.index(
+            "function wallInOne.resetPairing"
+        )
+    ]
+    assert save_pairing.index("customized = customized ~= false") < save_pairing.index(
+        "nextConfig.pairings[id] = pairing"
+    ) < save_pairing.index("wallInOne.collapseDefaultPairingIdentity(nextConfig, id)")
+
+    commands = service[
+        service.index("function wallInOne.handleCommand") : service.index("function update()")
+    ]
+    require_all(
+        commands,
+        (
+            'kind == "pairing_save"',
+            "wallInOne.savePairing(request.pairing)",
+            'kind == "pairing_reset"',
+            "wallInOne.resetPairing(request.pairing)",
+        ),
+        "item-profile command provenance",
+    )
+
+    open_editor = panel[
+        panel.index("local function openLibraryEntryPairing") : panel.index(
+            "local function actionLabel"
+        )
+    ]
+    assert "type(existing) == \"table\" and existing.customized == true" in open_editor
+
+    library_card = panel[
+        panel.index("function panelUi.libraryCard") : panel.index(
+            "function panelUi.libraryItems"
+        )
+    ]
+    require_all(
+        library_card,
+        (
+            "local customized = type(existing) == \"table\" and existing.customized == true",
+            "panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)",
+            'local pairingId = if customized then tostring(existing.id or "") else ""',
+            'local profileId = type(existing) == "table" and tostring(existing.id or "") or ""',
+            "local pairingDeleteArmed = customized and pendingDeletePairingId == profileId",
+            "defaultBundle.id = profileId",
+            'send({ kind = "pairing_reset", pairing = defaultBundle })',
+            "panelUi.libraryPaletteSummary(bundle, not customized)",
+        ),
+        "library-card default and override provenance",
+    )
+    assert "local pairingDeleteArmed = not managed" not in library_card
+
+    default_bundle = panel[
+        panel.index("function panelUi.virtualLibraryPairing") : panel.index(
+            "function panelUi.libraryPreviewPath"
+        )
+    ]
+    require_all(
+        default_bundle,
+        (
+            "local useAdaptiveColors = settings().sync_colors ~= false",
+            'then { mode = "auto", source = "wallpaper", selection = scheme }',
+            'else { mode = "inherit", source = "inherit", selection = "" }',
+        ),
+        "system default palette policy",
+    )
+
+    resolver = panel[
+        panel.index("local function preferredPairingForLibraryEntry") : panel.index(
+            "local function actionLabel"
+        )
+    ]
+    require_all(
+        resolver,
+        (
+            "local function preferredPairingForLibraryEntry(existing, candidate)",
+            "if existingCustomized ~= candidateCustomized then",
+            "selected = preferredPairingForLibraryEntry(selected, pairing)",
+        ),
+        "deterministic library item profile resolver",
+    )
+
+    library_drawer = panel[
+        panel.index("local function playlistPairingDrawer") : panel.index(
+            "local function playlistPairingDrawers"
+        )
+    ]
+    require_all(
+        library_drawer,
+        (
+            "local customized = type(existing) == \"table\" and existing.customized == true",
+            "panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)",
+            'local pairingId = if customized then tostring(existing.id or "") else ""',
+            "library_bundle = bundle",
+            "pairing_id = pairingId",
+            "panelUi.libraryPaletteSummary(bundle, not customized)",
+        ),
+        "playlist-drawer default and override provenance",
+    )
 
 
 def test_renderer_crash_backoff_contract() -> None:
@@ -2087,13 +2271,13 @@ def test_managed_library_ownership_contract() -> None:
     assert "removeFile(request.target)" not in wallhaven_download
 
     panel_delete = panel[
-        panel.index("local function libraryEntryRow") : panel.index("local function motionBgsSection")
+        panel.index("function panelUi.libraryCard") : panel.index("function panelUi.libraryItems")
     ]
     require_all(
         panel_delete,
         (
-            "local deletable = managed and metadata.deletable == true",
-            'local itemId = if deletable then tostring(metadata.id or "") else ""',
+            "local managed = metadata.managed == true and metadata.deletable == true",
+            'local itemId = tostring(metadata.id or "")',
             'send({ kind = "library_delete", item_id = itemId })',
         ),
         "opaque managed deletion UI",
@@ -3161,9 +3345,13 @@ def test_provider_preview_panel_contract() -> None:
             "return ui.image({",
             "path = path",
             'fit = "cover"',
-            "return ui.row({",
+            "return ui.box({",
         ),
         "local-file preview node with placeholder fallback",
+    )
+    assert "return ui.row({" not in preview_node, (
+        "provider placeholders should match the official browser's decorative box "
+        "instead of nesting an extra row inside every result tile"
     )
     for forbidden in ("http://", "https://", "thumbnail_url", "poster_url", "thumbs"):
         assert forbidden not in preview_node, f"preview image node can consume remote data directly: {forbidden}"
@@ -4103,6 +4291,8 @@ def test_motionbgs_contract() -> None:
             "local MAX_CACHE_SEARCHES = 8",
             "local MAX_CACHE_DETAILS = 48",
             "local MAX_HTML_RESPONSE_BYTES = 1024 * 1024",
+            "local LISTING_META_PREFIX_BYTES = 16384",
+            "local LISTING_META_LINK_LIMIT = 32",
             'local MANAGED_DOWNLOAD_SUFFIX = "/Wall-in-One/MotionBGS"',
             'local MANAGED_DIRECTORY_MARKER = ".wall-in-one-motionbgs-managed.json"',
             '"deletion_authority":"adjacent .motionbgs.json sidecar required"',
@@ -4195,15 +4385,52 @@ def test_motionbgs_contract() -> None:
     anchors_per_tick = integer_constant("SEARCH_ANCHORS_PER_TICK")
     parse_interval_ms = integer_constant("SEARCH_PARSE_INTERVAL_MS")
     idle_interval_ms = integer_constant("IDLE_UPDATE_INTERVAL_MS")
+    listing_meta_prefix_bytes = integer_constant("LISTING_META_PREFIX_BYTES")
+    listing_meta_link_limit = integer_constant("LISTING_META_LINK_LIMIT")
     assert anchors_per_tick == 1, "MotionBGS parser must preserve one anchor per callback"
     assert parse_interval_ms == 16
     assert idle_interval_ms == 250
-    # A current provider page has about 170 unrelated navigation/footer anchors
-    # in addition to its 36 wallpaper cards. Include the EOF and publication
-    # callbacks so a cadence regression cannot silently restore a ~52s parse.
-    realistic_anchor_count = 170 + 36
+    assert 0 < listing_meta_prefix_bytes <= 64 * 1024
+    assert 0 < listing_meta_link_limit <= 64
+    # The VM fixture deliberately carries 355 unrelated navigation anchors in
+    # addition to its 36 wallpaper cards. Include the EOF and publication
+    # callbacks so the fixture remains practical without weakening the
+    # one-anchor-per-callback CPU-budget boundary.
+    realistic_anchor_count = 355 + 36
     realistic_parse_callbacks = (realistic_anchor_count + anchors_per_tick - 1) // anchors_per_tick + 2
-    assert realistic_parse_callbacks * parse_interval_ms <= 3500
+    assert realistic_parse_callbacks * parse_interval_ms <= 7000
+
+    listing_meta = service[
+        service.index("local function parseListingMeta") : service.index("local function metaContent")
+    ]
+    require_all(
+        listing_meta,
+        (
+            "local metadataHtml = html:sub(1, LISTING_META_PREFIX_BYTES)",
+            "local metadataLower = metadataHtml:lower()",
+            'local headClose = metadataLower:find("</head", 1, true)',
+            "while linksSeen < LISTING_META_LINK_LIMIT do",
+            'local startAt = metadataLower:find("<link", cursor, true)',
+            'local finishAt = metadataLower:find(">", startAt + 5, true)',
+            'relationToken(attributes, "prev")',
+            'relationToken(attributes, "next")',
+            "total_hint = listingTotalHint(metadataHtml)",
+        ),
+        "head-only plain-search MotionBGS listing metadata parser",
+    )
+    assert "metadataHtml:gmatch(" not in listing_meta
+    assert "metadataLower:gmatch(" not in listing_meta
+    assert "html:gmatch(" not in listing_meta
+    assert "relatedPageUrl" not in service
+
+    challenge_probe = service[
+        service.index("local function challengePage") : service.index("local function beginSearchParse")
+    ]
+    assert ':sub(1, LISTING_META_PREFIX_BYTES):lower()' in challenge_probe
+    empty_probe = service[
+        service.index("local function advanceSearchParse") : service.index("local function relationToken")
+    ]
+    assert ':sub(1, LISTING_META_PREFIX_BYTES):lower()' in empty_probe
 
     cadence_helper = service[
         service.index("local function setUpdateCadence") : service.index("local previousStatus")
@@ -4576,7 +4803,7 @@ def test_ui_and_documentation_surface() -> None:
             'noctalia.tr("panel.motionbgs.mode_latest")',
             'noctalia.tr("panel.motionbgs.genre_presets.custom")',
             '"hello-kitty"',
-            'key = "motionbgs-page"',
+            'key = "motionbgs-page-" .. tostring(motionPageInputRevision)',
             'noctalia.tr("panel.motionbgs.previous_page")',
             'noctalia.tr("panel.motionbgs.next_page")',
             "local function paletteInventory()",
@@ -4693,7 +4920,10 @@ def test_declarative_ui_layout_contract() -> None:
 
     panel = text("panel.luau")
     assert 'variant = "danger"' not in panel, "Noctalia v5 calls the destructive button variant 'destructive'"
-    assert panel.count('variant = if deleteArmed then "destructive" else "ghost"') == 2
+    assert "current.daemons" not in panel
+    assert 'noctalia.tr("diagnostics.daemons"' not in panel
+    assert panel.count('variant = if pairingDeleteArmed then "destructive" else "ghost"') == 1
+    assert panel.count('variant = if managedDeleteArmed then "destructive" else "ghost"') == 1
 
     box_calls = re.findall(r"ui\.box\(\{(.*?)\}\)", panel, flags=re.DOTALL)
     assert len(box_calls) == panel.count("ui.box({"), "ui.box must not receive a child table"
@@ -4722,12 +4952,259 @@ def test_declarative_ui_layout_contract() -> None:
         "the grid helper must serve Wallhaven, MotionBGS, and all three local libraries"
     )
 
+    explicit_grid = panel[
+        panel.index("function panelUi.appendExplicitGrid") : panel.index("function panelUi.actionButton")
+    ]
+    require_all(
+        explicit_grid,
+        ('ui.row({ gap = 8, align = "stretch", justify = "start" }, cards)',),
+        "equal-height, left-aligned browser grid rows",
+    )
+    assert 'align = "start"' not in explicit_grid
+    assert 'justify = "center"' not in explicit_grid
+
+    # Select values are controlled host widgets. Re-render each draft change so
+    # dependent controls and the declared tree agree immediately, rather than
+    # waiting for a provider response or a route round-trip.
+    immediate_selects = (
+        ("wallhaven-categories", "wallhaven-purity"),
+        ("wallhaven-purity", "wallhaven-sort"),
+        ("wallhaven-sort", "wallhaven-order"),
+        ("wallhaven-order", "wallhaven-resolution-mode"),
+        ("wallhaven-resolution-mode", "wallhaven-resolution"),
+        ("wallhaven-color", "wallhaven-top-range"),
+        ("wallhaven-top-range", "wallhaven-page-"),
+        ("motionbgs-genre-preset", "motionbgs-genre-"),
+    )
+    for key, following_key in immediate_selects:
+        block = panel[
+            panel.index(f'key = "{key}"') : panel.index(f'key = "{following_key}"')
+        ]
+        require_all(block, ("onChange = function(index)", "render()"), f"immediate {key} selection")
+        assert block.index("render()") > block.index("onChange = function(index)")
+
+    genre_block = panel[
+        panel.index('key = "motionbgs-genre-preset"') : panel.index(
+            'key = "motionbgs-genre-"'
+        )
+    ]
+    assert 'motionBrowseDraft.genre = selectedGenre' in genre_block
+    assert 'if selectedGenre ~= ""' not in genre_block, (
+        "the Custom genre option must clear the preset draft instead of becoming a no-op"
+    )
+
+    require_all(
+        panel,
+        (
+            "local wallhavenSearchInputRevision = 0",
+            "local wallhavenPageInputRevision = 0",
+            "local motionQueryInputRevision = 0",
+            "local motionGenreInputRevision = 0",
+            "local motionPageInputRevision = 0",
+            'key = "wallhaven-search-" .. tostring(wallhavenSearchInputRevision)',
+            'key = "wallhaven-page-" .. tostring(wallhavenPageInputRevision)',
+            'key = "motionbgs-search-" .. tostring(motionQueryInputRevision)',
+            'key = "motionbgs-genre-" .. tostring(motionGenreInputRevision)',
+            'key = "motionbgs-page-" .. tostring(motionPageInputRevision)',
+        ),
+        "uncontrolled input revision keys",
+    )
+
+
+def test_display_navigation_and_drag_contract() -> None:
+    """Pin the display-first navigation and library-backed ordering surfaces."""
+
+    panel = text("panel.luau")
+    page_registry = panel[
+        panel.index("local panelPages = {") : panel.index("function panelPages.screenNames()")
+    ]
+    assert "screens = true" not in page_registry, "Displays must remain children of Home, not a top-level route"
+    assert "validDisplaySubpages" not in page_registry, "the combined display page must not regain route tabs"
+
+    navigation = panel[
+        panel.index("function panelPages.navigationColumn()") : panel.index(
+            "function panelPages.locationRequiredSection"
+        )
+    ]
+    require_all(
+        navigation,
+        (
+            'panelPages.navigationButton("main", "panel.nav.main", "home")',
+            "local outputs = panelPages.screenNames()",
+            '"screen-" .. name',
+            "panelPages.selectScreenPage(name)",
+        ),
+        "Home-nested display navigation",
+    )
+    assert navigation.index('panelPages.navigationButton("main"') < navigation.index(
+        "local outputs = panelPages.screenNames()"
+    )
+    assert 'panelPages.navigationButton("screens"' not in navigation
+    for retired_route in (
+        "panel.nav.display_overview",
+        "panel.nav.display_engines",
+        "panel.nav.display_schedule",
+    ):
+        assert retired_route not in navigation, f"display navigation still exposes retired route {retired_route!r}"
+
+    select_screen = panel[
+        panel.index("function panelPages.selectScreenPage(output)") : panel.index(
+            "function panelPages.navigationButton"
+        )
+    ]
+    require_all(
+        select_screen,
+        (
+            "local fallback = tostring(configured.fallback_playlist or \"\")",
+            "selectedPlaylistId = if type(playlistMap()[fallback]) == \"table\"",
+            'activePage = "main"',
+            'activeSubpage = "display"',
+        ),
+        "display selection and playlist reset",
+    )
+
+    display_page = panel[
+        panel.index("function panelPages.screensSection()") : panel.index(
+            "function panelPages.activePageSections()"
+        )
+    ]
+    require_all(
+        display_page,
+        (
+            'key = "screen-default-playlist-" .. output',
+            'send({ kind = "playlist_assign", output = output, playlist_id = id })',
+            "table.insert(children, schedulesSection(output, playlistId))",
+        ),
+        "combined display playlist and schedule page",
+    )
+    assert display_page.index('key = "screen-default-playlist-" .. output') < display_page.index(
+        "table.insert(children, schedulesSection(output, playlistId))"
+    ), "the pinned default playlist must precede every scheduled override"
+    active_sections = panel[
+        panel.index("function panelPages.activePageSections()") : panel.index("render = function()")
+    ]
+    require_all(
+        active_sections,
+        (
+            'if activeSubpage == "display" then',
+            "local output = panelPages.ensureSelectedScreen()",
+            "return { panelPages.screensSection(), panelPages.engineSettingsSection(output) }",
+        ),
+        "combined display engine page",
+    )
+
+    library_section = panel[
+        panel.index("local function librarySection") : panel.index("local function playlistActionButton")
+    ]
+    assert "beginPairingEditor(" not in library_section, "Library must not expose a separate create-pairing button"
+    assert 'noctalia.tr("panel.pairings.new")' not in library_section
+
+    token_reconciliation = panel[
+        panel.index("local function reconcileDragTokens()") : panel.index(
+            "-- Every insertion zone shares one callback."
+        )
+    ]
+    require_all(
+        token_reconciliation,
+        (
+            'local namespace = "@schedule:" .. output',
+            'nextDragToken("s")',
+            'nextDragToken("q")',
+            "schedule_output = output",
+            "schedule_id = scheduleId",
+        ),
+        "opaque schedule drag tokens",
+    )
+
+    schedule_drop = panel[
+        panel.index("function onScheduleDrop(payload, value)") : panel.index(
+            "local function pairingThemeText"
+        )
+    ]
+    require_all(
+        schedule_drop,
+        (
+            'kind = "schedule_place"',
+            "output = source.schedule_output",
+            "schedule_id = tostring(source.schedule_id or \"\")",
+            "anchor_id = tostring(target.schedule_anchor_id or \"\")",
+            'placement = tostring(target.schedule_placement or "end")',
+        ),
+        "schedule drop command",
+    )
+    service = text("service.luau")
+    schedule_placement = service[
+        service.index("function wallInOne.placeSchedule") : service.index(
+            "function wallInOne.weekdayEnabled"
+        )
+    ]
+    require_all(
+        schedule_placement,
+        (
+            'placement ~= "before" and placement ~= "after" and placement ~= "end"',
+            'or (placement ~= "end" and anchorId == "")',
+            'if sourceIndex == nil or (placement ~= "end" and anchorIndex == nil) then',
+            'if placement == "end" then',
+            "table.insert(schedules, moving)",
+            'return wallInOne.saveConfig(nextConfig, "schedule-place")',
+        ),
+        "schedule end-zone append semantics",
+    )
+    schedule_ui = panel[
+        panel.index("local function scheduleInsertionZone") : panel.index("local function playlistsSection")
+    ]
+    require_all(
+        schedule_ui,
+        (
+            'accepts = { "wio-schedule" }',
+            'onDrop = "onScheduleDrop"',
+            'dragType = "wio-schedule"',
+            "payload = dragToken",
+            "table.insert(children, scheduleInsertionZone(output, scheduleId))",
+            'table.insert(children, scheduleInsertionZone(output, ""))',
+        ),
+        "schedule drag-and-drop rows",
+    )
+    assert "panel.schedules.move_up" not in schedule_ui
+    assert "panel.schedules.move_down" not in schedule_ui
+
+    library_drawer = panel[
+        panel.index("local function playlistPairingDrawer") : panel.index(
+            "local function playlistPairingDrawers"
+        )
+    ]
+    require_all(
+        library_drawer,
+        (
+            "local items = panelUi.libraryItems(kind)",
+            "local customized = type(existing) == \"table\" and existing.customized == true",
+            "local bundle = panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)",
+            "local signature = panelUi.libraryDragSignature(entry)",
+            'dragToken = nextDragToken("l")',
+            "dragPairingByToken[dragToken] = {",
+            "library_bundle = bundle",
+            "panelUi.libraryPreviewPath(entry, metadata, bundle, output)",
+            "panelUi.libraryPaletteSummary(bundle, not customized)",
+            'dragType = "wio-library-item"',
+            "payload = dragToken",
+        ),
+        "library-backed playlist drawers",
+    )
+    assert "sortedPairingIds(kind)" not in library_drawer
+    playlist_zone = panel[
+        panel.index("local function playlistInsertionZone") : panel.index(
+            "local function scheduleSelectionSummary"
+        )
+    ]
+    assert 'accepts = { "wio-library-item", "wio-entry" }' in playlist_zone
+
 
 def main() -> None:
     test_manifest_and_translations()
     test_schema_document_fixtures()
     test_coordinator_contract()
     test_reusable_pairing_catalog_contract()
+    test_item_default_provenance_contract()
     test_renderer_crash_backoff_contract()
     test_coordinator_apply_serialization_contract()
     test_dynamic_pair_fingerprint_contract()
@@ -4744,6 +5221,7 @@ def main() -> None:
     test_motionbgs_contract()
     test_ui_and_documentation_surface()
     test_declarative_ui_layout_contract()
+    test_display_navigation_and_drag_contract()
     print("Wall-in-One v0.6 offline contract passed.")
 
 

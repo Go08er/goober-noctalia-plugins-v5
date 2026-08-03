@@ -21,8 +21,9 @@ Noctalia plugins cannot create standalone application windows. Wall-in-One
 uses one normal full-size floating panel and local route state instead. Only the
 selected route is rendered:
 
-- **Home** shows setup and readiness.
-- **Displays** → each output → **Overview**, **Engines**, **Schedule**.
+- **Home** shows setup and readiness, with each detected display nested beneath
+  it. Selecting a display opens one combined page for its pinned default
+  playlist, draggable scheduled overrides, playback policy, and engine settings.
 - **Library** → **Images**, **Videos**, **Wallpaper Engine**.
 - **Shops** → **Wallhaven**, **MotionBGS**, **Steam Workshop**.
 - **Playlists** → each named playlist.
@@ -46,20 +47,23 @@ The main workflows are:
 
 1. Browse image, video, and installed Workshop libraries. Cards use stills like
    Noctalia's wallpaper browser: a static selects itself, while video and
-   Workshop entries use a validated preview or automatic still. Each card is a
-   pairing with a default adaptive wallpaper palette, not an untracked media
-   row.
+   Workshop entries use a validated preview or automatic still. Every item is
+   immediately usable with an implicit adaptive wallpaper palette; no separate
+   pairing-creation step is required. Customize only the items that need a
+   different still or palette.
 2. Search Wallhaven's official API or MotionBGS's bounded public-page service
    under **Shops**. Steam links remain available for acquiring and managing
    Workshop content.
-3. Open one display's **Engines** route to configure its owned mpvpaper and
-   `linux-wallpaperengine` behavior. Settings on one display do not rewrite
-   another display.
-4. Create reusable pairings and insert them into named playlists. Each playlist
-   occurrence keeps a stable ID and validated snapshot.
-5. Assign a fallback playlist and ordered schedule rules per display. Rotate or
-   shuffle order, interval overrides, manual pinning, and month/weekday/time
-   schedules are persisted independently.
+3. Select a display beneath **Home**. Its one page combines renderer controls,
+   rotate/shuffle and interval policy, a pinned default playlist, ordered
+   calendar overrides, and its owned mpvpaper and `linux-wallpaperengine`
+   settings. Editing one display does not rewrite another.
+4. Add or drag library items directly into named playlists. Optional item
+   customization is reused wherever that item appears; each playlist occurrence
+   keeps a stable ID and validated snapshot.
+5. Drag scheduled overrides beneath the pinned default row. Month, weekday, and
+   local-time rules are evaluated in visible order, with the lowest matching
+   override taking priority. Playback state and schedules persist per display.
 
 Direct **Apply** creates or replaces that display's one-entry **Quick Choice**
 playlist, so manual and scheduled changes share the same executor and safety
@@ -125,12 +129,14 @@ The representative remains Noctalia's real wallpaper for lock-screen fallback,
 wallpaper hooks, overview/backdrop consumers, and wallpaper-derived colors while
 the dynamic layer renders above it.
 
-## Per-entry Noctalia themes
+## Per-item Noctalia themes
 
-A pairing stores dark/light/auto mode plus a built-in, wallpaper-generator,
-community, custom, or explicit keep-current policy. New library pairings default
-to adaptive wallpaper colors. Application order is still, theme mode, palette,
-then owned renderer.
+Each item resolves dark/light/auto mode plus a built-in, wallpaper-generator,
+community, custom, or explicit keep-current policy. The implicit default is
+adaptive wallpaper colors. The installation-wide default toggle starts enabled
+and may instead make new items keep the current theme; saving an optional
+customization gives that item a durable override. Application order is still,
+theme mode, palette, then owned renderer.
 
 Adaptive previews use Noctalia's non-applying theme command against the selected
 or generated still. The palette service keeps a bounded SHA-256-aware cache and
@@ -152,8 +158,15 @@ unfiltered catalog.
 
 Listing parsing remains one anchor per callback for Noctalia's CPU budget. The
 service temporarily uses a 16ms update cadence only while parsing, then restores
-its 250ms idle cadence on every terminal path. A live-like 206-anchor page is
-therefore scheduled in roughly 3.3 seconds instead of roughly 52 seconds.
+its 250ms idle cadence on every terminal path. The live-like fixture contains
+355 unrelated anchors plus 36 wallpaper cards (391 anchors total), so its 393
+parse/EOF/publication callbacks take roughly 6.3 seconds instead of roughly 98
+seconds at the idle cadence.
+
+Pagination and total metadata are scanned once from only the first 16 KiB of the
+document head, with at most 32 `<link>` elements inspected. This replaces the
+old full-document pagination passes that could exceed Noctalia's 25 ms callback
+budget after card parsing.
 
 MotionBGS may canonicalize `/search?q=X` to `/tag:<slug>/`. Wall-in-One accepts
 only a same-origin tag exactly equal to the normalized query (lowercase, spaces
@@ -215,15 +228,16 @@ fail soft at runtime. Optional commands are:
 - `xdg-open` for direct provider-site fallbacks.
 
 Network failures affect only the relevant shop. Downloaded media, local
-libraries, pairings, playlists, and direct links remain available.
+libraries, item profiles, playlists, and direct links remain available.
 
 ## Settings
 
 Installation-wide settings are intentionally limited to provider policy,
-explicit image/video roots, capture/pairing defaults, palette authority, and
+explicit image/video roots, capture/item defaults, palette authority, and
 new-playlist defaults. Each Library page groups its medium's root,
-derived/private locations, and defaults. Engine playback settings belong to
-**Displays → _output_ → Engines**, not one global settings wall.
+derived/private locations, and defaults. Engine playback settings live on the
+combined page for each display nested beneath **Home**, not on one global
+settings wall.
 
 MotionBGS defaults are HD, 48 results, 30-minute metadata TTL, and 256 MiB
 maximum download; bounds are 1–48 results, 5–1,440 minutes, and 16–512 MiB.
@@ -239,10 +253,20 @@ separate scheduled services communicating through bounded versioned state.
 
 ## Stored state and upgrades
 
-`config.json` schema 5 stores pairings, playlists, per-display engine settings,
-fallback assignments, and ordered schedules. `runtime.json` schema 6 stores
-capture provenance, independent run state, palette diagnostics, and exact owned
-Workshop state. Older action values are normalized to owned equivalents. Since
+`config.json` schema 5 stores item profiles, playlist snapshots, per-display
+engine settings, fallback assignments, and ordered schedules. Its internal
+`pairings` map is plumbing rather than a required user-created catalog: library
+items synthesize defaults, while a saved override records `customized = true`.
+Reset rewrites that stable profile with the item's derived defaults,
+`customized = false`, and synchronizes linked playlist snapshots. A playlist
+add after defaults change reuses the same medium/source profile, refreshes all
+linked snapshots, and collapses any older duplicate default records. A playlist
+occurrence retains its own stable entry ID and last validated bundle if its
+profile is actually removed.
+
+`runtime.json` schema 6 stores capture provenance, independent run state,
+palette diagnostics, and exact owned Workshop state. Older action values are
+normalized to owned equivalents. Since
 Noctalia rejects reads of settings removed from a manifest, schema 1–4 outputs
 receive the documented schema-5 engine defaults and can then be tailored per
 display without undeclared-setting warnings.
@@ -254,10 +278,10 @@ in Diagnostics.
 ## Current testing boundary
 
 Offline and VM gates cover schema migration, root gating, provider bounds,
-incremental parsing, route validation, exact renderer ownership, capture,
-pairings, playlists, and schedules. A real disposable Wayland session is still
-required to judge compositor layer ordering, GPU rendering, audio, and visual
-theme propagation.
+incremental parsing, route validation, exact renderer ownership, capture, item
+profiles, playlist snapshots, and schedules. A real disposable Wayland session
+is still required to judge compositor layer ordering, GPU rendering, audio, and
+visual theme propagation.
 
 ```bash
 noctalia plugins lint wall-in-one

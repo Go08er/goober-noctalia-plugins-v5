@@ -23,6 +23,11 @@ local MAX_PAGE = 10000
 -- listing card involves several bounded markup scans, so advance one anchor at
 -- a time and let the regular update cadence amortize a full provider page.
 local SEARCH_ANCHORS_PER_TICK = 1
+-- Pagination metadata lives in the document head.  Keep this scan bounded so
+-- a large listing cannot spend the ScriptRuntime's whole callback budget on
+-- two full-document link passes after the card parser has already run.
+local LISTING_META_PREFIX_BYTES = 16384
+local LISTING_META_LINK_LIMIT = 32
 local SEARCH_PARSE_INTERVAL_MS = 16
 local IDLE_UPDATE_INTERVAL_MS = 250
 local MAX_QUEUE = 8
@@ -633,7 +638,9 @@ local function firstImage(body)
 end
 
 local function challengePage(html)
-    local lower = tostring(html or ""):lower()
+    -- Cloudflare's challenge markers live in the document head.  Never lower
+    -- or scan a whole (up to 1 MiB) listing inside one ScriptRuntime callback.
+    local lower = tostring(html or ""):sub(1, LISTING_META_PREFIX_BYTES):lower()
     return lower:find("<title>just a moment", 1, true) ~= nil
         or lower:find("id=challenge-error-text", 1, true) ~= nil
         or lower:find('id="challenge-error-text"', 1, true) ~= nil
@@ -717,7 +724,10 @@ local function advanceSearchParse(parser)
     end
 
     if #parser.found == 0 then
-        local lower = tostring(parser.html or ""):lower()
+        -- MotionBGS renders its empty-state message near the start of the
+        -- response.  Keep the probe bounded for the same reason as the
+        -- challenge and pagination scans above.
+        local lower = tostring(parser.html or ""):sub(1, LISTING_META_PREFIX_BYTES):lower()
         local explicitEmpty = lower:find("no wallpapers", 1, true) ~= nil
             or lower:find("nothing found", 1, true) ~= nil
             or lower:find("no results", 1, true) ~= nil
@@ -740,28 +750,6 @@ local function relationToken(attributes, relation)
     return false
 end
 
-local function relatedPageUrl(html, relation, request)
-    local targetPage = request.page + (if relation == "next" then 1 else -1)
-    if targetPage < 1 or targetPage > MAX_PAGE then
-        return ""
-    end
-    local targetRequest = {
-        mode = request.mode,
-        query = request.query,
-        genre = request.genre,
-        page = targetPage,
-    }
-    for attributes in html:gmatch("<[lL][iI][nN][kK]%s+([^>]-)>") do
-        if relationToken(attributes, relation) then
-            local href = normalizeSiteUrl(attributeValue(attributes, "href"))
-            if href ~= nil and listingRouteMatches(targetRequest, href) then
-                return href
-            end
-        end
-    end
-    return ""
-end
-
 local function listingTotalHint(html)
     local title = html:match("<[tT][iI][tT][lL][eE]>(.-)</[tT][iI][tT][lL][eE]>") or ""
     local digits = stripMarkup(title):match("^([%d,]+)%+")
@@ -776,12 +764,74 @@ end
 
 local function parseListingMeta(html, request, itemCount)
     local pageable = request.mode == "latest" or request.mode == "genre" or request.mode == "4k"
+    local metadataHtml = html:sub(1, LISTING_META_PREFIX_BYTES)
+    local metadataLower = metadataHtml:lower()
+    -- Body markup can start with hundreds of anchors.  Restrict metadata work
+    -- to the actual head instead of merely a byte prefix, then walk link tags
+    -- with plain native searches.  Luau's non-greedy gmatch over even 16 KiB
+    -- can exceed Noctalia's 25 ms callback budget.
+    local headClose = metadataLower:find("</head", 1, true)
+    if headClose ~= nil then
+        local headEnd = metadataLower:find(">", headClose, true)
+        if headEnd ~= nil then
+            metadataHtml = metadataHtml:sub(1, headEnd)
+            metadataLower = metadataLower:sub(1, headEnd)
+        end
+    end
+    local previousUrl = ""
+    local nextUrl = ""
+    if pageable then
+        local linksSeen = 0
+        local cursor = 1
+        while linksSeen < LISTING_META_LINK_LIMIT do
+            local startAt = metadataLower:find("<link", cursor, true)
+            if startAt == nil then
+                break
+            end
+            local afterName = metadataLower:sub(startAt + 5, startAt + 5)
+            local finishAt = metadataLower:find(">", startAt + 5, true)
+            if finishAt == nil then
+                break
+            end
+            cursor = finishAt + 1
+            if afterName:match("%s") == nil then
+                continue
+            end
+            linksSeen += 1
+            local attributes = metadataHtml:sub(startAt + 5, finishAt - 1)
+            local href = normalizeSiteUrl(attributeValue(attributes, "href"))
+            if href ~= nil then
+                if previousUrl == "" and request.page > 1 and relationToken(attributes, "prev") then
+                    local previousRequest = {
+                        mode = request.mode,
+                        query = request.query,
+                        genre = request.genre,
+                        page = request.page - 1,
+                    }
+                    if listingRouteMatches(previousRequest, href) then
+                        previousUrl = href
+                    end
+                end
+                if nextUrl == "" and request.page < MAX_PAGE and relationToken(attributes, "next") then
+                    local nextRequest = {
+                        mode = request.mode,
+                        query = request.query,
+                        genre = request.genre,
+                        page = request.page + 1,
+                    }
+                    if listingRouteMatches(nextRequest, href) then
+                        nextUrl = href
+                    end
+                end
+            end
+        end
+    end
     return {
         current_page = request.page,
-        has_previous = pageable and relatedPageUrl(html, "prev", request) ~= "",
-        has_next = pageable and relatedPageUrl(html, "next", request) ~= "",
+        has_previous = previousUrl ~= "",
+        has_next = nextUrl ~= "",
         pageable = pageable,
-        total_hint = listingTotalHint(html),
+        total_hint = listingTotalHint(metadataHtml),
         count = itemCount,
     }
 end
@@ -1264,6 +1314,7 @@ local function advanceSearchOperation(operation)
 
     local items = parser.found
     local meta = parseListingMeta(parser.html, operation.request, #items)
+    parser.html = ""
     local entry, saved = cacheSearch(
         operation.request,
         operation.limit,

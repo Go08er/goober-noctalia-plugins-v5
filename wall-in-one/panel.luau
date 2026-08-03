@@ -122,6 +122,13 @@ local wallhavenResolutionDraft = {
 local wallhavenRatiosDraft = ""
 local wallhavenColorDraft = ""
 local wallhavenPageDraft = "1"
+-- Text inputs are host-owned after creation. Bump only when code (rather than
+-- typing) replaces a draft so the new value is visibly installed.
+local wallhavenSearchInputRevision = 0
+local wallhavenPageInputRevision = 0
+local motionQueryInputRevision = 0
+local motionGenreInputRevision = 0
+local motionPageInputRevision = 0
 local render
 local refreshPanelState
 local reloadSharedState
@@ -769,17 +776,15 @@ local function providerPreviewNode(provider, item, width, height, glyph)
             borderWidth = 1,
         })
     end
-    return ui.row({
+    -- Match Noctalia's official Wallhaven browser with a simple decorative
+    -- placeholder, avoiding a second nested row inside every result tile.
+    return ui.box({
         width = width,
         height = height,
         radius = 8,
         fill = "surface_variant/0.55",
         border = "outline/0.35",
         borderWidth = 1,
-        align = "center",
-        justify = "center",
-    }, {
-        ui.glyph({ name = glyph, color = "primary" }),
     })
 end
 
@@ -1047,7 +1052,7 @@ local function settings()
         capture_directory = "",
         video_directory = "",
         auto_capture = true,
-        sync_colors = false,
+        sync_colors = true,
         color_scheme = "",
         palette_output = "",
         video_source = "",
@@ -1517,6 +1522,55 @@ local function reconcileDragTokens()
         end
     end
 
+    -- Schedule rows use the same opaque-token machinery as playlist rows.
+    -- The synthetic namespace cannot collide with a real playlist id and
+    -- keeps display names and persisted rule ids out of drag payloads.
+    local configuredOutputs = configSnapshot().outputs
+    for rawOutput, configuredOutput in pairs(type(configuredOutputs) == "table" and configuredOutputs or {}) do
+        local output = tostring(rawOutput)
+        local namespace = "@schedule:" .. output
+        local schedules = type(configuredOutput) == "table" and type(configuredOutput.schedules) == "table"
+                and configuredOutput.schedules
+            or {}
+        local previousEntryTokens = type(dragEntryTokenByPlaylist[namespace]) == "table"
+                and dragEntryTokenByPlaylist[namespace]
+            or {}
+        local previousTargetTokens = type(dragTargetTokenByPlaylist[namespace]) == "table"
+                and dragTargetTokenByPlaylist[namespace]
+            or {}
+        local entryTokens = {}
+        local targetTokens = {}
+        local previousScheduleId = ""
+        for _, schedule in ipairs(schedules) do
+            local scheduleId = type(schedule) == "table" and tostring(schedule.id or "") or ""
+            if scheduleId ~= "" and entryTokens[scheduleId] == nil then
+                local entryToken = previousEntryTokens[scheduleId] or nextDragToken("s")
+                entryTokens[scheduleId] = entryToken
+                nextEntryByToken[entryToken] = {
+                    schedule_output = output,
+                    schedule_id = scheduleId,
+                }
+                local targetToken = previousTargetTokens[scheduleId] or nextDragToken("q")
+                targetTokens[scheduleId] = targetToken
+                nextTargetByToken[targetToken] = {
+                    schedule_output = output,
+                    schedule_anchor_id = if previousScheduleId == "" then scheduleId else previousScheduleId,
+                    schedule_placement = if previousScheduleId == "" then "before" else "after",
+                }
+                previousScheduleId = scheduleId
+            end
+        end
+        local endToken = previousTargetTokens[""] or nextDragToken("q")
+        targetTokens[""] = endToken
+        nextTargetByToken[endToken] = {
+            schedule_output = output,
+            schedule_anchor_id = "",
+            schedule_placement = "end",
+        }
+        nextEntryTokenByPlaylist[namespace] = entryTokens
+        nextTargetTokenByPlaylist[namespace] = targetTokens
+    end
+
     dragPairingByToken = nextPairingByToken
     dragPairingTokenById = nextPairingTokenById
     dragEntryByToken = nextEntryByToken
@@ -1542,6 +1596,26 @@ function onPlaylistDrop(payload, value)
     end
 
     local pairingId = dragPairingByToken[payloadToken]
+    if type(pairingId) == "table" and type(pairingId.library_bundle) == "table" then
+        if tostring(pairingId.pairing_id or "") ~= "" then
+            send({
+                kind = "playlist_add_pairing",
+                output = output,
+                playlist_id = playlistId,
+                pairing_id = tostring(pairingId.pairing_id),
+                before_id = if target.pairing_before_id ~= "" then target.pairing_before_id else nil,
+            })
+        else
+            send({
+                kind = "playlist_add_entry",
+                output = output,
+                playlist_id = playlistId,
+                entry = entryForOutput(pairingId.library_bundle, output),
+                before_id = if target.pairing_before_id ~= "" then target.pairing_before_id else nil,
+            })
+        end
+        return
+    end
     if pairingId ~= nil and type(pairingMap()[pairingId]) == "table" then
         send({
             kind = "playlist_add_pairing",
@@ -1563,6 +1637,28 @@ function onPlaylistDrop(payload, value)
         entry_id = source.entry_id,
         anchor_id = target.entry_anchor_id,
         placement = target.entry_placement,
+    })
+end
+
+function onScheduleDrop(payload, value)
+    local source = dragEntryByToken[tostring(payload or "")]
+    local target = dragTargetByToken[tostring(value or "")]
+    if
+        type(source) ~= "table"
+        or type(target) ~= "table"
+        or tostring(source.schedule_output or "") == ""
+        or source.schedule_output ~= target.schedule_output
+        or source.schedule_output ~= selectedScreen
+        or not storageValid()
+    then
+        return
+    end
+    send({
+        kind = "schedule_place",
+        output = source.schedule_output,
+        schedule_id = tostring(source.schedule_id or ""),
+        anchor_id = tostring(target.schedule_anchor_id or ""),
+        placement = tostring(target.schedule_placement or "end"),
     })
 end
 
@@ -1731,9 +1827,25 @@ local function closePairingEditor()
     resetEntryDraft()
 end
 
+local function preferredPairingForLibraryEntry(existing, candidate)
+    if type(candidate) ~= "table" then
+        return existing
+    end
+    if type(existing) ~= "table" then
+        return candidate
+    end
+    local existingCustomized = existing.customized == true
+    local candidateCustomized = candidate.customized == true
+    if existingCustomized ~= candidateCustomized then
+        return if candidateCustomized then candidate else existing
+    end
+    return if tostring(candidate.id or "") < tostring(existing.id or "") then candidate else existing
+end
+
 local function matchingPairingForLibraryEntry(entry)
     local kind = tostring(type(entry) == "table" and entry.kind or "")
     local source = tostring(type(entry) == "table" and entry.source or "")
+    local selected = nil
     for _, id in ipairs(sortedPairingIds(kind)) do
         local pairing = pairingMap()[id]
         local media = type(pairing) == "table" and type(pairing.media) == "table" and pairing.media or nil
@@ -1742,44 +1854,23 @@ local function matchingPairingForLibraryEntry(entry)
             then media == nil and tostring(still.path or "") == source
             else media ~= nil and tostring(media.kind or "") == kind and tostring(media.source or "") == source
         if matches then
-            return pairing
+            selected = preferredPairingForLibraryEntry(selected, pairing)
         end
     end
-    return nil
+    return selected
 end
 
 local function openLibraryEntryPairing(entry, libraryItem)
     local kind = tostring(type(entry) == "table" and entry.kind or "")
     kind = if kind == "video" or kind == "workshop" then kind else "static"
     local existing = matchingPairingForLibraryEntry(entry)
-    if existing ~= nil then
+    if type(existing) == "table" and existing.customized == true then
         beginPairingEditor(kind, existing)
         return
     end
-    local source = tostring(type(entry) == "table" and entry.source or "")
-    local label = tostring(type(entry) == "table" and entry.label or basename(source))
-    local selectedStill = tostring(type(entry) == "table" and entry.still_path or "")
-    if selectedStill == "" and type(libraryItem) == "table" then
-        selectedStill = tostring(libraryItem.preview or "")
-    end
-    local selectedStillValid = selectedStill:sub(1, 1) == "/"
-        and selectedStill:find("[%c]") == nil
-        and noctalia.fileExists(selectedStill)
-    beginPairingEditor(kind, {
-        id = "",
-        label = label,
-        media = if kind == "static" then nil else { kind = kind, source = source },
-        still = if kind == "static"
-            then { mode = "selected", path = source }
-            elseif selectedStillValid then { mode = "selected", path = selectedStill }
-            else { mode = "automatic" },
-        theme = {
-            mode = "auto",
-            source = "wallpaper",
-            selection = paletteNames("wallpaper")[1] or "m3-tonal-spot",
-        },
-        added_at = tostring(type(entry) == "table" and entry.added_at or ""),
-    })
+    local defaults = panelUi.virtualLibraryPairing(entry, libraryItem, nil)
+    defaults.id = type(existing) == "table" and tostring(existing.id or "") or ""
+    beginPairingEditor(kind, defaults)
 end
 
 local function actionLabel(action)
@@ -2014,7 +2105,7 @@ function panelUi.appendExplicitGrid(children, items, visible, columns, cardBuild
                 table.insert(cards, cardBuilder(items[itemIndex], itemIndex))
             end
         end
-        table.insert(children, ui.row({ gap = 8, align = "start", justify = "center" }, cards))
+        table.insert(children, ui.row({ gap = 8, align = "stretch", justify = "start" }, cards))
         index += columnCount
     end
 end
@@ -2163,137 +2254,6 @@ function panelUi.shortcutsSection()
             maxLines = 3,
         }),
     })
-end
-
-local function ownershipBadge(libraryItem)
-    local ownership = type(libraryItem) == "table" and tostring(libraryItem.ownership or "") or ""
-    local managed = type(libraryItem) == "table" and libraryItem.managed == true
-    local label = if managed
-        then noctalia.tr("panel.library.managed")
-        elseif ownership == "steam" then noctalia.tr("panel.library.steam_owned")
-        else noctalia.tr("panel.library.user_owned")
-    local badgeGlyph = if managed then "shield-check" elseif ownership == "steam" then "steam" else "user"
-    return ui.row({
-        gap = 4,
-        align = "center",
-        padding = 4,
-        radius = 8,
-        fill = if managed then "primary/0.12" else "surface_variant/0.5",
-    }, {
-        ui.glyph({
-            name = badgeGlyph,
-            color = if managed then "primary" else "on_surface_variant",
-            size = 12,
-        }),
-        ui.label({
-            text = label,
-            fontSize = 8,
-            color = if managed then "primary" else "on_surface_variant",
-            maxLines = 1,
-        }),
-    })
-end
-
-local function libraryEntryRow(glyph, title, detail, entry, canApply, libraryItem)
-    local metadata = type(libraryItem) == "table" and libraryItem or nil
-    local managed = type(metadata) == "table" and metadata.managed == true
-    local deletable = managed and metadata.deletable == true
-    local itemId = if deletable then tostring(metadata.id or "") else ""
-    local deleteArmed = itemId ~= "" and pendingDeleteItemId == itemId
-    local existingPairing = matchingPairingForLibraryEntry(entry)
-    local detailChildren = {
-        ui.label({ text = title, fontSize = 11, fontWeight = "bold", maxLines = 2 }),
-        ui.label({ text = detail, fontSize = 9, color = "on_surface_variant", maxLines = 2 }),
-    }
-    if metadata ~= nil then
-        table.insert(detailChildren, ownershipBadge(metadata))
-    end
-    if deleteArmed then
-        table.insert(
-            detailChildren,
-            ui.label({
-                text = noctalia.tr("panel.library.delete_managed_confirm", { name = title }),
-                fontSize = 9,
-                color = "error",
-                maxLines = 3,
-            })
-        )
-    end
-
-    local children = {
-        ui.glyph({ name = glyph, color = "primary" }),
-        ui.column({ gap = 2, flexGrow = 1 }, detailChildren),
-        ui.button({
-            glyph = "layers-intersect",
-            tooltip = if existingPairing ~= nil
-                then noctalia.tr("panel.pairings.edit")
-                else noctalia.tr("panel.pairings.new"),
-            variant = "ghost",
-            controlSize = "sm",
-            enabled = storageValid(),
-            onClick = function()
-                openLibraryEntryPairing(entry)
-            end,
-        }),
-        ui.button({
-            glyph = "player-play",
-            tooltip = noctalia.tr("panel.library.apply"),
-            variant = "ghost",
-            controlSize = "sm",
-            enabled = canApply and storageValid() and focusedOutput() ~= "",
-            onClick = function()
-                local output = focusedOutput()
-                send({ kind = "apply_entry", output = output, entry = entryForOutput(entry, output) })
-            end,
-        }),
-        ui.button({
-            glyph = "playlist-add",
-            tooltip = noctalia.tr("panel.playlists.entry_add"),
-            variant = "ghost",
-            controlSize = "sm",
-            enabled = storageValid() and focusedOutput() ~= "",
-            onClick = function()
-                local output = focusedOutput()
-                local playlistId = resolveSelectedPlaylist()
-                send({
-                    kind = "playlist_add_entry",
-                    output = output,
-                    playlist_id = playlistId,
-                    entry = entryForOutput(entry, output),
-                })
-            end,
-        }),
-    }
-    if deletable and itemId ~= "" then
-        table.insert(
-            children,
-            ui.button({
-                glyph = if deleteArmed then "alert-triangle" else "trash",
-                tooltip = if deleteArmed
-                    then noctalia.tr("panel.library.delete_managed_confirm", { name = title })
-                    else noctalia.tr("panel.library.delete_managed"),
-                variant = "ghost",
-                controlSize = "sm",
-                enabled = storageValid(),
-                onClick = function()
-                    if pendingDeleteItemId == itemId then
-                        pendingDeleteItemId = ""
-                        send({ kind = "library_delete", item_id = itemId })
-                    else
-                        pendingDeleteItemId = itemId
-                        render()
-                    end
-                end,
-            })
-        )
-    end
-    return ui.row({
-        gap = 8,
-        align = "center",
-        padding = 8,
-        radius = 9,
-        fill = "surface_variant/0.25",
-    }, children)
 end
 
 local function paletteInventorySection()
@@ -2510,6 +2470,7 @@ local function wallhavenSection()
         request.kind = "wallhaven_search"
         request.page = page
         wallhavenPageDraft = tostring(page)
+        wallhavenPageInputRevision += 1
         wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
         preview.cancel()
         send(request)
@@ -2523,7 +2484,7 @@ local function wallhavenSection()
         panelUi.actionButton("wallhaven_site", "external-link", "ghost", true),
         ui.row({ gap = 6, align = "center" }, {
             ui.input({
-                key = "wallhaven-search",
+                key = "wallhaven-search-" .. tostring(wallhavenSearchInputRevision),
                 value = wallhavenSearchDraft,
                 placeholder = noctalia.tr("panel.wallhaven.search_placeholder"),
                 flexGrow = 1,
@@ -2554,6 +2515,8 @@ local function wallhavenSection()
                 onClick = function()
                     wallhavenSearchDraft = ""
                     wallhavenPageDraft = "1"
+                    wallhavenSearchInputRevision += 1
+                    wallhavenPageInputRevision += 1
                     wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
                     preview.cancel()
                     send({ kind = "wallhaven_clear" })
@@ -2574,6 +2537,7 @@ local function wallhavenSection()
                 flexGrow = 1,
                 onChange = function(index)
                     wallhavenCategoriesDraft = categoryValues[math.floor(tonumber(index) or 0) + 1] or "111"
+                    render()
                 end,
             }),
             ui.select({
@@ -2583,6 +2547,7 @@ local function wallhavenSection()
                 flexGrow = 1,
                 onChange = function(index)
                     wallhavenPurityDraft = purityValues[math.floor(tonumber(index) or 0) + 1] or "100"
+                    render()
                 end,
             }),
         }),
@@ -2607,6 +2572,7 @@ local function wallhavenSection()
                 flexGrow = 1,
                 onChange = function(index)
                     wallhavenOrderDraft = if math.floor(tonumber(index) or 0) == 1 then "asc" else "desc"
+                    render()
                 end,
             }),
         }),
@@ -2652,6 +2618,7 @@ local function wallhavenSection()
                 flexGrow = 1,
                 onChange = function(index)
                     wallhavenColorDraft = WALLHAVEN_COLOR_VALUES[math.floor(tonumber(index) or 0)] or ""
+                    render()
                 end,
             }),
         }),
@@ -2664,10 +2631,11 @@ local function wallhavenSection()
                 flexGrow = 1,
                 onChange = function(index)
                     wallhavenResolutionDraft.top_range = topRangeValues[math.floor(tonumber(index) or 0) + 1] or "1M"
+                    render()
                 end,
             }),
             ui.input({
-                key = "wallhaven-page",
+                key = "wallhaven-page-" .. tostring(wallhavenPageInputRevision),
                 value = wallhavenPageDraft,
                 placeholder = noctalia.tr("panel.wallhaven.page_placeholder"),
                 width = 65,
@@ -2864,30 +2832,6 @@ local function wallhavenSection()
             end
         )
     end
-    local lastDownload = type(providerStatus.last_download) == "table" and providerStatus.last_download or {}
-    local downloadedPath = tostring(lastDownload.path or "")
-    if downloadedPath ~= "" then
-        table.insert(children, ui.separator())
-        table.insert(
-            children,
-            ui.label({ text = noctalia.tr("panel.wallhaven.last_download"), fontSize = 11, fontWeight = "bold" })
-        )
-        table.insert(
-            children,
-            libraryEntryRow(
-                "download",
-                tostring(lastDownload.id or basename(downloadedPath)),
-                downloadedPath,
-                {
-                    kind = "static",
-                    source = downloadedPath,
-                    label = tostring(lastDownload.id or basename(downloadedPath)),
-                    added_at = tostring(lastDownload.downloaded_at or ""),
-                },
-                providers().noctalia_cli == true
-            )
-        )
-    end
     return panelUi.card(children)
 end
 
@@ -2937,7 +2881,7 @@ local function motionBgsSection()
     local selectorNode
     if motionBrowseDraft.mode == "search" then
         selectorNode = ui.input({
-            key = "motionbgs-search",
+            key = "motionbgs-search-" .. tostring(motionQueryInputRevision),
             value = motionBrowseDraft.query,
             placeholder = noctalia.tr("panel.motionbgs.search_placeholder"),
             flexGrow = 1,
@@ -3000,13 +2944,15 @@ local function motionBgsSection()
                 selectedIndex = genreIndex,
                 onChange = function(index)
                     local selectedGenre = genreValues[math.floor(tonumber(index) or 0) + 1] or ""
-                    if selectedGenre ~= "" then
-                        motionBrowseDraft.genre = selectedGenre
-                    end
+                    -- The empty option means Custom. Clear the preset draft so
+                    -- the selection is visible and the adjacent input is ready.
+                    motionBrowseDraft.genre = selectedGenre
+                    motionGenreInputRevision += 1
+                    render()
                 end,
             }),
             ui.input({
-                key = "motionbgs-genre",
+                key = "motionbgs-genre-" .. tostring(motionGenreInputRevision),
                 value = motionBrowseDraft.genre,
                 placeholder = noctalia.tr("panel.motionbgs.genre_placeholder"),
                 onChange = function(value)
@@ -3046,6 +2992,7 @@ local function motionBgsSection()
             end
         end
         motionBrowseDraft.page = tostring(page)
+        motionPageInputRevision += 1
         motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
         preview.cancel()
         send({
@@ -3067,6 +3014,7 @@ local function motionBgsSection()
                 onChange = function(index)
                     motionBrowseDraft.mode = modeValues[math.floor(tonumber(index) or 0) + 1] or "search"
                     motionBrowseDraft.page = "1"
+                    motionPageInputRevision += 1
                     render()
                 end,
             }),
@@ -3074,7 +3022,7 @@ local function motionBgsSection()
         }),
         ui.row({ gap = 6, align = "center" }, {
             ui.input({
-                key = "motionbgs-page",
+                key = "motionbgs-page-" .. tostring(motionPageInputRevision),
                 value = motionBrowseDraft.page,
                 placeholder = noctalia.tr("panel.motionbgs.page_placeholder"),
                 width = 65,
@@ -3111,6 +3059,8 @@ local function motionBgsSection()
                 onClick = function()
                     motionBrowseDraft.query = ""
                     motionBrowseDraft.page = "1"
+                    motionQueryInputRevision += 1
+                    motionPageInputRevision += 1
                     motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
                     preview.cancel()
                     send({ kind = "motionbgs_clear" })
@@ -3341,31 +3291,6 @@ local function motionBgsSection()
         )
     end
 
-    local lastDownload = type(motionStatus.last_download) == "table" and motionStatus.last_download or {}
-    local downloadedPath = tostring(lastDownload.path or "")
-    if downloadedPath ~= "" then
-        local mpvpaper = type(providers().mpvpaper) == "table" and providers().mpvpaper or {}
-        table.insert(children, ui.separator())
-        table.insert(
-            children,
-            ui.label({ text = noctalia.tr("panel.motionbgs.last_download"), fontSize = 11, fontWeight = "bold" })
-        )
-        table.insert(
-            children,
-            libraryEntryRow(
-                "download",
-                tostring(lastDownload.title or downloadedPath:match("([^/]+)$") or "MotionBGS"),
-                downloadedPath,
-                {
-                    kind = "video",
-                    source = downloadedPath,
-                    label = tostring(lastDownload.title or "MotionBGS"),
-                    added_at = tostring(lastDownload.downloaded_at or ""),
-                },
-                mpvpaper.apply_available == true
-            )
-        )
-    end
     return panelUi.card(children)
 end
 
@@ -3396,6 +3321,7 @@ function panelUi.virtualLibraryPairing(entry, libraryItem, existing)
     if scheme == "" then
         scheme = paletteNames("wallpaper")[1] or "m3-tonal-spot"
     end
+    local useAdaptiveColors = settings().sync_colors ~= false
     return {
         id = "library-entry",
         label = tostring(type(entry) == "table" and entry.label or basename(source)):sub(1, 160),
@@ -3404,7 +3330,9 @@ function panelUi.virtualLibraryPairing(entry, libraryItem, existing)
             then { mode = "selected", path = source }
             elseif selectedStillValid then { mode = "selected", path = selectedStill }
             else { mode = "automatic" },
-        theme = { mode = "auto", source = "wallpaper", selection = scheme },
+        theme = if useAdaptiveColors
+            then { mode = "auto", source = "wallpaper", selection = scheme }
+            else { mode = "inherit", source = "inherit", selection = "" },
         added_at = tostring(type(entry) == "table" and entry.added_at or ""),
     }
 end
@@ -3428,9 +3356,12 @@ end
 
 function panelUi.libraryPaletteSummary(bundle, isDefault)
     local theme = type(bundle) == "table" and type(bundle.theme) == "table" and bundle.theme or {}
+    local policy = if tostring(theme.source or "") == "inherit"
+        then noctalia.tr("panel.palettes.inherit")
+        else panelUi.valueOr(theme.selection, "common.unknown")
     local label = (if isDefault then noctalia.tr("panel.library.default_pairing") else noctalia.tr("panel.library.saved_pairing"))
         .. " · "
-        .. panelUi.valueOr(theme.selection, "common.unknown")
+        .. policy
     return ui.row({ gap = 4, align = "center" }, {
         ui.box({ width = 12, height = 12, radius = 4, fill = "primary" }),
         ui.box({ width = 12, height = 12, radius = 4, fill = "secondary" }),
@@ -3475,14 +3406,17 @@ function panelUi.libraryCard(item)
     local metadata = type(item) == "table" and item.metadata or {}
     local kind = tostring(entry.kind or "static")
     local existing = type(item) == "table" and item.pairing or matchingPairingForLibraryEntry(entry)
+    local customized = type(existing) == "table" and existing.customized == true
     local output = panelUi.libraryTargetOutput()
-    local bundle = panelUi.virtualLibraryPairing(entry, metadata, existing)
+    local bundle = panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)
+    local defaultBundle = panelUi.virtualLibraryPairing(entry, metadata, nil)
     local previewPath = panelUi.libraryPreviewPath(entry, metadata, bundle, output)
     local managed = metadata.managed == true and metadata.deletable == true and tostring(metadata.id or "") ~= ""
-    local pairingId = type(existing) == "table" and tostring(existing.id or "") or ""
+    local pairingId = if customized then tostring(existing.id or "") else ""
+    local profileId = type(existing) == "table" and tostring(existing.id or "") or ""
     local itemId = tostring(metadata.id or "")
     local managedDeleteArmed = managed and pendingDeleteItemId == itemId
-    local pairingDeleteArmed = not managed and pairingId ~= "" and pendingDeletePairingId == pairingId
+    local pairingDeleteArmed = customized and pendingDeletePairingId == profileId
     local deleteArmed = managedDeleteArmed or pairingDeleteArmed
     local currentProviders = providers()
     local canApply = if kind == "static"
@@ -3542,7 +3476,7 @@ function panelUi.libraryCard(item)
         }),
         ui.button({
             glyph = "edit",
-            tooltip = if pairingId ~= ""
+            tooltip = if customized
                 then noctalia.tr("panel.pairings.edit")
                 else noctalia.tr("panel.pairings.new"),
             variant = "ghost",
@@ -3554,31 +3488,40 @@ function panelUi.libraryCard(item)
             end,
         }),
     }
-    if managed or pairingId ~= "" then
+    if customized then
         table.insert(actions, ui.button({
-            glyph = if deleteArmed then "alert-triangle" else "trash",
-            tooltip = if managed
-                then noctalia.tr("panel.library.delete_managed")
-                else noctalia.tr("panel.pairings.delete"),
-            variant = if deleteArmed then "destructive" else "ghost",
+            glyph = if pairingDeleteArmed then "alert-triangle" else "refresh",
+            tooltip = noctalia.tr("panel.pairings.delete"),
+            variant = if pairingDeleteArmed then "destructive" else "ghost",
             controlSize = "sm",
             enabled = storageValid(),
             onClick = function()
-                if managed then
-                    if pendingDeleteItemId == itemId then
-                        pendingDeleteItemId = ""
-                        send({ kind = "library_delete", item_id = itemId })
-                    else
-                        pendingDeleteItemId = itemId
-                        pendingDeletePairingId = ""
-                        render()
-                    end
-                elseif pendingDeletePairingId == pairingId then
+                if pendingDeletePairingId == profileId then
                     pendingDeletePairingId = ""
-                    send({ kind = "pairing_delete", pairing_id = pairingId })
+                    defaultBundle.id = profileId
+                    send({ kind = "pairing_reset", pairing = defaultBundle })
                 else
-                    pendingDeletePairingId = pairingId
+                    pendingDeletePairingId = profileId
                     pendingDeleteItemId = ""
+                    render()
+                end
+            end,
+        }))
+    end
+    if managed then
+        table.insert(actions, ui.button({
+            glyph = if managedDeleteArmed then "alert-triangle" else "trash",
+            tooltip = noctalia.tr("panel.library.delete_managed"),
+            variant = if managedDeleteArmed then "destructive" else "ghost",
+            controlSize = "sm",
+            enabled = storageValid(),
+            onClick = function()
+                if pendingDeleteItemId == itemId then
+                    pendingDeleteItemId = ""
+                    send({ kind = "library_delete", item_id = itemId })
+                else
+                    pendingDeleteItemId = itemId
+                    pendingDeletePairingId = ""
                     render()
                 end
             end,
@@ -3586,7 +3529,7 @@ function panelUi.libraryCard(item)
     end
 
     local children = {
-        panelUi.libraryThumbnail(kind, previewPath, pairingId ~= ""),
+        panelUi.libraryThumbnail(kind, previewPath, customized),
         ui.label({
             text = tostring(entry.label or basename(entry.source)),
             fontSize = 11,
@@ -3601,12 +3544,12 @@ function panelUi.libraryCard(item)
             maxWidth = 216,
             maxLines = 2,
         }),
-        panelUi.libraryPaletteSummary(bundle, pairingId == ""),
+        panelUi.libraryPaletteSummary(bundle, not customized),
         ui.label({ text = stillText, fontSize = 8, color = "tertiary", maxLines = 1 }),
     }
     if deleteArmed then
         table.insert(children, ui.label({
-            text = if managed
+            text = if managedDeleteArmed
                 then noctalia.tr("panel.library.delete_managed_confirm", {
                     name = tostring(entry.label or basename(entry.source)),
                 })
@@ -3628,7 +3571,7 @@ function panelUi.libraryCard(item)
         padding = 8,
         radius = 10,
         fill = "surface_variant/0.24",
-        border = if deleteArmed then "error/0.55" elseif pairingId ~= "" then "primary/0.35" else "outline/0.25",
+        border = if deleteArmed then "error/0.55" elseif customized then "primary/0.35" else "outline/0.25",
         borderWidth = 1,
         align = "stretch",
     }, children)
@@ -3645,10 +3588,14 @@ function panelUi.libraryItems(kind)
     local signatures = {}
     local function add(entry, metadata, pairing)
         local signature = tostring(entry.kind or "") .. "\0" .. tostring(entry.source or "")
-        if signatures[signature] then
+        local existingIndex = signatures[signature]
+        if existingIndex ~= nil then
+            if type(pairing) == "table" and type(items[existingIndex]) == "table" then
+                items[existingIndex].pairing = preferredPairingForLibraryEntry(items[existingIndex].pairing, pairing)
+            end
             return
         end
-        signatures[signature] = true
+        signatures[signature] = #items + 1
         table.insert(items, { entry = entry, metadata = metadata, pairing = pairing })
     end
     for _, sourceItem in ipairs(sourceItems) do
@@ -3691,6 +3638,12 @@ function panelUi.libraryItems(kind)
         }, pairing)
     end
     return items, currentLibrary
+end
+
+function panelUi.libraryDragSignature(entry)
+    return "library\0" .. tostring(type(entry) == "table" and entry.kind or "")
+        .. "\0"
+        .. tostring(type(entry) == "table" and entry.source or "")
 end
 
 function panelUi.appendLibraryGrid(children, items, visible)
@@ -3863,16 +3816,6 @@ local function librarySection(mediaFilter, editorNode)
                 color = "on_surface_variant",
                 maxLines = 3,
                 flexGrow = 1,
-            }),
-            ui.button({
-                glyph = "plus",
-                tooltip = noctalia.tr("panel.pairings.new"),
-                variant = "primary",
-                controlSize = "sm",
-                enabled = storageValid(),
-                onClick = function()
-                    beginPairingEditor(kind, nil)
-                end,
             }),
             ui.button({
                 glyph = "refresh",
@@ -4412,15 +4355,6 @@ local function pairingKindLabel(kind)
     return noctalia.tr("panel.playlists.entry.media_still")
 end
 
-local function pairingKindDescription(kind)
-    if kind == "video" then
-        return noctalia.tr("panel.pairings.videos_description")
-    elseif kind == "workshop" then
-        return noctalia.tr("panel.pairings.engine_description")
-    end
-    return noctalia.tr("panel.pairings.stills_description")
-end
-
 local function pairingEditor(kind)
     local dynamic = kind ~= "static"
     local revision = tostring(pairingEditorRevision)
@@ -4672,174 +4606,6 @@ local function pairingEditor(kind)
     }, children)
 end
 
-local function pairingCatalogSection(kind)
-    local ids = sortedPairingIds(kind)
-    local visible = if kind == "video"
-        then pairingVisibleVideos
-        elseif kind == "workshop" then pairingVisibleWorkshops
-        else pairingVisibleStills
-    local output = focusedOutput()
-    local playlistId = resolveSelectedPlaylist(output)
-    local children = {
-        panelUi.sectionHeader("layers-intersect", noctalia.tr("panel.pairings.title"), pairingKindDescription(kind)),
-        ui.row({ gap = 6, align = "center" }, {
-            ui.label({
-                text = noctalia.tr("panel.pairings.snapshot_notice"),
-                fontSize = 9,
-                color = "on_surface_variant",
-                maxLines = 3,
-                flexGrow = 1,
-            }),
-            ui.button({
-                text = noctalia.tr("panel.pairings.new"),
-                glyph = "plus",
-                variant = "primary",
-                controlSize = "sm",
-                enabled = storageValid(),
-                onClick = function()
-                    beginPairingEditor(kind, nil)
-                end,
-            }),
-        }),
-    }
-    if pairingEditorOpen and pairingEditorKind == kind then
-        table.insert(children, pairingEditor(kind))
-    end
-    if #ids == 0 then
-        table.insert(children, ui.label({
-            text = noctalia.tr("panel.pairings.empty", { kind = pairingKindLabel(kind) }),
-            fontSize = 9,
-            color = "on_surface_variant",
-        }))
-    else
-        for index = 1, math.min(#ids, visible) do
-            local id = ids[index]
-            local pairing = pairingMap()[id]
-            local media = type(pairing.media) == "table" and pairing.media or nil
-            local still = type(pairing.still) == "table" and pairing.still or {}
-            local theme = type(pairing.theme) == "table" and pairing.theme or {}
-            local source = if media ~= nil then tostring(media.source or "") else tostring(still.path or "")
-            local deleteArmed = pendingDeletePairingId == id
-            local cardChildren = {
-                ui.row({ gap = 7, align = "center" }, {
-                    playlistEntryPreview(
-                        if kind == "static" then "still" else kind,
-                        if tostring(still.mode or "") == "selected" then still.path else "",
-                        false
-                    ),
-                    ui.column({ gap = 1, flexGrow = 1 }, {
-                        ui.label({
-                            text = tostring(pairing.label or id),
-                            fontSize = 11,
-                            fontWeight = "bold",
-                            maxLines = 1,
-                        }),
-                        ui.label({
-                            text = pairingKindLabel(kind) .. " · " .. source,
-                            fontSize = 8,
-                            color = "on_surface_variant",
-                            maxLines = 2,
-                        }),
-                        ui.label({
-                            text = noctalia.tr("panel.playlists.entry.still_summary", {
-                                mode = if tostring(still.mode or "") == "automatic"
-                                    then noctalia.tr("panel.playlists.entry.still_automatic")
-                                    else noctalia.tr("panel.playlists.entry.still_selected"),
-                                path = panelUi.valueOr(still.path, "common.unset"),
-                            })
-                                .. "\n"
-                                .. noctalia.tr("panel.playlists.entry.theme_summary", {
-                                    theme = pairingThemeText(theme),
-                                }),
-                            fontSize = 8,
-                            color = "on_surface_variant",
-                            maxLines = 3,
-                        }),
-                    }),
-                }),
-                pairingPaletteSwatch(pairing, id, nil),
-            }
-            if deleteArmed then
-                table.insert(cardChildren, ui.label({
-                    text = noctalia.tr("panel.pairings.confirm_delete"),
-                    fontSize = 9,
-                    color = "error",
-                    maxLines = 3,
-                }))
-            end
-            table.insert(cardChildren, ui.row({ gap = 5, align = "center" }, {
-                ui.button({
-                    text = noctalia.tr("panel.pairings.add"),
-                    glyph = "playlist-add",
-                    variant = "primary",
-                    controlSize = "sm",
-                    enabled = storageValid() and (playlistId ~= "" or output ~= ""),
-                    flexGrow = 1,
-                    onClick = function()
-                        send({
-                            kind = "playlist_add_pairing",
-                            output = output,
-                            playlist_id = playlistId,
-                            pairing_id = id,
-                        })
-                    end,
-                }),
-                ui.button({
-                    text = noctalia.tr("panel.pairings.edit"),
-                    glyph = "edit",
-                    variant = "ghost",
-                    controlSize = "sm",
-                    enabled = storageValid(),
-                    onClick = function()
-                        beginPairingEditor(kind, pairing)
-                    end,
-                }),
-                ui.button({
-                    text = if deleteArmed
-                        then noctalia.tr("panel.pairings.confirm_delete")
-                        else noctalia.tr("panel.pairings.delete"),
-                    glyph = "trash",
-                    variant = if deleteArmed then "destructive" else "ghost",
-                    controlSize = "sm",
-                    enabled = storageValid(),
-                    onClick = function()
-                        if pendingDeletePairingId == id then
-                            pendingDeletePairingId = ""
-                            if pairingEditorOpen and editingPairingId == id then
-                                closePairingEditor()
-                            end
-                            send({ kind = "pairing_delete", pairing_id = id })
-                        else
-                            pendingDeletePairingId = id
-                        end
-                        render()
-                    end,
-                }),
-            }))
-            table.insert(children, ui.column({
-                key = "pairing-card-" .. id,
-                gap = 6,
-                padding = 8,
-                radius = 9,
-                fill = "surface_variant/0.22",
-                border = if deleteArmed then "error/0.55" else "outline/0.25",
-                borderWidth = 1,
-                align = "stretch",
-            }, cardChildren))
-        end
-        panelUi.appendVisibilityControls(children, #ids, visible, PAIRING_CARD_CHUNK, function(value)
-            if kind == "video" then
-                pairingVisibleVideos = value
-            elseif kind == "workshop" then
-                pairingVisibleWorkshops = value
-            else
-                pairingVisibleStills = value
-            end
-        end)
-    end
-    return panelUi.card(children)
-end
-
 local function pairingDrawerTitle(kind)
     if kind == "video" then
         return noctalia.tr("panel.pairings.video_drawer")
@@ -4866,10 +4632,11 @@ local function setPairingDrawerVisibility(kind, value)
     end
 end
 
--- Playlist drawers intentionally show only saved snapshot metadata. In
--- particular, they never ask the adaptive palette service for a preview.
+-- Drawers expose the indexed libraries, not a separate catalog the user must
+-- populate first. Every media item has synthesized still/palette defaults;
+-- a saved pairing record is merely that item's optional override.
 local function playlistPairingDrawer(kind, playlistId, output)
-    local ids = sortedPairingIds(kind)
+    local items = panelUi.libraryItems(kind)
     local visible = pairingDrawerVisibility(kind)
     local children = {
         ui.label({
@@ -4878,27 +4645,39 @@ local function playlistPairingDrawer(kind, playlistId, output)
             fontWeight = "bold",
         }),
     }
-    if #ids == 0 then
+    if #items == 0 then
         table.insert(children, ui.label({
             text = noctalia.tr("panel.pairings.empty", { kind = pairingKindLabel(kind) }),
             fontSize = 9,
             color = "on_surface_variant",
         }))
     else
-        for index = 1, math.min(#ids, visible) do
-            local id = ids[index]
-            local pairing = pairingMap()[id]
-            local media = type(pairing.media) == "table" and pairing.media or nil
-            local still = type(pairing.still) == "table" and pairing.still or {}
-            local theme = type(pairing.theme) == "table" and pairing.theme or {}
-            local source = if media ~= nil then tostring(media.source or "") else tostring(still.path or "")
-            local dragToken = dragPairingTokenById[id]
+        for index = 1, math.min(#items, visible) do
+            local item = items[index]
+            local entry = type(item) == "table" and item.entry or {}
+            local metadata = type(item) == "table" and item.metadata or {}
+            local existing = type(item) == "table" and item.pairing or nil
+            local customized = type(existing) == "table" and existing.customized == true
+            local bundle = panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)
+            local pairingId = if customized then tostring(existing.id or "") else ""
+            local source = tostring(entry.source or "")
+            local signature = panelUi.libraryDragSignature(entry)
+            local dragToken = dragPairingTokenById[signature]
+            if dragToken == nil then
+                dragToken = nextDragToken("l")
+                dragPairingTokenById[signature] = dragToken
+            end
+            dragPairingByToken[dragToken] = {
+                library_entry = entry,
+                library_bundle = bundle,
+                pairing_id = pairingId,
+            }
             local canAdd = storageValid() and playlistId ~= ""
             local rowChildren = {}
             if dragToken ~= nil then
                 table.insert(rowChildren, ui.dragSource({
-                    key = "pairing-grip-" .. dragToken,
-                    dragType = "wio-pairing",
+                    key = "library-grip-" .. dragToken,
+                    dragType = "wio-library-item",
                     payload = dragToken,
                     enabled = canAdd,
                     previewAncestor = 1,
@@ -4914,12 +4693,12 @@ local function playlistPairingDrawer(kind, playlistId, output)
             end
             table.insert(rowChildren, playlistEntryPreview(
                 if kind == "static" then "still" else kind,
-                if tostring(still.mode or "") == "selected" then still.path else "",
+                panelUi.libraryPreviewPath(entry, metadata, bundle, output),
                 false
             ))
             table.insert(rowChildren, ui.column({ gap = 1, flexGrow = 1 }, {
                 ui.label({
-                    text = tostring(pairing.label or id),
+                    text = tostring(entry.label or basename(source)),
                     fontSize = 10,
                     fontWeight = "bold",
                     maxLines = 1,
@@ -4930,14 +4709,7 @@ local function playlistPairingDrawer(kind, playlistId, output)
                     color = "on_surface_variant",
                     maxLines = 2,
                 }),
-                ui.label({
-                    text = noctalia.tr("panel.playlists.entry.theme_summary", {
-                        theme = pairingThemeText(theme),
-                    }),
-                    fontSize = 8,
-                    color = "on_surface_variant",
-                    maxLines = 1,
-                }),
+                panelUi.libraryPaletteSummary(bundle, not customized),
             }))
             table.insert(rowChildren, ui.button({
                 text = noctalia.tr("panel.pairings.add"),
@@ -4946,16 +4718,25 @@ local function playlistPairingDrawer(kind, playlistId, output)
                 controlSize = "sm",
                 enabled = canAdd,
                 onClick = function()
-                    send({
-                        kind = "playlist_add_pairing",
-                        output = output,
-                        playlist_id = playlistId,
-                        pairing_id = id,
-                    })
+                    if pairingId ~= "" then
+                        send({
+                            kind = "playlist_add_pairing",
+                            output = output,
+                            playlist_id = playlistId,
+                            pairing_id = pairingId,
+                        })
+                    else
+                        send({
+                            kind = "playlist_add_entry",
+                            output = output,
+                            playlist_id = playlistId,
+                            entry = entryForOutput(bundle, output),
+                        })
+                    end
                 end,
             }))
             table.insert(children, ui.row({
-                key = "playlist-drawer-pairing-" .. id,
+                key = "playlist-drawer-library-" .. tostring(index) .. "-" .. kind,
                 gap = 6,
                 padding = 7,
                 radius = 8,
@@ -4963,7 +4744,7 @@ local function playlistPairingDrawer(kind, playlistId, output)
                 align = "center",
             }, rowChildren))
         end
-        panelUi.appendVisibilityControls(children, #ids, visible, PAIRING_CARD_CHUNK, function(value)
+        panelUi.appendVisibilityControls(children, #items, visible, PAIRING_CARD_CHUNK, function(value)
             setPairingDrawerVisibility(kind, value)
         end)
     end
@@ -5007,7 +4788,7 @@ local function playlistInsertionZone(playlistId, beforeId)
     end
     return ui.dropZone({
         key = "playlist-gap-" .. token,
-        accepts = { "wio-pairing", "wio-entry" },
+        accepts = { "wio-library-item", "wio-entry" },
         value = token,
         onDrop = "onPlaylistDrop",
         direction = "row",
@@ -5160,6 +4941,7 @@ local function scheduleEditor(output, playlistId)
             enabled = #ids > 0,
             onChange = function(index)
                 schedulePlaylistDraft = ids[math.floor(tonumber(index) or 0) + 1] or playlistId
+                render()
             end,
         }),
         ui.label({
@@ -5324,6 +5106,28 @@ local function scheduleEditor(output, playlistId)
     return ui.column({ gap = 7, padding = 9, radius = 9, fill = "surface_variant/0.2", align = "stretch" }, children)
 end
 
+local function scheduleInsertionZone(output, beforeId)
+    local namespace = "@schedule:" .. output
+    local tokens = dragTargetTokenByPlaylist[namespace]
+    local token = type(tokens) == "table" and tokens[tostring(beforeId or "")] or nil
+    if token == nil then
+        return ui.box({ height = 3 })
+    end
+    return ui.dropZone({
+        key = "schedule-gap-" .. token,
+        accepts = { "wio-schedule" },
+        value = token,
+        onDrop = "onScheduleDrop",
+        direction = "row",
+        enabled = storageValid() and output ~= "",
+        height = 3,
+        radius = 2,
+        fill = "primary/0.28",
+        expandOnDrag = true,
+        hitSlop = 28,
+    })
+end
+
 local function schedulesSection(output, playlistId)
     local configuredOutput = outputConfig(output)
     local schedules = type(configuredOutput.schedules) == "table" and configuredOutput.schedules or {}
@@ -5370,106 +5174,88 @@ local function schedulesSection(output, playlistId)
     for index, schedule in ipairs(schedules) do
         local scheduleIndex = index
         local scheduleEntry = schedule
-        local previousSchedule = schedules[index - 1]
-        local nextSchedule = schedules[index + 1]
+        local scheduleId = tostring(schedule.id or "")
+        local scheduleTokens = dragEntryTokenByPlaylist["@schedule:" .. output]
+        local dragToken = type(scheduleTokens) == "table" and scheduleTokens[scheduleId] or nil
+        local scheduledPlaylist = playlistMap()[tostring(schedule.playlist or "")]
+        local scheduledPlaylistName = if type(scheduledPlaylist) == "table"
+            then tostring(scheduledPlaylist.name or schedule.playlist)
+            else tostring(schedule.playlist or noctalia.tr("panel.playlists.no_playlists"))
         local window = if schedule.all_day == true
             then noctalia.tr("panel.schedules.all_day")
             else formatMinute(schedule.start_minute) .. "–" .. formatMinute(schedule.end_minute)
         local months, days = scheduleSelectionSummary(schedule)
+        table.insert(children, scheduleInsertionZone(output, scheduleId))
+        local rowChildren = {}
+        if dragToken ~= nil then
+            table.insert(rowChildren, ui.dragSource({
+                key = "schedule-grip-" .. dragToken,
+                dragType = "wio-schedule",
+                payload = dragToken,
+                enabled = storageValid(),
+                previewAncestor = 1,
+                liftFromLayout = true,
+                width = 24,
+                height = 24,
+                align = "center",
+                justify = "center",
+                tooltip = noctalia.tr("panel.schedules.drag"),
+            }, {
+                ui.glyph({ name = "menu-2", size = 14, color = "on_surface_variant" }),
+            }))
+        end
+        table.insert(rowChildren, ui.column({ gap = 1, flexGrow = 1 }, {
+            ui.label({
+                text = tostring(scheduleIndex + 1) .. ". " .. scheduledPlaylistName,
+                fontSize = 10,
+                fontWeight = "bold",
+                maxLines = 1,
+            }),
+            ui.label({
+                text = tostring(schedule.name or noctalia.tr("panel.schedules.default_name"))
+                    .. " · "
+                    .. noctalia.tr("panel.schedules.summary", {
+                        months = months,
+                        days = days,
+                        window = window,
+                        state = if schedule.enabled == false
+                            then noctalia.tr("panel.schedules.disabled")
+                            else noctalia.tr("panel.schedules.enabled"),
+                    }),
+                fontSize = 8,
+                color = "on_surface_variant",
+                maxLines = 3,
+            }),
+        }))
+        table.insert(rowChildren, ui.button({
+            glyph = "edit",
+            tooltip = noctalia.tr("panel.schedules.edit"),
+            variant = "ghost",
+            controlSize = "sm",
+            onClick = function()
+                editScheduleDraft(scheduleEntry)
+                render()
+            end,
+        }))
+        table.insert(rowChildren, ui.button({
+            glyph = "trash",
+            tooltip = noctalia.tr("panel.schedules.delete"),
+            variant = "ghost",
+            controlSize = "sm",
+            onClick = function()
+                send({
+                    kind = "schedule_delete",
+                    output = output,
+                    schedule_id = scheduleId,
+                })
+            end,
+        }))
         table.insert(
             children,
-            ui.row({ gap = 6, align = "center", padding = 7, radius = 8, fill = "surface_variant/0.22" }, {
-                ui.column({ gap = 1, flexGrow = 1 }, {
-                    ui.label({
-                        text = tostring(scheduleIndex)
-                            .. ". "
-                            .. tostring(schedule.name or noctalia.tr("panel.schedules.default_name")),
-                        fontSize = 10,
-                        fontWeight = "bold",
-                        maxLines = 1,
-                    }),
-                    ui.label({
-                        text = noctalia.tr("panel.schedules.summary", {
-                            months = months,
-                            days = days,
-                            window = window,
-                            state = if schedule.enabled == false
-                                then noctalia.tr("panel.schedules.disabled")
-                                else noctalia.tr("panel.schedules.enabled"),
-                        }),
-                        fontSize = 8,
-                        color = "on_surface_variant",
-                        maxLines = 3,
-                    }),
-                }),
-                ui.column({ gap = 2, align = "center" }, {
-                    ui.row({ gap = 2, align = "center" }, {
-                        ui.button({
-                            glyph = "arrow-up",
-                            tooltip = noctalia.tr("panel.schedules.move_up"),
-                            variant = "ghost",
-                            controlSize = "sm",
-                            enabled = storageValid() and previousSchedule ~= nil,
-                            onClick = function()
-                                if previousSchedule ~= nil then
-                                    send({
-                                        kind = "schedule_place",
-                                        output = output,
-                                        schedule_id = tostring(scheduleEntry.id or ""),
-                                        anchor_id = tostring(previousSchedule.id or ""),
-                                        placement = "before",
-                                    })
-                                end
-                            end,
-                        }),
-                        ui.button({
-                            glyph = "arrow-down",
-                            tooltip = noctalia.tr("panel.schedules.move_down"),
-                            variant = "ghost",
-                            controlSize = "sm",
-                            enabled = storageValid() and nextSchedule ~= nil,
-                            onClick = function()
-                                if nextSchedule ~= nil then
-                                    send({
-                                        kind = "schedule_place",
-                                        output = output,
-                                        schedule_id = tostring(scheduleEntry.id or ""),
-                                        anchor_id = tostring(nextSchedule.id or ""),
-                                        placement = "after",
-                                    })
-                                end
-                            end,
-                        }),
-                    }),
-                    ui.row({ gap = 2, align = "center" }, {
-                        ui.button({
-                            glyph = "edit",
-                            tooltip = noctalia.tr("panel.schedules.edit"),
-                            variant = "ghost",
-                            controlSize = "sm",
-                            onClick = function()
-                                editScheduleDraft(scheduleEntry)
-                                render()
-                            end,
-                        }),
-                        ui.button({
-                            glyph = "trash",
-                            tooltip = noctalia.tr("panel.schedules.delete"),
-                            variant = "ghost",
-                            controlSize = "sm",
-                            onClick = function()
-                                send({
-                                    kind = "schedule_delete",
-                                    output = output,
-                                    schedule_id = tostring(scheduleEntry.id or ""),
-                                })
-                            end,
-                        }),
-                    }),
-                }),
-            })
+            ui.row({ gap = 6, align = "center", padding = 7, radius = 8, fill = "surface_variant/0.22" }, rowChildren)
         )
     end
+    table.insert(children, scheduleInsertionZone(output, ""))
     if scheduleEditorOpen then
         table.insert(children, scheduleEditor(output, playlistId))
     else
@@ -6052,13 +5838,6 @@ local function diagnosticsSection()
             activeRenderers += 1
         end
     end
-    local daemonNames = {}
-    local daemons = type(current.daemons) == "table" and current.daemons or {}
-    for _, name in ipairs({ "awww", "swww", "wpaperd", "hyprpaper" }) do
-        if daemons[name] == true then
-            table.insert(daemonNames, name)
-        end
-    end
     local paletteState = type(status) == "table" and type(status.palette) == "table" and status.palette or {}
     local requestedPalette = type(paletteState.requested) == "table" and paletteState.requested or {}
     local appliedPalette = type(paletteState.applied) == "table" and paletteState.applied or {}
@@ -6166,17 +5945,6 @@ local function diagnosticsSection()
             maxLines = 6,
         })
     )
-    table.insert(
-        children,
-        ui.label({
-            text = noctalia.tr("diagnostics.daemons", {
-                commands = if #daemonNames > 0 then table.concat(daemonNames, ", ") else noctalia.tr("common.none"),
-            }),
-            fontSize = 10,
-            color = "on_surface_variant",
-            maxLines = 3,
-        })
-    )
     if actionError ~= "" then
         table.insert(
             children,
@@ -6215,7 +5983,6 @@ end
 local panelPages = {
     validPages = {
         main = true,
-        screens = true,
         library = true,
         shops = true,
         playlists = true,
@@ -6223,7 +5990,6 @@ local panelPages = {
     },
     validLibrarySubpages = { images = true, videos = true, workshops = true },
     validShopSubpages = { wallhaven = true, motionbgs = true, steam = true },
-    validDisplaySubpages = { overview = true, engines = true, schedule = true },
     engineDrafts = {},
     engineMode = "video",
 }
@@ -6267,9 +6033,6 @@ function panelPages.selectPage(page)
     if activePage == "playlists" then
         activeSubpage = ""
         resolveSelectedPlaylist(panelPages.ensureSelectedScreen())
-    elseif activePage == "screens" then
-        activeSubpage = if panelPages.validDisplaySubpages[activeSubpage] then activeSubpage else "overview"
-        panelPages.ensureSelectedScreen()
     elseif activePage == "library" then
         activeSubpage = if panelPages.validLibrarySubpages[activeSubpage] then activeSubpage else "images"
     elseif activePage == "shops" then
@@ -6341,22 +6104,14 @@ function panelPages.selectScreenPage(output)
     scheduleEditorOpen = false
     local configured = outputConfig(output)
     local fallback = tostring(configured.fallback_playlist or "")
-    resetScheduleDraft(if playlistMap()[fallback] ~= nil then fallback else selectedPlaylistId)
-    activePage = "screens"
-    activeSubpage = if panelPages.validDisplaySubpages[activeSubpage] then activeSubpage else "overview"
-    render()
-end
-
-function panelPages.selectDisplaySubpage(subpage)
-    if not panelPages.validDisplaySubpages[subpage] then
-        return
-    end
-    activePage = "screens"
-    activeSubpage = subpage
-    panelPages.ensureSelectedScreen()
+    selectedPlaylistId = if type(playlistMap()[fallback]) == "table"
+        and playlistMap()[fallback].quick_choice ~= true
+        then fallback
+        else sortedPlaylistIds(false)[1] or ""
+    resetScheduleDraft(selectedPlaylistId)
+    activePage = "main"
+    activeSubpage = "display"
     entryEditorOpen = false
-    closePairingEditor()
-    scheduleEditorOpen = false
     render()
 end
 
@@ -6395,12 +6150,11 @@ end
 function panelPages.navigationColumn()
     local children = {
         panelPages.navigationButton("main", "panel.nav.main", "home"),
-        panelPages.navigationButton("screens", "panel.nav.screens", "device-desktop"),
     }
     local outputs = panelPages.screenNames()
     for _, output in ipairs(outputs) do
         local name = output
-        local selected = activePage == "screens" and selectedScreen == name
+        local selected = activePage == "main" and activeSubpage == "display" and selectedScreen == name
         table.insert(children, panelPages.insetNavigationButton(
             "screen-" .. name,
             name,
@@ -6409,24 +6163,6 @@ function panelPages.navigationColumn()
                 panelPages.selectScreenPage(name)
             end
         ))
-        if selected then
-            for _, route in ipairs({
-                { id = "overview", label = "panel.nav.display_overview" },
-                { id = "engines", label = "panel.nav.display_engines" },
-                { id = "schedule", label = "panel.nav.display_schedule" },
-            }) do
-                local routeId = route.id
-                table.insert(children, panelPages.insetNavigationButton(
-                    "screen-" .. name .. "-" .. routeId,
-                    noctalia.tr(route.label),
-                    activeSubpage == routeId,
-                    function()
-                        panelPages.selectDisplaySubpage(routeId)
-                    end,
-                    2
-                ))
-            end
-        end
     end
     table.insert(children, panelPages.navigationButton("library", "panel.nav.library", "library-photo"))
     for _, route in ipairs({
@@ -6585,8 +6321,7 @@ function panelPages.homeSection()
             options = names,
             selectedIndex = selectedIndex,
             onChange = function(index)
-                selectedScreen = names[math.floor(tonumber(index) or 0) + 1] or output
-                render()
+                panelPages.selectScreenPage(names[math.floor(tonumber(index) or 0) + 1] or output)
             end,
         }))
     end
@@ -6619,7 +6354,7 @@ function panelPages.homeSection()
             controlSize = "sm",
             flexGrow = 1,
             onClick = function()
-                panelPages.selectPage("screens")
+                panelPages.selectScreenPage(output)
             end,
         }),
         ui.button({
@@ -6916,6 +6651,7 @@ function panelPages.engineSettingsSection(output)
             selectedIndex = if draft.layer == "background" then 1 else 0,
             onChange = function(index)
                 draft.layer = if math.floor(tonumber(index) or 0) == 1 then "background" else "bottom"
+                render()
             end,
         }),
         ui.separator(),
@@ -6952,6 +6688,7 @@ function panelPages.engineSettingsSection(output)
             enabled = video.auto_pause,
             onChange = function(index)
                 video.auto_pause_mode = ({ "FULL", "MAX", "ACTIVE" })[math.floor(tonumber(index) or 0) + 1] or "FULL"
+                render()
             end,
         }))
         table.insert(children, ui.input({
@@ -7011,6 +6748,7 @@ function panelPages.engineSettingsSection(output)
                 onChange = function(index)
                     workshop.scaling = ({ "default", "stretch", "fit", "fill" })[math.floor(tonumber(index) or 0) + 1]
                         or "fill"
+                    render()
                 end,
             }),
             ui.select({
@@ -7024,6 +6762,7 @@ function panelPages.engineSettingsSection(output)
                 flexGrow = 1,
                 onChange = function(index)
                     workshop.clamp = ({ "clamp", "border", "repeat" })[math.floor(tonumber(index) or 0) + 1] or "border"
+                    render()
                 end,
             }),
         }))
@@ -7083,10 +6822,6 @@ function panelPages.screensSection()
     local playlistId = panelPages.selectedScreenPlaylist(output)
     local playlist = playlistMap()[playlistId]
     local fallback = tostring(outputConfig(output).fallback_playlist or "")
-    local fallbackPlaylist = playlistMap()[fallback]
-    local playlistName = if type(fallbackPlaylist) == "table"
-        then tostring(fallbackPlaylist.name or fallback)
-        else noctalia.tr("panel.screens.no_default")
     local labels, ids, selectedIndex = playlistOptions(fallback)
     local hasPlaylists = #labels > 0
     if fallback == "" then
@@ -7095,7 +6830,7 @@ function panelPages.screensSection()
         selectedIndex = 0
     end
     local options = if #labels > 0 then labels else { noctalia.tr("panel.playlists.no_playlists") }
-    return panelUi.card({
+    local children = {
         panelUi.sectionHeader("device-desktop", noctalia.tr("panel.nav.screens"), output),
         ui.label({
             text = noctalia.tr("panel.screens.description"),
@@ -7104,46 +6839,50 @@ function panelPages.screensSection()
             maxLines = 3,
         }),
         panelUi.compactRendererControls(output),
+        panelPages.screenPlaybackSection(output, playlist),
         ui.separator(),
         ui.label({
-            text = noctalia.tr("panel.screens.default_playlist") .. ": " .. playlistName,
-            fontSize = 10,
+            text = noctalia.tr("panel.screens.automation"),
+            fontSize = 12,
             fontWeight = "bold",
-            maxLines = 2,
         }),
-        ui.select({
-            key = "screen-default-playlist-" .. output,
-            options = options,
-            selectedIndex = selectedIndex,
-            enabled = hasPlaylists and storageValid(),
-            onChange = function(index)
-                local id = ids[math.floor(tonumber(index) or 0) + 1] or ""
-                if id ~= "" then
-                    selectedPlaylistId = id
-                    screenIntervalDraft = ""
-                    screenOrderDraft = ""
-                    scheduleEditorOpen = false
-                    resetScheduleDraft(id)
-                    send({ kind = "playlist_assign", output = output, playlist_id = id })
-                end
-            end,
+        ui.label({
+            text = noctalia.tr("panel.screens.automation_description"),
+            fontSize = 9,
+            color = "on_surface_variant",
+            maxLines = 3,
         }),
-        panelPages.screenPlaybackSection(output, playlist),
-    })
-end
-
-function panelPages.screenScheduleSection()
-    local output = panelPages.ensureSelectedScreen()
-    if output == "" then
-        return panelUi.card({
-            panelUi.sectionHeader("calendar", noctalia.tr("panel.nav.display_schedule"), noctalia.tr("availability.output")),
-        })
-    end
-    local playlistId = panelPages.selectedScreenPlaylist(output)
-    return panelUi.card({
-        panelUi.sectionHeader("calendar", noctalia.tr("panel.nav.display_schedule"), output),
-        schedulesSection(output, playlistId),
-    })
+        ui.row({ gap = 7, align = "center", padding = 7, radius = 8, fill = "primary/0.12" }, {
+            ui.glyph({ name = "pin", size = 16, color = "primary" }),
+            ui.label({
+                text = "1. " .. noctalia.tr("panel.screens.default_playlist"),
+                fontSize = 10,
+                fontWeight = "bold",
+                width = 145,
+                maxLines = 2,
+            }),
+            ui.select({
+                key = "screen-default-playlist-" .. output,
+                options = options,
+                selectedIndex = selectedIndex,
+                enabled = hasPlaylists and storageValid(),
+                flexGrow = 1,
+                onChange = function(index)
+                    local id = ids[math.floor(tonumber(index) or 0) + 1] or ""
+                    if id ~= "" then
+                        selectedPlaylistId = id
+                        screenIntervalDraft = ""
+                        screenOrderDraft = ""
+                        scheduleEditorOpen = false
+                        resetScheduleDraft(id)
+                        send({ kind = "playlist_assign", output = output, playlist_id = id })
+                    end
+                end,
+            }),
+        }),
+    }
+    table.insert(children, schedulesSection(output, playlistId))
+    return panelUi.card(children)
 end
 
 function panelPages.activePageSections()
@@ -7170,15 +6909,12 @@ function panelPages.activePageSections()
         return { wallhavenSection() }
     elseif activePage == "playlists" then
         return { playlistsSection(panelPages.ensureSelectedScreen()) }
-    elseif activePage == "screens" then
-        if activeSubpage == "engines" then
-            return { panelPages.engineSettingsSection(panelPages.ensureSelectedScreen()) }
-        elseif activeSubpage == "schedule" then
-            return { panelPages.screenScheduleSection() }
-        end
-        return { panelPages.screensSection() }
     elseif activePage == "diagnostics" then
         return { diagnosticsSection() }
+    end
+    if activeSubpage == "display" then
+        local output = panelPages.ensureSelectedScreen()
+        return { panelPages.screensSection(), panelPages.engineSettingsSection(output) }
     end
     return { panelPages.homeSection() }
 end
@@ -7240,8 +6976,6 @@ function onOpen(_context)
         activeSubpage = "images"
     elseif activePage == "shops" and not panelPages.validShopSubpages[activeSubpage] then
         activeSubpage = "wallhaven"
-    elseif activePage == "screens" and not panelPages.validDisplaySubpages[activeSubpage] then
-        activeSubpage = "overview"
     end
     panelPages.ensureSelectedScreen()
     resetScheduleDraft(selectedPlaylistId)

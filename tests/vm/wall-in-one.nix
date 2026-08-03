@@ -120,6 +120,13 @@ let
     </a>
   '') (lib.range 1 36);
 
+  # MotionBGS listing pages contain hundreds of unrelated navigation, tag, and
+  # footer anchors. Keep this fixture close to the real failure shape: roughly
+  # 100 KiB and 391 total anchors once the 36 wallpaper cards are included.
+  motionGenreNoiseAnchors = lib.concatMapStrings (index: ''
+    <a href="/navigation-${toString index}" class="navigation-link fixture-padding-for-realistic-motionbgs-listing" aria-label="Unrelated MotionBGS navigation fixture ${toString index} xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">Navigation fixture ${toString index}</a>
+  '') (lib.range 1 355);
+
   motionSearchHtml = pkgs.writeText "motionbgs-search.html" ''
     <!doctype html><html><body>
       <a href="/night-city" title="Night City Live Wallpaper">
@@ -140,6 +147,7 @@ let
       <title>610+ Nature Live Wallpapers 4K &amp; HD</title>
       <link rel="next" href="https://motionbgs.com/tag:nature/2/">
     </head><body>
+      ${motionGenreNoiseAnchors}
       ${motionGenreCards}
     </body></html>
   '';
@@ -467,6 +475,7 @@ let
     local vmCommandSequence = 900000
     local vmPlaylistId = ""
     local vmPairingPlaylistId = ""
+    local vmDefaultPlaylistId = ""
     local vmScheduleMonth = 1
     local vmPreviousAck = noctalia.state.get(COMMAND_ACK_KEY)
     if type(vmPreviousAck) == "table" then
@@ -772,7 +781,11 @@ let
                 kind = "playlist_options",
                 output = "HEADLESS-1",
                 playlist_id = vmPlaylistId,
-                interval_seconds = 60,
+                -- Keep manual transition assertions deterministic. The VM
+                -- deliberately exercises several slow renderer/capture paths;
+                -- a one-minute timer can advance the playlist underneath a
+                -- later assertion without testing anything about rotation.
+                interval_seconds = 900,
                 order = "rotate",
             })
         elseif event == "vm-cycle-assign" then
@@ -837,6 +850,43 @@ let
             })
         elseif event == "vm-output-options-inherit" then
             vmHandle({ kind = "output_options", output = "HEADLESS-1", inherit = true })
+        elseif event == "vm-default-profile-create" then
+            if vmDefaultPlaylistId == "" then
+                vmDefaultPlaylistId = wallInOne.createPlaylist(
+                    "VM default identity",
+                    "HEADLESS-1",
+                    false
+                ) or ""
+            end
+            vmHandle({
+                kind = "playlist_add_entry",
+                output = "HEADLESS-1",
+                playlist_id = vmDefaultPlaylistId,
+                entry = {
+                    id = "vm-default-first",
+                    label = "VM default first",
+                    media = { kind = "video", source = "${fixtureVideo}" },
+                    still = { mode = "selected", path = "${fixtureVideoStill}" },
+                    theme = { mode = "auto", source = "wallpaper", selection = "m3-content" },
+                    customized = false,
+                    added_at = "2026-08-03 00:00:00",
+                },
+            })
+        elseif event == "vm-default-profile-refresh" then
+            vmHandle({
+                kind = "playlist_add_entry",
+                output = "HEADLESS-1",
+                playlist_id = vmDefaultPlaylistId,
+                entry = {
+                    id = "vm-default-second",
+                    label = "VM default refreshed",
+                    media = { kind = "video", source = "${fixtureVideo}" },
+                    still = { mode = "selected", path = "${fixtureVideoStill}" },
+                    theme = { mode = "auto", source = "wallpaper", selection = "m3-rainbow" },
+                    customized = false,
+                    added_at = "2026-08-03 00:01:00",
+                },
+            })
         elseif event == "vm-pairing-create" then
             if vmPairingPlaylistId == "" then
                 vmPairingPlaylistId = wallInOne.createPlaylist(
@@ -2302,7 +2352,7 @@ pkgs.testers.runNixOSTest (
           "(. as $config "
           "| ((.playlists | to_entries | map(select(.value.name == \"VM mixed playlist\")) | .[0]) as $record "
           "| $record.value as $p "
-          "| $p.interval_seconds == 60 "
+          "| $p.interval_seconds == 900 "
           "and $p.order == \"rotate\" "
           "and ($p.entries | length) == 3 "
           "and ([ $p.entries[].id ] | length) == ([ $p.entries[].id ] | unique | length) "
@@ -2348,6 +2398,32 @@ pkgs.testers.runNixOSTest (
           "miss=true",
       ):
           wait_log(fragment)
+
+      # A changed global item default reuses the medium/source identity, updates
+      # every linked snapshot, and does not leak another hidden profile.
+      noctalia_msg("plugin ${serviceId} all vm-default-profile-create")
+      noctalia_msg("plugin ${serviceId} all vm-default-profile-refresh")
+      machine.wait_until_succeeds(
+          "${lib.getExe pkgs.jq} -e "
+          "'(. as $config "
+          "| ([.pairings | to_entries[] "
+          "| select(.value.customized == false "
+          "and .value.media.kind == \"video\" "
+          "and .value.media.source == \"${fixtureVideo}\")]) as $profiles "
+          "| (.playlists | to_entries "
+          "| map(select(.value.name == \"VM default identity\")) | .[0].value) as $playlist "
+          "| ($profiles | length) == 1 "
+          "and ($playlist.entries | length) == 2 "
+          "and $playlist.entries[0].pairing_id == $profiles[0].key "
+          "and $playlist.entries[1].pairing_id == $profiles[0].key "
+          "and $profiles[0].value.label == \"VM default refreshed\" "
+          "and $profiles[0].value.theme.selection == \"m3-rainbow\" "
+          "and ([.playlists[].entries[] "
+          "| select(.pairing_id == $profiles[0].key) "
+          "| .label == \"VM default refreshed\" "
+          "and .theme.selection == \"m3-rainbow\"] | all))' "
+          "${pluginDataRoot}/config.json"
+      )
 
       # A screen can override playback independently, then return to inheriting
       # the playlist/global values without leaving stale output fields behind.
@@ -2769,6 +2845,7 @@ pkgs.testers.runNixOSTest (
           action="search", cached=False, busy=False, mode="genre", page=1,
           previous=False, next=True, items=36, first="nature-1",
       )
+      machine.fail(f"{journal} | grep -F -- 'exceeded its CPU budget'")
       motion_calls_after_genre = len(
           machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
       )
