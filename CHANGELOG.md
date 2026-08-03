@@ -33,6 +33,17 @@ All notable staging changes will be recorded here.
 
 ## Unreleased — Wall-in-One 0.5.0 staging
 
+- Complete the Wallhaven browser with exact/minimum resolution modes, all
+  category/purity masks, Hot/top-list filters, stable random-page seeds, and
+  previous/next navigation. Add truthful MotionBGS modes: one unpaged text
+  search set, pageable latest/genre/tag/4K catalogs, discoverable genre presets
+  with a custom-tag escape hatch, and guarded first-page-only HD
+  results while the site's HD page redirect is broken. Parse large listing
+  pages across bounded service ticks to respect Noctalia's callback CPU budget.
+- Render Wallhaven and MotionBGS result stills through a panel-owned local
+  preview cache instead of metadata-only rows. Preview ingress is restricted to
+  the providers' validated image origins, capped at 2 MiB per file with four
+  workers, and evicted at 64 entries or 64 MiB before local `ui.image` display.
 - Remove write-only renderer metadata arrays so every shipped shell helper is
   clean under ShellCheck 0.11.0, and make the offline socket fixture explicit
   when a restricted test sandbox forbids AF_UNIX `bind()`.
