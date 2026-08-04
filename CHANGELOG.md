@@ -31,7 +31,41 @@ All notable staging changes will be recorded here.
 - Remove the now-empty plugin-settings button from the details panel and point
   users to the exact per-placement editor instead.
 
-## Unreleased — Wall-in-One 0.7.0
+## Unreleased — Wall-in-One 0.7.1
+
+- Keep full panel rendering out of `onFrameTick`; frame callbacks now advance
+  only one bounded drag or preview-cache state-machine step. Memoize provider
+  preview validation per result generation and render 36–48-result responses as
+  fixed 12-card local pages.
+- Add a host VM regression with 36 MotionBGS results, sustained frame delivery,
+  bounded preview diagnostics, and explicit rejection of callback CPU-budget or
+  panel-disable log records.
+- Put Wallhaven downloads and MotionBGS HD/4K choices directly on result cards.
+  Show downloading, queued, and already-on-disk state from provider status plus
+  the managed library, reject exact duplicates, and retain a compact MotionBGS
+  queue summary without claiming unavailable byte-level progress.
+- Remove duplicated selected-item hero cards, full result URLs, long scraper
+  implementation narration, and the MotionBGS helper's absolute filesystem path
+  from the main shop surface. Keep detailed state in Diagnostics.
+- Replace the ordinary custom-still path field with a paged picker over indexed
+  user and Wallhaven images, retaining a manual-path escape hatch. Eagerly
+  prepare automatic video/Workshop representatives in the bounded coordinator
+  capture path so adaptive palette previews use the item's pixels without
+  applying a wallpaper, palette, or renderer.
+- Retain four invisible inert manifest declarations for pre-0.7 global engine
+  overrides. Noctalia API 17 cannot delete host-owned plugin settings, so this
+  compatibility shim prevents permanent unknown-setting warnings while all
+  runtime behavior remains per display.
+- Publish provider-install and automatic-representative indexes from the
+  coordinator's incremental library scan, cache palette and Workshop lookups,
+  and page playlist rows in fixed 12-entry windows so cold or expanded routes
+  cannot grow a panel render with the full library or playlist.
+- Use fixed 1160 × 780 floating panel geometry to avoid the manager warning
+  caused when a saved attached-placement override meets fill sizing. Keep the
+  latest validated MotionBGS receipt authoritative until the managed-library
+  refresh lands, closing the post-download duplicate-request gap.
+
+## Wall-in-One 0.7.0 - External MotionBGS and runtime stabilization
 
 - Move MotionBGS HTTP, HTML parsing, metadata caching, and downloads out of
   Noctalia's in-process Luau callbacks into the separately installed,

@@ -352,6 +352,8 @@ local library = {
     stills = {},
     videos = {},
     workshops = {},
+    provider_installs = { wallhaven = {}, motionbgs = {} },
+    representative_stills = { video = {}, workshop = {} },
     scanned_at = "",
     error = "",
     scanning = false,
@@ -359,6 +361,7 @@ local library = {
 local libraryScan = nil
 local managedDirectoryError = ""
 local libraryRefreshPending = false
+local pairingPreviewPending = nil
 local libraryRootsSignature = ""
 local settingsStatusPublishPending = false
 
@@ -3123,12 +3126,20 @@ wallInOne.refreshLibrary = function()
         stills = {},
         videos = {},
         workshops = {},
+        provider_installs = { wallhaven = {}, motionbgs = {} },
+        representative_stills = { video = {}, workshop = {} },
         phase = "media",
     }
     library = {
         stills = type(library.stills) == "table" and library.stills or {},
         videos = type(library.videos) == "table" and library.videos or {},
         workshops = type(library.workshops) == "table" and library.workshops or {},
+        provider_installs = type(library.provider_installs) == "table"
+                and library.provider_installs
+            or { wallhaven = {}, motionbgs = {} },
+        representative_stills = type(library.representative_stills) == "table"
+                and library.representative_stills
+            or { video = {}, workshop = {} },
         scanned_at = tostring(library.scanned_at or ""),
         error = managedDirectoryError,
         scanning = true,
@@ -3198,6 +3209,11 @@ function wallInOne.stepLibraryScan()
                     entry.sidecar = sidecarPath
                     entry.source_url = tostring(record.source_page or "")
                     entry.provider = "MotionBGS"
+                    entry.provider_id = entry.source_url:match("^https://motionbgs%.com/([a-z0-9][a-z0-9%-]*)$") or ""
+                    entry.quality = tostring(record.quality or ""):lower()
+                    if entry.provider_id ~= "" and (entry.quality == "hd" or entry.quality == "4k") then
+                        scan.provider_installs.motionbgs[entry.provider_id .. ":" .. entry.quality] = path
+                    end
                 end
             elseif candidate.ownership == "managed-wallhaven" then
                 local record, sidecarPath = wallInOne.readProviderSidecar(path, ".wallhaven.json", "Wallhaven")
@@ -3208,11 +3224,18 @@ function wallInOne.stepLibraryScan()
                     entry.sidecar = sidecarPath
                     entry.source_url = tostring(record.source_page or "")
                     entry.provider = "Wallhaven"
+                    entry.provider_id = tostring(record.id or "")
+                    if entry.provider_id ~= "" then
+                        scan.provider_installs.wallhaven[entry.provider_id:lower()] = path
+                    end
                 end
             end
             if expectedMedia == "video" then
                 local pairedPreview = wallInOne.cachedPair("video:" .. path)
                 entry.paired_preview = tostring(pairedPreview or "")
+                if entry.paired_preview ~= "" then
+                    scan.representative_stills.video[path] = entry.paired_preview
+                end
             end
             if expectedMedia == "image" and #scan.stills < MAX_PLAYLIST_ENTRIES then
                 table.insert(scan.stills, entry)
@@ -3242,13 +3265,17 @@ function wallInOne.stepLibraryScan()
             if type(project) == "table" then
                 local preview = wallInOne.safeRelativePath(project.preview or "preview.jpg")
                 local pairedPreview = wallInOne.cachedPair(tostring(candidate.id or ""))
+                local pairedPreviewPath = tostring(pairedPreview or "")
+                if pairedPreviewPath ~= "" then
+                    scan.representative_stills.workshop[tostring(candidate.id or "")] = pairedPreviewPath
+                end
                 table.insert(scan.workshops, {
                     id = candidate.id,
                     title = wallInOne.boundedDetail(project.title or ("Workshop " .. candidate.id)),
                     kind = wallInOne.boundedDetail(project.type or "unknown"),
                     directory = candidate.directory,
                     preview = if preview ~= nil then candidate.directory .. preview else "",
-                    paired_preview = tostring(pairedPreview or ""),
+                    paired_preview = pairedPreviewPath,
                     ownership = "steam",
                     managed = false,
                     deletable = false,
@@ -3273,6 +3300,8 @@ function wallInOne.stepLibraryScan()
         stills = scan.stills,
         videos = scan.videos,
         workshops = scan.workshops,
+        provider_installs = scan.provider_installs,
+        representative_stills = scan.representative_stills,
         scanned_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
         error = managedDirectoryError,
         scanning = false,
@@ -3592,20 +3621,16 @@ function wallInOne.dynamicSourceFingerprint(dynamicId)
     return math.floor(tonumber(info.size) or 0), math.floor(tonumber(info.mtime) or 0)
 end
 
-function wallInOne.recordAppliedPair(output, dynamicId, path, method, managedStill, sidecarPath, theme)
+function wallInOne.recordPairRegistry(dynamicId, path, method, managedStill, sidecarPath, pairedAt)
     local stillInfo = noctalia.fileInfo(path)
     local sourceSize, sourceMtime = wallInOne.dynamicSourceFingerprint(dynamicId)
-    local key = output or "all"
     local provider = wallInOne.pairProvider(dynamicId)
-    runtime.pairs[key] = {
+    local record = {
         provider = provider,
         dynamic_id = dynamicId,
         still_path = path,
         capture_method = method,
-        paired_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
-        color_source_before = colors.source,
-        color_scheme_before = colors.scheme,
-        color_scheme = if type(theme) == "table" and theme.source ~= "inherit" then theme.selection else "unchanged",
+        paired_at = tostring(pairedAt or noctalia.formatTime("%Y-%m-%d %H:%M:%S")),
         still_size = type(stillInfo) == "table" and (tonumber(stillInfo.size) or 0) or 0,
         still_mtime = type(stillInfo) == "table" and (tonumber(stillInfo.mtime) or 0) or 0,
         source_size = tonumber(sourceSize) or 0,
@@ -3614,20 +3639,7 @@ function wallInOne.recordAppliedPair(output, dynamicId, path, method, managedSti
         still_origin = if managedStill == true then "managed-auto" else "user",
         sidecar_path = if managedStill == true then tostring(sidecarPath or wallInOne.managedStillSidecar(path)) else "",
     }
-    runtime.pair_registry[tostring(dynamicId)] = {
-        provider = provider,
-        dynamic_id = dynamicId,
-        still_path = path,
-        capture_method = method,
-        paired_at = runtime.pairs[key].paired_at,
-        still_size = runtime.pairs[key].still_size,
-        still_mtime = runtime.pairs[key].still_mtime,
-        source_size = runtime.pairs[key].source_size,
-        source_mtime = runtime.pairs[key].source_mtime,
-        still_managed = runtime.pairs[key].still_managed,
-        still_origin = runtime.pairs[key].still_origin,
-        sidecar_path = runtime.pairs[key].sidecar_path,
-    }
+    runtime.pair_registry[tostring(dynamicId)] = record
     local registryEntries = {}
     for registryKey, pair in pairs(runtime.pair_registry) do
         table.insert(registryEntries, {
@@ -3646,6 +3658,37 @@ function wallInOne.recordAppliedPair(output, dynamicId, path, method, managedSti
             runtime.pair_registry[registryEntries[index].key] = nil
         end
     end
+    return record
+end
+
+function wallInOne.recordAppliedPair(output, dynamicId, path, method, managedStill, sidecarPath, theme)
+    local key = output or "all"
+    local pairedAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    local registry = wallInOne.recordPairRegistry(
+        dynamicId,
+        path,
+        method,
+        managedStill,
+        sidecarPath,
+        pairedAt
+    )
+    runtime.pairs[key] = {
+        provider = registry.provider,
+        dynamic_id = registry.dynamic_id,
+        still_path = registry.still_path,
+        capture_method = registry.capture_method,
+        paired_at = registry.paired_at,
+        color_source_before = colors.source,
+        color_scheme_before = colors.scheme,
+        color_scheme = if type(theme) == "table" and theme.source ~= "inherit" then theme.selection else "unchanged",
+        still_size = registry.still_size,
+        still_mtime = registry.still_mtime,
+        source_size = registry.source_size,
+        source_mtime = registry.source_mtime,
+        still_managed = registry.still_managed,
+        still_origin = registry.still_origin,
+        sidecar_path = registry.sidecar_path,
+    }
     local outputPairs = {}
     for outputKey, pair in pairs(runtime.pairs) do
         table.insert(outputPairs, {
@@ -4102,6 +4145,22 @@ function wallInOne.finishCapture(key, request, ok, errorMessage)
             method = request.spec.method,
             captured_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
         }
+        if request.cache_pair == true then
+            wallInOne.recordPairRegistry(
+                tostring(request.dynamic_id or ""),
+                finalPath,
+                tostring(type(request.spec) == "table" and request.spec.method or "prepared-still"),
+                request.managed_auto == true,
+                request.sidecar_path,
+                runtime.last_capture.captured_at
+            )
+        end
+        if request.managed_auto == true then
+            -- The library scan hydrates paired_preview for its owning dynamic
+            -- item. Coalesce that enumeration onto update(); never enumerate
+            -- directories from this async completion callback.
+            libraryRefreshPending = true
+        end
         if pairIsCurrent or not request.pair then
             lastActionError = ""
             lastActionAt = runtime.last_capture.captured_at
@@ -4165,7 +4224,7 @@ function wallInOne.finishCapture(key, request, ok, errorMessage)
 end
 
 wallInOne.runCapture = function(request)
-    local key = request.output or "all"
+    local key = tostring(request.capture_key or request.output or "all")
     if captureInFlight[key] ~= nil then
         local replaced = captureQueued[key]
         if
@@ -4181,6 +4240,15 @@ wallInOne.runCapture = function(request)
         end
         captureQueued[key] = request
         return
+    end
+    if request.cache_pair == true then
+        local cachedPath = wallInOne.cachedPair(tostring(request.dynamic_id or ""))
+        if cachedPath ~= nil then
+            if type(request.on_complete) == "function" then
+                pcall(request.on_complete, true, cachedPath)
+            end
+            return
+        end
     end
     -- Re-run the atomic helper for a destination that already exists. Pair
     -- registry fingerprints provide the normal cache fast path; a cache miss
@@ -4248,6 +4316,8 @@ function wallInOne.captureWorkshopFallback(options)
     local paletteAllowed = options.palette_allowed
     local playlistId = options.playlist_id
     local entryId = options.entry_id
+    local cachePair = options.cache_pair == true
+    local captureKey = options.capture_key
     output = wallInOne.targetOutput(output)
     id = tostring(id or "")
     if output == nil or not wallInOne.validWorkshopId(id) then
@@ -4295,6 +4365,8 @@ function wallInOne.captureWorkshopFallback(options)
         palette_allowed = paletteAllowed,
         playlist_id = playlistId,
         entry_id = entryId,
+        cache_pair = cachePair,
+        capture_key = captureKey,
     })
     return true
 end
@@ -4398,6 +4470,8 @@ function wallInOne.captureVideoPath(options)
     local paletteAllowed = options.palette_allowed
     local playlistId = options.playlist_id
     local entryId = options.entry_id
+    local cachePair = options.cache_pair == true
+    local captureKey = options.capture_key
     output = wallInOne.targetOutput(output)
     if output == nil then
         wallInOne.setActionError(noctalia.tr("availability.output"), "video-capture")
@@ -4451,6 +4525,8 @@ function wallInOne.captureVideoPath(options)
         palette_allowed = paletteAllowed,
         playlist_id = playlistId,
         entry_id = entryId,
+        cache_pair = cachePair,
+        capture_key = captureKey,
     })
 end
 
@@ -6693,7 +6769,7 @@ function wallInOne.deleteManagedLibraryItem(itemId)
     local removed, removeError = wallInOne.removeManagedPayload(path, sidecarPath)
     if not removed then
         wallInOne.setActionError(removeError, "managed-delete")
-        wallInOne.refreshLibrary()
+        libraryRefreshPending = true
         wallInOne.publishStatus()
         return false
     end
@@ -6707,7 +6783,7 @@ function wallInOne.deleteManagedLibraryItem(itemId)
         end
     end
     lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    wallInOne.refreshLibrary()
+    libraryRefreshPending = true
     wallInOne.publishStatus()
     return cleanupOk
 end
@@ -7984,6 +8060,39 @@ function wallInOne.nextMotionBgsNonce()
     return motionBgsCommandSequence
 end
 
+function wallInOne.motionBgsInstalledPath(slug, quality)
+    slug = tostring(slug or "")
+    quality = tostring(quality or ""):lower()
+    local recent = type(motionBgsStatus) == "table" and motionBgsStatus.last_download or nil
+    if type(recent) == "table"
+        and tostring(recent.slug or ""):lower() == slug:lower()
+        and tostring(recent.quality or ""):lower() == quality
+    then
+        local recentPath = tostring(recent.path or "")
+        local recentSidecar = tostring(recent.sidecar or "")
+        if recentPath ~= ""
+            and recentSidecar == recentPath .. ".motionbgs.json"
+            and noctalia.fileExists(recentPath)
+            and noctalia.fileExists(recentSidecar)
+        then
+            return recentPath
+        end
+    end
+    for _, entry in ipairs(type(library.videos) == "table" and library.videos or {}) do
+        if
+            type(entry) == "table"
+            and entry.managed == true
+            and tostring(entry.provider or "") == "MotionBGS"
+            and tostring(entry.provider_id or "") == slug
+            and tostring(entry.quality or ""):lower() == quality
+            and noctalia.fileExists(tostring(entry.path or ""))
+        then
+            return tostring(entry.path)
+        end
+    end
+    return nil
+end
+
 function wallInOne.sendMotionBgsCommand(request, action)
     if not configValid or not runtimeValid then
         wallInOne.setActionError(noctalia.tr("errors.storage_disabled"), "storage")
@@ -8016,6 +8125,12 @@ function wallInOne.sendMotionBgsCommand(request, action)
         command.quality = if tostring(request.quality or wallInOne.settingString("motionbgs_quality", "hd")) == "4k"
             then "4k"
             else "hd"
+        if wallInOne.motionBgsInstalledPath(command.slug, command.quality) ~= nil then
+            lastActionError = ""
+            lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+            wallInOne.publishStatus()
+            return true
+        end
         command.force = request.force == true
     elseif action ~= "clear" and action ~= "probe" then
         wallInOne.setActionError(noctalia.tr("errors.motionbgs_action"), "motionbgs")
@@ -8085,6 +8200,98 @@ function wallInOne.requestPalettePreview(request)
     return true
 end
 
+function wallInOne.queuePairingPreview(request)
+    local key = tostring(request.key or "")
+    local kind = tostring(request.media_kind or "")
+    local source = tostring(request.media_source or "")
+    local scheme = tostring(request.scheme or "")
+    local captureOnly = request.capture_only == true
+    local sourceValid = if kind == "video"
+        then wallInOne.validAbsolutePath(source)
+        elseif kind == "workshop" then wallInOne.validWorkshopId(source)
+        else false
+    if
+        not wallInOne.validPersistedKey(key)
+        or not sourceValid
+        or (not captureOnly and not VALID_COLOR_SCHEMES[scheme])
+    then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "pairing-preview")
+        return false
+    end
+    -- The editor is latest-intent UI. Coalescing here keeps rapid A -> B
+    -- navigation from starting work in this strict state-watch callback.
+    pairingPreviewPending = {
+        key = key,
+        media_kind = kind,
+        media_source = source,
+        scheme = scheme,
+        capture_only = captureOnly,
+        output = tostring(request.output or ""),
+    }
+    return true
+end
+
+function wallInOne.startPendingPairingPreview()
+    local request = pairingPreviewPending
+    pairingPreviewPending = nil
+    if type(request) ~= "table" then
+        return false
+    end
+    local kind = tostring(request.media_kind or "")
+    local source = tostring(request.media_source or "")
+    local dynamicId = if kind == "video" then "video:" .. source else source
+    local cachedPath = wallInOne.cachedPair(dynamicId)
+    if cachedPath ~= nil then
+        if request.capture_only ~= true then
+            wallInOne.requestPalettePreview({
+                key = request.key,
+                path = cachedPath,
+                scheme = request.scheme,
+            })
+        end
+        return true
+    end
+
+    local output = wallInOne.targetOutput(request.output)
+    if
+        output == nil
+        or not wallInOne.settingBool("auto_capture", true)
+        or wallInOne.captureDirectory() == ""
+    then
+        if request.capture_only ~= true then
+            wallInOne.requestPalettePreview({ key = request.key, path = "", scheme = request.scheme })
+        end
+        return true
+    end
+
+    local function completed(ok, path, _errorMessage)
+        if request.capture_only ~= true then
+            wallInOne.requestPalettePreview({
+                key = request.key,
+                path = if ok == true then tostring(path or "") else "",
+                scheme = request.scheme,
+            })
+        end
+    end
+    local options = {
+        output = output,
+        pair = false,
+        notify = false,
+        managed_auto = true,
+        cache_pair = true,
+        capture_key = "pairing-preview",
+        on_complete = completed,
+    }
+    if kind == "video" then
+        options.source = source
+        wallInOne.captureVideoPath(options)
+    else
+        options.id = source
+        wallInOne.captureWorkshopFallback(options)
+    end
+    return true
+end
+
 function wallInOne.nextWallhavenNonce()
     local previous = noctalia.state.get(WALLHAVEN_COMMAND_KEY)
     local previousNonce = if type(previous) == "table" then tonumber(previous.nonce) or 0 else 0
@@ -8102,6 +8309,22 @@ function wallInOne.currentWallhavenItem(id)
     for _, item in ipairs(type(wallhavenResults.items) == "table" and wallhavenResults.items or {}) do
         if type(item) == "table" and tostring(item.id or "") == id then
             return item
+        end
+    end
+    return nil
+end
+
+function wallInOne.wallhavenInstalledPath(id)
+    id = tostring(id or ""):lower()
+    for _, entry in ipairs(type(library.stills) == "table" and library.stills or {}) do
+        if
+            type(entry) == "table"
+            and entry.managed == true
+            and tostring(entry.provider or "") == "Wallhaven"
+            and tostring(entry.provider_id or ""):lower() == id
+            and noctalia.fileExists(tostring(entry.path or ""))
+        then
+            return tostring(entry.path)
         end
     end
     return nil
@@ -8140,6 +8363,12 @@ function wallInOne.sendWallhavenCommand(request, action)
         if type(item) ~= "table" then
             wallInOne.setActionError(noctalia.tr("errors.wallhaven_result"), "wallhaven")
             return false
+        end
+        if wallInOne.wallhavenInstalledPath(item.id) ~= nil then
+            lastActionError = ""
+            lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+            wallInOne.publishStatus()
+            return true
         end
         local imageRoot = wallInOne.captureDirectory()
         if not wallInOne.existingDirectory(imageRoot) then
@@ -8382,6 +8611,8 @@ function wallInOne.handleCommand(request)
         wallInOne.savePairing(request.pairing)
     elseif kind == "pairing_reset" then
         wallInOne.resetPairing(request.pairing)
+    elseif kind == "pairing_prepare_still" then
+        wallInOne.queuePairingPreview(request)
     elseif kind == "playlist_add_pairing" then
         wallInOne.addPairingToPlaylist(
             request.output,
@@ -8468,7 +8699,7 @@ function wallInOne.handleCommand(request)
     elseif kind == "motionbgs_helper_open" then
         wallInOne.openMotionBgsHelper()
     elseif kind == "library_refresh" then
-        wallInOne.refreshLibrary()
+        libraryRefreshPending = true
         wallInOne.publishStatus()
     elseif kind == "library_delete" then
         wallInOne.deleteManagedLibraryItem(request.item_id)
@@ -8486,6 +8717,11 @@ end
 function update()
     noctalia.setUpdateInterval(UPDATE_INTERVAL_MS)
     wallInOne.drainPostApplyQueue()
+    if pairingPreviewPending ~= nil then
+        wallInOne.startPendingPairingPreview()
+        wallInOne.publishStatus()
+        return
+    end
     if libraryRefreshPending then
         -- Directory enumeration is deliberately isolated from
         -- onConfigChanged(), whose VM has a strict callback CPU budget.
@@ -9124,7 +9360,7 @@ noctalia.state.watch(MOTIONBGS_STATUS_KEY, function(nextStatus)
     local downloadFingerprint, downloadPath = wallInOne.completedDownloadFingerprint(motionBgsStatus)
     if downloadPath ~= "" and downloadFingerprint ~= lastMotionDownloadFingerprint then
         lastMotionDownloadFingerprint = downloadFingerprint
-        wallInOne.refreshLibrary()
+        libraryRefreshPending = true
     end
     wallInOne.refreshBackendPolicy()
     wallInOne.persistRuntimeIfChanged(false)
@@ -9151,7 +9387,7 @@ noctalia.state.watch(WALLHAVEN_STATUS_KEY, function(nextStatus)
     local downloadFingerprint, downloadPath = wallInOne.completedDownloadFingerprint(wallhavenStatus)
     if downloadPath ~= "" and downloadFingerprint ~= lastWallhavenDownloadFingerprint then
         lastWallhavenDownloadFingerprint = downloadFingerprint
-        wallInOne.refreshLibrary()
+        libraryRefreshPending = true
         wallInOne.publishStatus()
     end
 end)

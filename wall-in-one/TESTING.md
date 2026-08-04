@@ -1,6 +1,6 @@
 # Wall-in-One test record
 
-Wall-in-One `0.7.0` is tested as one owned wallpaper stack: routed UI, provider
+Wall-in-One `0.7.1` is tested as one owned wallpaper stack: routed UI, provider
 services, persisted item-profile/playback state, and exact renderer children.
 Tests must not require another wallpaper plugin, private state, or cross-plugin
 IPC.
@@ -29,9 +29,9 @@ disposable fixtures and rejects callback CPU-budget errors.
 
 ## Routed panel contract
 
-Assert the `hub` panel is full-size floating (`fill` × `fill`, centered, not
-opened near the click). No test should expect a standalone window: API 17 has no
-window entry or page-stack primitive.
+Assert the `hub` panel is a 1160 × 780 floating surface (centered, not opened
+near the click). No test should expect a standalone window: API 17 has no window
+entry or page-stack primitive.
 
 Open the panel and traverse exactly these local routes:
 
@@ -61,10 +61,19 @@ that the synthesized automatic-still bundle opens the editor. The callback must
 not resolve a presentation namespace as a global; retain the generic
 use-before-local-namespace contract check.
 
-Navigate repeatedly into Wallhaven with a maximum-size result fixture and a
-full preview backlog. Route selection, large-list preparation, preview
-scheduling, and rendering must stay bounded, and the journal must contain no
-panel callback CPU-budget overrun or timeout-disable sequence.
+For a dynamic customization, require the selected-still control to page only
+indexed user-owned and Wallhaven images, retain an explicit manual-path escape
+hatch, and request automatic representative preparation through the
+coordinator. The dedicated capture may populate the cache registry and library,
+but must not mutate the applied per-output pair, wallpaper, palette, or
+renderer.
+
+Navigate into MotionBGS with a 36-result fixture and a full preview backlog.
+Render the production route as three fixed 12-card local pages, drive sustained
+frame callbacks, and prove that each frame advances at most one preview or drag
+step. Full `panel.render` tree construction belongs only to `update()`. The
+journal must contain no panel callback CPU-budget overrun or timeout-disable
+sequence.
 
 ## Explicit roots and storage gating
 
@@ -155,6 +164,11 @@ A successful download must atomically leave both the managed JPG/PNG and exact
 `.wallhaven.json` sidecar. Content-type/signature/size mismatch, overwrite,
 interruption, or sidecar promotion failure leaves no managed file.
 
+The result card itself must expose available/downloading/already-on-disk state
+using `active_id` plus the indexed managed library. An already-installed ID is
+not submitted again; no selected-item hero or scroll-to-top download step is
+required.
+
 ## MotionBGS provider
 
 Pin the existing schema-1 command/ack/status/result keys and
@@ -164,6 +178,12 @@ parser, or download transport may return to `motionbgs.luau`. Exercise several
 large cold external parses and reject every Noctalia callback CPU-budget error;
 the work must occur in the one-shot process rather than being spread across
 service ticks.
+
+Require `active_slug`, `active_quality`, and a queue-bounded
+`queued_downloads` projection. Result cards expose HD and 4K actions inline,
+show queued/active/on-disk state, reject an exact active or pending duplicate,
+and keep a persistent queue summary visible while work remains. Do not assert a
+byte percentage because the one-shot helper protocol does not stream one.
 
 Test binary discovery in both supported forms: the exact
 `wall-in-one-motionbgs` name on `PATH`, and a readable absolute

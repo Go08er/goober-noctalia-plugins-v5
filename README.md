@@ -16,7 +16,7 @@ catalogs; add it as a custom Git source using one of the methods below.
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
 | `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
-| `goober/wall-in-one` | `0.7.0` | v5.0.0/API 17 mixed wallpaper staging |
+| `goober/wall-in-one` | `0.7.1` | v5.0.0/API 17 mixed wallpaper staging |
 
 ## Repository layout
 
@@ -217,7 +217,7 @@ boundary.
 
 ### Wall-in-One coordination and pairing
 
-Wall-in-One `0.7.0` coordinates Noctalia stills and palettes, local video,
+Wall-in-One `0.7.1` coordinates Noctalia stills and palettes, local video,
 Wallpaper Engine projects, pageable Wallhaven search, and optional MotionBGS
 text/latest/genre/4K browsing in one hub. MotionBGS browsing uses the separately
 installed `wall-in-one-motionbgs` Python 3.11+ program; the plugin detects that

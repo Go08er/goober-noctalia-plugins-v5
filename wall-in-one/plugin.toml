@@ -1,6 +1,6 @@
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "0.7.0"
+version = "0.7.1"
 plugin_api = 17
 author = "goober"
 license = "MIT"
@@ -224,6 +224,47 @@ label_key = "settings.cycle_start_on_load.label"
 description_key = "settings.cycle_start_on_load.description"
 default = false
 
+# Noctalia currently exposes plugin settings to Luau as read-only data and has
+# no API for removing retired overrides from a user's configuration. These
+# invisible string declarations keep pre-0.7 configurations valid without
+# restoring the removed global backend controls to the settings UI. Per-display
+# engine settings in Wall-in-One's hub remain authoritative.
+[[setting]]
+key = "w_engine_backend"
+type = "string"
+label_key = "settings.retired_compatibility.label"
+description_key = "settings.retired_compatibility.description"
+default = ""
+advanced = true
+visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
+
+[[setting]]
+key = "mpvpaper_backend"
+type = "string"
+label_key = "settings.retired_compatibility.label"
+description_key = "settings.retired_compatibility.description"
+default = ""
+advanced = true
+visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
+
+[[setting]]
+key = "internal_renderer_layer"
+type = "string"
+label_key = "settings.retired_compatibility.label"
+description_key = "settings.retired_compatibility.description"
+default = ""
+advanced = true
+visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
+
+[[setting]]
+key = "mpv_auto_pause_mode"
+type = "string"
+label_key = "settings.retired_compatibility.label"
+description_key = "settings.retired_compatibility.description"
+default = ""
+advanced = true
+visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
+
 [[service]]
 id = "coordinator"
 entry = "service.luau"
@@ -283,8 +324,8 @@ entry = "widget.luau"
 [[panel]]
 id = "hub"
 entry = "panel.luau"
-width = "fill"
-height = "fill"
+width = 1160
+height = 780
 placement = "floating"
 position = "center"
 open_near_click = false

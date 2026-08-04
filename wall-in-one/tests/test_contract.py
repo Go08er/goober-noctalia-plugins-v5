@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import errno
 import json
+import math
 import os
 import re
 import select
@@ -52,7 +53,7 @@ def test_manifest_and_translations() -> None:
     manifest = tomllib.loads(manifest_source)
     assert manifest["id"] == "goober/wall-in-one"
     assert manifest["name"] == "Wall-in-One"
-    assert manifest["version"] == "0.7.0"
+    assert manifest["version"] == "0.7.1"
     assert manifest["plugin_api"] == 17
     # Dependencies are catalog metadata, not an enable-time gate. Providers
     # still fail soft if an installation is incomplete, while curl is honestly
@@ -98,15 +99,20 @@ def test_manifest_and_translations() -> None:
         "motionbgs_cache_minutes",
         "motionbgs_max_download_mb",
     }
-    assert required == settings.keys(), sorted(required ^ settings.keys())
+    retired_compatibility_settings = {
+        "w_engine_backend",
+        "mpvpaper_backend",
+        "internal_renderer_layer",
+        "mpv_auto_pause_mode",
+    }
+    assert required | retired_compatibility_settings == settings.keys(), sorted(
+        (required | retired_compatibility_settings) ^ settings.keys()
+    )
     assert "pair_static" not in settings, "pairing is an entry policy, not a global switch"
     retired_renderer_settings = {
         "use_w_engine",
         "use_mpvpaper",
         "use_extra_provider",
-        "w_engine_backend",
-        "mpvpaper_backend",
-        "internal_renderer_layer",
         "extra_provider_panel",
         "w_engine_scaling",
         "w_engine_clamp",
@@ -123,10 +129,28 @@ def test_manifest_and_translations() -> None:
         "mpv_mute",
         "mpv_hardware_decode",
         "mpv_auto_pause",
-        "mpv_auto_pause_mode",
         "mpv_options",
     }
     assert retired_renderer_settings.isdisjoint(settings)
+    for key in retired_compatibility_settings:
+        assert settings[key] == {
+            "key": key,
+            "type": "string",
+            "label_key": "settings.retired_compatibility.label",
+            "description_key": "settings.retired_compatibility.description",
+            "default": "",
+            "advanced": True,
+            "visible_when": {
+                "key": "capture_directory",
+                "values": ["__wall_in_one_retired_setting__"],
+            },
+        }, f"retired setting {key!r} must remain an inert, impossible-to-show migration shim"
+    for source_name in ("panel.luau", "service.luau"):
+        source = text(source_name)
+        for key in retired_compatibility_settings:
+            assert key not in source, (
+                f"{source_name} must not read or fall back to retired compatibility key {key!r}"
+            )
     for setting in settings.values():
         condition = setting.get("visible_when")
         if condition is not None:
@@ -1323,10 +1347,16 @@ def test_coordinator_contract() -> None:
             'provider = "local"',
             'candidate.ownership == "managed-motionbgs"',
             'entry.provider = "MotionBGS"',
+            'scan.provider_installs.motionbgs[entry.provider_id .. ":" .. entry.quality] = path',
+            'scan.provider_installs.wallhaven[entry.provider_id:lower()] = path',
             'local pairedPreview = wallInOne.cachedPair("video:" .. path)',
             'entry.paired_preview = tostring(pairedPreview or "")',
+            "scan.representative_stills.video[path] = entry.paired_preview",
             'local pairedPreview = wallInOne.cachedPair(tostring(candidate.id or ""))',
-            'paired_preview = tostring(pairedPreview or "")',
+            "scan.representative_stills.workshop[tostring(candidate.id or \"\")] = pairedPreviewPath",
+            "paired_preview = pairedPreviewPath",
+            "provider_installs = scan.provider_installs",
+            "representative_stills = scan.representative_stills",
         ),
         "sidecar-proven shared-root ownership and validated dynamic-pair previews",
     )
@@ -1353,7 +1383,10 @@ def test_coordinator_contract() -> None:
         )
     ]
     assert download_watches.count("wallInOne.completedDownloadFingerprint(") == 2
-    assert download_watches.count("wallInOne.refreshLibrary()") == 2
+    assert download_watches.count("libraryRefreshPending = true") == 2
+    assert "wallInOne.refreshLibrary()" not in download_watches, (
+        "provider status callbacks must coalesce directory enumeration onto update()"
+    )
     require_all(
         service,
         (
@@ -2073,7 +2106,7 @@ def test_dynamic_pair_fingerprint_contract() -> None:
 
     fingerprint = service[
         service.index("function wallInOne.dynamicSourceFingerprint") : service.index(
-            "function wallInOne.recordAppliedPair"
+            "function wallInOne.recordPairRegistry"
         )
     ]
     require_all(
@@ -2090,21 +2123,40 @@ def test_dynamic_pair_fingerprint_contract() -> None:
         "video and Workshop source fingerprinting",
     )
 
-    record = service[
+    registry_record = service[
+        service.index("function wallInOne.recordPairRegistry") : service.index(
+            "function wallInOne.recordAppliedPair"
+        )
+    ]
+    require_all(
+        registry_record,
+        (
+            "local sourceSize, sourceMtime = wallInOne.dynamicSourceFingerprint(dynamicId)",
+            "source_size = tonumber(sourceSize) or 0",
+            "source_mtime = tonumber(sourceMtime) or 0",
+            "runtime.pair_registry[tostring(dynamicId)] = record",
+            "return record",
+        ),
+        "cache-only dynamic-pair fingerprint persistence",
+    )
+    assert "runtime.pairs[" not in registry_record, (
+        "recording a prepared representative must not claim an applied output pair"
+    )
+
+    applied_record = service[
         service.index("function wallInOne.recordAppliedPair") : service.index(
             "function wallInOne.applyThemePolicy"
         )
     ]
     require_all(
-        record,
+        applied_record,
         (
-            "local sourceSize, sourceMtime = wallInOne.dynamicSourceFingerprint(dynamicId)",
-            "source_size = tonumber(sourceSize) or 0",
-            "source_mtime = tonumber(sourceMtime) or 0",
-            "source_size = runtime.pairs[key].source_size",
-            "source_mtime = runtime.pairs[key].source_mtime",
+            "local registry = wallInOne.recordPairRegistry(",
+            "runtime.pairs[key] = {",
+            "source_size = registry.source_size",
+            "source_mtime = registry.source_mtime",
         ),
-        "pair fingerprint persistence",
+        "applied-pair projection from the shared registry record",
     )
 
     cached = service[
@@ -2126,6 +2178,294 @@ def test_dynamic_pair_fingerprint_contract() -> None:
     assert cached.index("local sourceMatches") < cached.index("and sourceMatches") < cached.index(
         'return path, tostring(pair.capture_method or "cached-pair")'
     )
+
+
+def test_automatic_pairing_preview_contract() -> None:
+    """Prepare adaptive representatives off the panel callback without applying them."""
+
+    panel = text("panel.luau")
+    service = text("service.luau")
+
+    descriptor = panel[
+        panel.index("local function automaticRepresentativePath") : panel.index(
+            "local function requestPairingAdaptivePreview"
+        )
+    ]
+    require_all(
+        descriptor,
+        (
+            'local published = type(root.representative_stills) == "table" and root.representative_stills or nil',
+            "if published == nil then",
+            'return ""',
+            'local values = if kind == "video" then published.video elseif kind == "workshop" then published.workshop else nil',
+            'type(values) == "table" and values[source]',
+            # previewAbsolutePath is scoped to the preview do-block; reaching it
+            # from here requires the exported facade, not the bare local.
+            "preview.absolutePath(path) and noctalia.fileInfo(path)",
+            'tostring(still.mode or "") == "automatic"',
+            'mediaKind ~= "video" and mediaKind ~= "workshop"',
+            '"automatic"',
+            "media_kind = mediaKind",
+            "media_source = mediaSource",
+            "path = automaticRepresentativePath(mediaKind, mediaSource)",
+        ),
+        "source-addressed automatic representative descriptor",
+    )
+    assert 'savedId ~= ""' not in descriptor, (
+        "a fresh library item has no saved pairing id and must still prepare a representative"
+    )
+
+    request_preview = panel[
+        panel.index("local function requestPairingAdaptivePreview") : panel.index(
+            "local function retryPairingAdaptivePreview"
+        )
+    ]
+    require_all(
+        request_preview,
+        (
+            'adaptivePreviewStates[descriptor.signature] = { state = "loading", error = "" }',
+            'kind = "palette_preview"',
+            'request.kind = "pairing_prepare_still"',
+            "request.media_kind = descriptor.media_kind",
+            "request.media_source = descriptor.media_source",
+            "request.output = if selectedScreen ~= \"\" then selectedScreen else focusedOutput()",
+            "send(request)",
+            "local function requestAutomaticStillPreparation(kind, source)",
+            'capture_only = true',
+        ),
+        "panel-to-service automatic preview request",
+    )
+    assert request_preview.index('if descriptor.path ~= "" then') < request_preview.index(
+        "request.kind = \"pairing_prepare_still\""
+    ), "an already prepared representative must use the direct palette-preview path"
+    for forbidden in (
+        "noctalia.runAsync(",
+        "captureVideoPath(",
+        "captureWorkshopFallback(",
+        "applyPairedStill(",
+    ):
+        assert forbidden not in request_preview, (
+            f"the panel callback must not perform automatic-still work via {forbidden!r}"
+        )
+
+    begin_editor = panel[
+        panel.index("local function beginPairingEditor") : panel.index(
+            "local function closePairingEditor"
+        )
+    ]
+    require_all(
+        begin_editor,
+        (
+            "loadBundleDraft(pairing, kind)",
+            "requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)",
+            "requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))",
+            "render()",
+        ),
+        "eager pairing-editor representative request",
+    )
+    assert begin_editor.index("requestPairingAdaptivePreview(") < begin_editor.index("render()")
+
+    pairing_editor = panel[
+        panel.index("local function pairingEditor") : panel.index(
+            "function panelUi.playlistPairingLibrary"
+        )
+    ]
+    automatic_change = pairing_editor[
+        pairing_editor.index('key = "pairing-still-mode-"') : pairing_editor.index(
+            '\n        if entryStillModeDraft == "selected" then',
+            pairing_editor.index('key = "pairing-still-mode-"'),
+        )
+    ]
+    require_all(
+        automatic_change,
+        (
+            'entryStillModeDraft = if math.floor(tonumber(index) or 0) == 1 then "selected" else "automatic"',
+            "local requestedPalette = requestPairingAdaptivePreview(",
+            "bundleFromDraft(editingPairingId)",
+            "requestAutomaticStillPreparation(kind, source)",
+            "render()",
+        ),
+        "automatic-mode preview restart",
+    )
+
+    queue_preview = service[
+        service.index("function wallInOne.queuePairingPreview") : service.index(
+            "function wallInOne.startPendingPairingPreview"
+        )
+    ]
+    require_all(
+        queue_preview,
+        (
+            'kind == "video"',
+            'kind == "workshop"',
+            "wallInOne.validAbsolutePath(source)",
+            "wallInOne.validWorkshopId(source)",
+            "VALID_COLOR_SCHEMES[scheme]",
+            "local captureOnly = request.capture_only == true",
+            "not captureOnly and not VALID_COLOR_SCHEMES[scheme]",
+            "capture_only = captureOnly",
+            "pairingPreviewPending = {",
+        ),
+        "constant-slot validated pairing-preview queue",
+    )
+    for forbidden in (
+        "captureVideoPath(",
+        "captureWorkshopFallback(",
+        "noctalia.runAsync(",
+        "wallInOne.refreshLibrary(",
+    ):
+        assert forbidden not in queue_preview, (
+            f"the state-watch command callback must not start heavy work via {forbidden!r}"
+        )
+
+    start_preview = service[
+        service.index("function wallInOne.startPendingPairingPreview") : service.index(
+            "function wallInOne.nextWallhavenNonce"
+        )
+    ]
+    require_all(
+        start_preview,
+        (
+            "local request = pairingPreviewPending",
+            "pairingPreviewPending = nil",
+            'local dynamicId = if kind == "video" then "video:" .. source else source',
+            "local cachedPath = wallInOne.cachedPair(dynamicId)",
+            "if cachedPath ~= nil then",
+            "wallInOne.requestPalettePreview({",
+            "if request.capture_only ~= true then",
+            'or not wallInOne.settingBool("auto_capture", true)',
+            "or wallInOne.captureDirectory() == \"\"",
+            "local function completed(ok, path, _errorMessage)",
+            "pair = false",
+            "notify = false",
+            "managed_auto = true",
+            "cache_pair = true",
+            'capture_key = "pairing-preview"',
+            "wallInOne.captureVideoPath(options)",
+            "wallInOne.captureWorkshopFallback(options)",
+        ),
+        "bounded cache-first automatic representative capture",
+    )
+    assert start_preview.index("wallInOne.cachedPair(dynamicId)") < start_preview.index(
+        "wallInOne.captureVideoPath(options)"
+    )
+    for forbidden in (
+        "runtime.pairs",
+        "wallInOne.applyPairedStill(",
+        "wallInOne.startInternalVideo(",
+        "wallInOne.startInternalWorkshop(",
+        "wallInOne.applyWallpaper",
+        "noctalia.runAsync(",
+    ):
+        assert forbidden not in start_preview, (
+            f"preparing a representative must not mutate playback/wallpaper via {forbidden!r}"
+        )
+
+    command_handler = service[
+        service.index("function wallInOne.handleCommand") : service.index(
+            "-- Noctalia lifecycle"
+        )
+    ]
+    require_all(
+        command_handler,
+        (
+            'elseif kind == "pairing_prepare_still" then',
+            "wallInOne.queuePairingPreview(request)",
+        ),
+        "pairing-preview command dispatch",
+    )
+    pairing_branch = command_handler[
+        command_handler.index('elseif kind == "pairing_prepare_still" then') : command_handler.index(
+            'elseif kind == "playlist_add_pairing" then'
+        )
+    ]
+    assert "startPendingPairingPreview" not in pairing_branch
+    assert "capture" not in pairing_branch.lower(), (
+        "the state watcher may queue intent but must not begin capture"
+    )
+
+    update = service[service.index("function update()") : service.index("function onConfigChanged()")]
+    require_all(
+        update,
+        (
+            "if pairingPreviewPending ~= nil then",
+            "wallInOne.startPendingPairingPreview()",
+            "wallInOne.publishStatus()",
+            "return",
+        ),
+        "one-preview-per-update dispatch",
+    )
+    assert update.index("if pairingPreviewPending ~= nil then") < update.index(
+        "if libraryRefreshPending then"
+    )
+
+    finish_capture = service[
+        service.index("function wallInOne.finishCapture") : service.index(
+            "wallInOne.runCapture = function"
+        )
+    ]
+    cache_record = finish_capture[
+        finish_capture.index("if request.cache_pair == true then") : finish_capture.index(
+            "if request.managed_auto == true then"
+        )
+    ]
+    require_all(
+        cache_record,
+        (
+            "wallInOne.recordPairRegistry(",
+            'tostring(request.dynamic_id or "")',
+            "request.managed_auto == true",
+            "runtime.last_capture.captured_at",
+        ),
+        "cache-only capture completion",
+    )
+    assert "runtime.pairs" not in cache_record
+    managed_refresh = finish_capture[
+        finish_capture.index("if request.managed_auto == true then") : finish_capture.index(
+            "if pairIsCurrent or not request.pair then"
+        )
+    ]
+    assert "libraryRefreshPending = true" in managed_refresh
+    assert "wallInOne.refreshLibrary()" not in managed_refresh
+
+    run_capture = service[
+        service.index("wallInOne.runCapture = function") : service.index(
+            "function wallInOne.captureWorkshopFallback"
+        )
+    ]
+    require_all(
+        run_capture,
+        (
+            'local key = tostring(request.capture_key or request.output or "all")',
+            "if captureInFlight[key] ~= nil then",
+            "captureQueued[key] = request",
+            "if request.cache_pair == true then",
+            'wallInOne.cachedPair(tostring(request.dynamic_id or ""))',
+            "pcall(request.on_complete, true, cachedPath)",
+            "noctalia.runAsync(command",
+            "end, 60000)",
+        ),
+        "single-flight bounded capture transport",
+    )
+    assert run_capture.index("if captureInFlight[key] ~= nil then") < run_capture.index(
+        "noctalia.runAsync(command"
+    )
+
+    for function_name, next_name in (
+        ("function wallInOne.captureWorkshopFallback", "function wallInOne.captureCurrent"),
+        ("function wallInOne.captureVideoPath", "function wallInOne.captureConfiguredVideo"),
+    ):
+        capture_path = service[service.index(function_name) : service.index(next_name)]
+        require_all(
+            capture_path,
+            (
+                "local cachePair = options.cache_pair == true",
+                "local captureKey = options.capture_key",
+                "cache_pair = cachePair",
+                "capture_key = captureKey",
+            ),
+            f"{function_name} cache transport",
+        )
 
 
 def test_capture_scene_freshness_contract() -> None:
@@ -2421,7 +2761,7 @@ def test_managed_library_ownership_contract() -> None:
     )
 
     wallhaven_send = service[
-        service.index("function wallInOne.sendWallhavenCommand") : service.index(
+        service.index("function wallInOne.wallhavenInstalledPath") : service.index(
             "function wallInOne.actionPanelTarget"
         )
     ]
@@ -2429,6 +2769,7 @@ def test_managed_library_ownership_contract() -> None:
         wallhaven_send,
         (
             "local item = wallInOne.currentWallhavenItem(request.id)",
+            "if wallInOne.wallhavenInstalledPath(item.id) ~= nil then",
             "wallInOne.wallhavenManagedDirectory()",
             "wallInOne.ensureManagedDirectory(directory, \"wallhaven\")",
             'local target = directory .. "/wallhaven-"',
@@ -2440,6 +2781,25 @@ def test_managed_library_ownership_contract() -> None:
     )
     assert "request.target_path" not in wallhaven_send
     assert "request.staging_path" not in wallhaven_send
+
+    motionbgs_send = service[
+        service.index("function wallInOne.motionBgsInstalledPath") : service.index(
+            "function wallInOne.nextPalettesNonce"
+        )
+    ]
+    require_all(
+        motionbgs_send,
+        (
+            'local recent = type(motionBgsStatus) == "table" and motionBgsStatus.last_download or nil',
+            'tostring(recent.slug or ""):lower() == slug:lower()',
+            'recentSidecar == recentPath .. ".motionbgs.json"',
+            'tostring(entry.provider or "") == "MotionBGS"',
+            'tostring(entry.provider_id or "") == slug',
+            'tostring(entry.quality or ""):lower() == quality',
+            "if wallInOne.motionBgsInstalledPath(command.slug, command.quality) ~= nil then",
+        ),
+        "coordinator managed-library MotionBGS duplicate guard",
+    )
 
     wallhaven_download = wallhaven[
         wallhaven.index("local function validatedDownload") : wallhaven.index(
@@ -2621,6 +2981,7 @@ def test_wallhaven_contract() -> None:
             "local SCHEMA = 1",
             'local COMMAND_KEY = "wall_in_one_wallhaven_command_v1"',
             'local STATUS_KEY = "wall_in_one_wallhaven_status_v1"',
+            'active_id = ""',
             'local RESULTS_KEY = "wall_in_one_wallhaven_results_v1"',
             'local API_ORIGIN = "https://wallhaven.cc"',
             'local API_PREFIX = "/api/v1"',
@@ -2651,6 +3012,7 @@ def test_wallhaven_contract() -> None:
             "local sidecarValue = {",
             'provider = "Wallhaven"',
             "status.last_download = {",
+            'status.active_id = if type(activeOperation) == "table" and activeOperation.action == "download"',
             "nonce == nil or nonce <= status.last_nonce",
             'action == "search"',
             'action == "detail"',
@@ -2759,6 +3121,7 @@ def test_wallhaven_contract() -> None:
         status_publication,
         (
             "last_download = status.last_download",
+            "active_id = status.active_id",
             "if force ~= true and fingerprint == lastStatusFingerprint then",
             "status.sequence = statusSequence",
             "noctalia.state.set(STATUS_KEY, status)",
@@ -3334,8 +3697,8 @@ def test_provider_preview_panel_contract() -> None:
             "local function previewRetryDue()",
             "local function recordPreviewFailure(url)",
             "local function resetPreviewQueue(scope)",
-            "local function setPreviewScope(scope)",
             "local function validPreviewUrl(provider, value)",
+            "local function validatedPreviewRequest(provider, identifier, url)",
             "local function savePreviewManifest()",
             "local function prunePreviewCache()",
             "local function initializePreviewCache()",
@@ -3346,16 +3709,22 @@ def test_provider_preview_panel_contract() -> None:
             "local function startOnePreviewTask()",
             "local function ensureProviderPreview(provider, identifier, url)",
             "local function providerPreviewNode(provider, item, width, height, glyph)",
+            "local function previewSelectedFields(provider, selected)",
+            "local function restartPreviewSweep()",
+            "local function planProviderPreviews(provider, scope, items, first, last, selected, enabled)",
+            "local function stepPreviewSweep()",
             "local function stepPreviewWork()",
             "preview.ensure = ensureProviderPreview",
             "preview.node = providerPreviewNode",
-            "preview.scope = setPreviewScope",
+            "preview.plan = planProviderPreviews",
             "preview.retryDue = previewRetryDue",
+            "preview.retry = restartPreviewSweep",
             "preview.step = stepPreviewWork",
+            "preview.hasBoundedWork = previewHasDeferredWork",
             "preview.refreshClock = function()",
             "preview.requestRender = function()",
             "preview.takeRender = function()",
-            "preview.settle = function()",
+            "preview.settle = function(otherBoundedWork)",
             "preview.debugSnapshot = function(key)",
             "preview.cancel = function()",
             "preview.close = function()",
@@ -3407,6 +3776,28 @@ def test_provider_preview_panel_contract() -> None:
     )
     assert "http://" not in url_gate
     assert "cdn.motionbgs" not in url_gate
+
+    validation_memo = panel[
+        panel.index("local function validatedPreviewRequest") : panel.index(
+            "local function previewOwnedFilename"
+        )
+    ]
+    require_all(
+        validation_memo,
+        (
+            'local memoKey = tostring(provider or "") .. ":"',
+            "local memo = previewValidationMemo[memoKey]",
+            "memo.raw_identifier == rawIdentifier",
+            "memo.raw_url == rawUrl",
+            "local safeIdentifier = previewIdentifier(provider, rawIdentifier)",
+            "local safeUrl = validPreviewUrl(provider, rawUrl)",
+            "previewValidationMemo[memoKey] = memo",
+        ),
+        "once-per-result-generation preview validation memo",
+    )
+    assert validation_memo.index("local memo = previewValidationMemo[memoKey]") < validation_memo.index(
+        "previewIdentifier(provider, rawIdentifier)"
+    ), "validated preview metadata must hit the memo before repeating regex work"
 
     manifest_writer = panel[
         panel.index("local function savePreviewManifest") : panel.index(
@@ -3563,6 +3954,10 @@ def test_provider_preview_panel_contract() -> None:
     require_all(
         ensure,
         (
+            "local validated = validatedPreviewRequest(provider, identifier, url)",
+            "local safeIdentifier = validated.identifier",
+            "local safeUrl = validated.url",
+            "local key = validated.key",
             "#previewQueue < PREVIEW_MAX_QUEUE",
             "generation = previewGeneration",
             "previewRetryReady(safeUrl)",
@@ -3572,8 +3967,12 @@ def test_provider_preview_panel_contract() -> None:
             "retirePreviewEntry(key, entry)",
             "wakePreviewWork()",
         ),
-        "render-safe generation-aware preview lookup and enqueue",
+        "sweep-safe memoized generation-aware preview lookup and enqueue",
     )
+    initialization_return = ensure[ensure.index("if not previewCacheInitialized then") :]
+    assert initialization_return.index("previewInitializationRequested = true") < initialization_return.index(
+        "return false"
+    ), "a sweep item is accepted only after cache initialization can service it"
     for forbidden in (
         "initializePreviewCache(",
         "previewEntryValid(",
@@ -3601,6 +4000,7 @@ def test_provider_preview_panel_contract() -> None:
             "table.remove(previewCompletions, 1)",
             "finishPreviewTask(completion.task, completion.result)",
             "table.remove(previewRetiredPaths, 1)",
+            "return stepPreviewSweep()",
             "previewManifestDirty = false",
             "savePreviewManifest()",
             "startOnePreviewTask()",
@@ -3611,13 +4011,13 @@ def test_provider_preview_panel_contract() -> None:
 
     preview_node = panel[
         panel.index("local function providerPreviewNode") : panel.index(
-            "local function previewHasDeferredWork"
+            "local function previewSelectedFields"
         )
     ]
     require_all(
         preview_node,
         (
-            "previewAbsolutePath(path)",
+            "if path ~= nil then",
             "return ui.image({",
             "path = path",
             'fit = "cover"',
@@ -3631,8 +4031,91 @@ def test_provider_preview_panel_contract() -> None:
     )
     for forbidden in ("http://", "https://", "thumbnail_url", "poster_url", "thumbs"):
         assert forbidden not in preview_node, f"preview image node can consume remote data directly: {forbidden}"
-    for forbidden in ("noctalia.fileExists(", "noctalia.fileInfo(", "previewEntryValid("):
+    for forbidden in (
+        "previewAbsolutePath(",
+        "noctalia.fileExists(",
+        "noctalia.fileInfo(",
+        "previewEntryValid(",
+    ):
         assert forbidden not in preview_node, f"preview node performs render-time I/O via {forbidden!r}"
+
+    restart_sweep = panel[
+        panel.index("local function restartPreviewSweep") : panel.index(
+            "local function planProviderPreviews"
+        )
+    ]
+    require_all(
+        restart_sweep,
+        (
+            "if previewSweep ~= nil then",
+            "return false",
+            'previewPlan.enabled ~= true or not isOpen',
+            "provider = previewPlan.provider",
+            "items = previewPlan.items",
+            "index = previewPlan.first",
+            "limit = previewPlan.last",
+            "selected_seen = false",
+            "wakePreviewWork()",
+        ),
+        "non-destructive preview sweep retry",
+    )
+    assert restart_sweep.index("if previewSweep ~= nil then") < restart_sweep.index(
+        "previewSweep = {"
+    )
+    assert "resetPreviewQueue(" not in restart_sweep, (
+        "a retry wake must not replace the active sweep or its accepted work"
+    )
+
+    preview_plan = panel[
+        panel.index("local function planProviderPreviews") : panel.index(
+            "local function stepPreviewSweep"
+        )
+    ]
+    require_all(
+        preview_plan,
+        (
+            "previewPlan.scope == selectedScope",
+            "previewPlan.items == source",
+            "previewPlan.first == first",
+            "previewPlan.last == last",
+            "previewPlan.selected == selected",
+            "previewPlan.enabled == (enabled == true)",
+            "if unchanged then",
+            "resetPreviewQueue(selectedScope)",
+            "previewInterest += 1",
+            "first = math.max(1, math.floor(tonumber(first) or 1))",
+            "last = math.min(#source, 48",
+            "restartPreviewSweep()",
+        ),
+        "once-per-result-generation preview plan",
+    )
+    assert preview_plan.index("if unchanged then") < preview_plan.index(
+        "resetPreviewQueue(selectedScope)"
+    ), "an unchanged render must preserve the current sweep rather than regenerate it"
+
+    preview_sweep = panel[
+        panel.index("local function stepPreviewSweep") : panel.index(
+            "local function previewHasDeferredWork"
+        )
+    ]
+    require_all(
+        preview_sweep,
+        (
+            "local item = if sweep.index <= sweep.limit then sweep.items[sweep.index] else nil",
+            "sweep.index += 1",
+            "local accepted = ensureProviderPreview(sweep.provider, identifier, url)",
+            "identifier == sweep.selected_identifier and accepted",
+            "sweep.selected_seen = true",
+            "not sweep.selected_seen",
+            "sweep.selected_done = true",
+            "ensureProviderPreview(sweep.provider, sweep.selected_identifier, sweep.selected_url)",
+            "previewSweep = nil",
+        ),
+        "one-item preview sweep with accepted-only selected fallback",
+    )
+    assert preview_sweep.count("ensureProviderPreview(") == 2
+    assert preview_sweep.index("and accepted") < preview_sweep.index("sweep.selected_seen = true")
+    assert "while " not in preview_sweep, "one scheduler step must inspect at most one result"
 
     wallhaven_section = panel[
         panel.index("local function wallhavenSection") : panel.index("local function motionBgsSection")
@@ -3641,7 +4124,7 @@ def test_provider_preview_panel_contract() -> None:
         panel.index("local function motionBgsSection") : panel.index("local function librarySection")
     ]
     provider_items = panel[
-        panel.index("function panelUi.providerItems(value)") : panel.index(
+        panel.index("function panelUi.providerItems(value, page, pageSize)") : panel.index(
             "function panelUi.configuredRoot"
         )
     ]
@@ -3649,77 +4132,147 @@ def test_provider_preview_panel_contract() -> None:
         provider_items,
         (
             'local source = type(value) == "table" and value or {}',
-            "for index = 1, math.min(#source, 48) do",
+            "local total = math.min(#source, 48)",
+            "local size = math.max(1, math.floor(tonumber(pageSize) or PROVIDER_RESULT_CHUNK))",
+            "local pages = math.max(1, math.ceil(total / size))",
+            "local current = math.min(pages, math.max(1, math.floor(tonumber(page) or 1)))",
+            "local first = (current - 1) * size + 1",
+            "local last = math.min(total, first + size - 1)",
+            "for index = first, last do",
             'if type(source[index]) == "table" then',
+            "return items, total, current, first, last",
         ),
-        "malformed provider-item filtering",
+        "bounded paginated provider-item filtering",
     )
-    for source, provider, remote_field in (
-        (wallhaven_section, "wallhaven", "thumbs"),
-        (motionbgs_section, "motionbgs", "thumbnail_url"),
+    chunk_match = re.search(r"local PROVIDER_RESULT_CHUNK = ([0-9]+)", panel)
+    assert chunk_match is not None and int(chunk_match.group(1)) == 12
+    source_count = 36
+    page_size = int(chunk_match.group(1))
+    page_windows = []
+    for page in range(1, math.ceil(source_count / page_size) + 1):
+        first = (page - 1) * page_size + 1
+        last = min(source_count, first + page_size - 1)
+        page_windows.append((first, last))
+    assert page_windows == [(1, 12), (13, 24), (25, 36)], (
+        "36 provider results must remain addressable as three 12-card pages"
+    )
+
+    for source, provider, readiness, plan_end_marker in (
+        (wallhaven_section, "wallhaven", "ready", "local sortingValues"),
+        (motionbgs_section, "motionbgs", "integrationReady", "local modeValues"),
     ):
         require_all(
             source,
             (
-                "local items = panelUi.providerItems(results.items)",
-                remote_field,
-                f'preview.ensure("{provider}"',
+                "local sourceItems = type(results.items) == \"table\" and results.items or {}",
+                "local items, itemCount, localPage, firstItem, lastItem = panelUi.providerItems(",
+                "sourceItems,",
+                f"providerResultPages.{provider}",
+                "PROVIDER_RESULT_CHUNK",
+                'preview.plan(',
+                f'"{provider}",',
+                "sourceItems,",
+                "firstItem,",
+                "lastItem,",
+                "nil,",
+                readiness,
                 f'preview.node("{provider}"',
+                "panelUi.appendPageControls(",
             ),
-            f"visible {provider} preview wiring",
+            f"planned, paginated {provider} preview wiring",
         )
-        assert "if value <" in source and "preview.cancel()" in source, (
-            f"{provider} show-fewer can leave invisible preview work queued"
+        assert source.count("preview.plan(") == 1, (
+            f"{provider} must create one generation plan per result render"
         )
-
-    wallhaven_fetches = wallhaven_section[
-        wallhaven_section.index("local ready =") : wallhaven_section.index("local sortingValues")
-    ]
-    motionbgs_fetches = motionbgs_section[
-        motionbgs_section.index("local integrationReady =") : motionbgs_section.index("local children =")
-    ]
-    for source, readiness, provider in (
-        (wallhaven_fetches, "if ready then", "wallhaven"),
-        (motionbgs_fetches, "if integrationReady then", "motionbgs"),
-    ):
-        assert readiness in source
-        assert source.index(readiness) < source.index(f'preview.ensure("{provider}"'), (
-            f"{provider} previews can fetch while the integration is force-disabled"
+        assert f'preview.ensure("{provider}"' not in source, (
+            f"{provider} card construction must not validate or enqueue thumbnails"
         )
-        assert f'preview.scope("{provider}:"' in source
+        plan_start = source.index("preview.plan(")
+        plan_end = source.index(plan_end_marker, plan_start)
+        plan_call = source[plan_start:plan_end]
+        assert readiness in plan_call, (
+            f"{provider} preview generation must be disabled with its integration"
+        )
 
     on_close = panel[panel.index("function onOpen") : panel.index("function onSettings")]
     assert "preview.close()" in on_close, "closing the panel must cancel queued preview presentation work"
     on_settings = panel[panel.index("function onSettings") : panel.index("function onIpc")]
     assert "preview.close()" in on_settings, "opening settings must cancel queued preview presentation work"
+
+    update_callback = panel[
+        panel.index("function update()") : panel.index("function onFrameTick(_deltaMs)")
+    ]
     require_all(
-        on_settings,
+        update_callback,
         (
             "function update()",
             "preview.refreshClock()",
+            "if isOpen and preview.retryDue() then",
+            "preview.retry()",
             "if preview.takeRender() then",
             "panelPages.renderNow()",
-            "local stepped, redraw = preview.step()",
-            "if isOpen and preview.retryDue() then",
-            "preview.settle()",
-            "function onFrameTick(_deltaMs)",
-            "update()",
+            "preview.settle(isOpen and dragTokensDirty)",
         ),
-        "bounded redraw and preview-work scheduler",
+        "coalesced update-only full render",
     )
+    assert "preview.step()" not in update_callback, (
+        "update() must not combine full rendering with a bounded preview-work step"
+    )
+
+    frame_callback = panel[
+        panel.index("function onFrameTick(_deltaMs)") : panel.index("function onIpc")
+    ]
+    require_all(
+        frame_callback,
+        (
+            "function onFrameTick(_deltaMs)",
+            "preview.refreshClock()",
+            "local _, redraw = preview.step()",
+            "if redraw then",
+            "render()",
+            "preview.settle(isOpen and dragTokensDirty)",
+        ),
+        "bounded frame-tick state-machine scheduler",
+    )
+    for forbidden in ("\n    update()\n", "\n    panelPages.renderNow()\n", "\n    if preview.takeRender() then"):
+        assert forbidden not in frame_callback, (
+            f"onFrameTick must not invoke unbounded/full-tree work via {forbidden!r}"
+        )
+    render_now_calls = list(re.finditer(r"(?<!function )panelPages\.renderNow\(\)", panel))
+    assert len(render_now_calls) == 1
+    assert panel.index("function update()") < render_now_calls[0].start() < panel.index(
+        "function onFrameTick(_deltaMs)"
+    ), "panelPages.renderNow() may be consumed only by update()"
+
     scheduler = panel[
         panel.index("local function setPreviewUpdateInterval") : panel.index(
-            "local function wakePreviewWork"
+            "local function previewNowSeconds"
         )
     ]
     require_all(
         scheduler,
         (
             "noctalia.setUpdateInterval(interval)",
-            "panel.setNeedsFrameTick(interval == PREVIEW_ACTIVE_POLL_MS)",
+            "local function wakePreviewWork()",
+            "setPreviewUpdateInterval(PREVIEW_ACTIVE_POLL_MS)",
+            "panel.setNeedsFrameTick(true)",
         ),
-        "host-backed active preview scheduler",
+        "host-backed bounded preview scheduler",
     )
+    request_render = panel[
+        panel.index("preview.requestRender = function()") : panel.index(
+            "preview.takeRender = function()"
+        )
+    ]
+    require_all(
+        request_render,
+        (
+            "previewRenderPending = true",
+            "setPreviewUpdateInterval(PREVIEW_ACTIVE_POLL_MS)",
+        ),
+        "coalesced update render request",
+    )
+    assert "panel.setNeedsFrameTick" not in request_render
     initializer = panel[
         panel.index("preview.initializeScheduler = function()") : panel.index(
             "preview.cancel = function()"
@@ -3749,6 +4302,41 @@ def test_provider_preview_panel_contract() -> None:
         "idempotent deferred shop navigation",
     )
     assert shop_navigation.index('activePage == "shops"') < shop_navigation.index("preview.cancel()")
+
+    status_watchers_start = panel.index("noctalia.state.watch(MOTIONBGS_STATUS_KEY")
+    status_watchers = panel[
+        status_watchers_start : panel.index("reloadSharedState()", status_watchers_start)
+    ]
+    for provider_key in ("MOTIONBGS", "WALLHAVEN"):
+        status_start = status_watchers.index(f"noctalia.state.watch({provider_key}_STATUS_KEY")
+        result_start = status_watchers.index(f"noctalia.state.watch({provider_key}_RESULTS_KEY")
+        next_status = status_watchers.find("noctalia.state.watch(", status_start + 1)
+        status_end = next_status if next_status >= 0 else len(status_watchers)
+        next_result = status_watchers.find("noctalia.state.watch(", result_start + 1)
+        result_end = next_result if next_result >= 0 else len(status_watchers)
+        status_watch = status_watchers[status_start:status_end]
+        result_watch = status_watchers[result_start:result_end]
+        require_all(
+            status_watch,
+            (
+                'type(nextState) ~= "table" or nextState.available ~= true',
+                "preview.cancel()",
+                "refreshPanelState()",
+            ),
+            f"{provider_key.lower()} unavailable-status cancellation",
+        )
+        assert status_watch.index("preview.cancel()") < status_watch.index("refreshPanelState()")
+        require_all(
+            result_watch,
+            (
+                "preview.cancel()",
+                "providerResultEpochs.",
+                "providerResultPages.",
+                "refreshPanelState()",
+            ),
+            f"{provider_key.lower()} result-generation cancellation",
+        )
+        assert result_watch.index("preview.cancel()") < result_watch.index("refreshPanelState()")
 
     for image_call in re.findall(r"ui\.image\(\{(.*?)\}\)", panel, flags=re.DOTALL):
         assert "http://" not in image_call and "https://" not in image_call
@@ -4628,6 +5216,10 @@ def test_motionbgs_contract() -> None:
             'local COMMAND_KEY = "wall_in_one_motionbgs_command_v1"',
             'local COMMAND_ACK_KEY = "wall_in_one_motionbgs_command_ack_v1"',
             'local STATUS_KEY = "wall_in_one_motionbgs_status_v1"',
+            'active_slug = ""',
+            'active_quality = ""',
+            "queue_limit = MAX_QUEUE,",
+            "queued_downloads = {},",
             'local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"',
             'local INSTALL_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/motionbgs-helper"',
             'local BINARY_NAME = "wall-in-one-motionbgs"',
@@ -4646,6 +5238,8 @@ def test_motionbgs_contract() -> None:
             "local function probeResult(result)",
             'ipairs({ "search", "details", "download", "clear" })',
             "local function launcherRpcResult(operation, result)",
+            "local function downloadIsInstalled(slug, quality)",
+            'and noctalia.fileExists(sidecar)',
             '(payload.cached ~= true and payload.cached ~= false)',
             'responseSource ~= detail.source_url',
             'fetchedAt ~= detail.fetched_at',
@@ -4671,6 +5265,11 @@ def test_motionbgs_contract() -> None:
             "local function queryEncode(value)",
             'local expected = BASE_URL .. "/search?q=" .. queryEncode(request.query)',
             'action == "details" or action == "download"',
+            "local function queuedDownloadStatus()",
+            "local function downloadIsActiveOrPending(slug, quality)",
+            'if action == "download" then',
+            "if downloadIsInstalled(slug, quality) then",
+            "elseif downloadIsActiveOrPending(slug, quality) then",
             'action == "clear"',
             'action == "probe"',
             "noctalia.state.watch(COMMAND_KEY",
@@ -4864,7 +5463,7 @@ def test_motionbgs_contract() -> None:
 
     catalog = tomllib.loads((ROOT.parent / "catalog.toml").read_text(encoding="utf-8"))
     catalog_entry = next(entry for entry in catalog["plugin"] if entry["id"] == "goober/wall-in-one")
-    assert catalog_entry["version"] == "0.7.0"
+    assert catalog_entry["version"] == "0.7.1"
     public_docs = {
         "plugin README": text("README.md").lower(),
         "adapter architecture": text("ADAPTERS.md").lower(),
@@ -4891,7 +5490,7 @@ def test_motionbgs_contract() -> None:
         ("standalone program", "cpu-budget", "missing", "incompatible"),
         "MotionBGS test documentation",
     )
-    assert "0.7.0" in public_docs["changelog"]
+    assert "0.7.1" in public_docs["changelog"]
 
 
 def test_ui_and_documentation_surface() -> None:
@@ -4939,9 +5538,9 @@ def test_ui_and_documentation_surface() -> None:
             'kind = "schedule_resume"',
             'kind = "palettes_refresh"',
             'kind = "wallhaven_search"',
-            'kind = "wallhaven_detail"',
             'kind = "wallhaven_download"',
             'kind = "wallhaven_clear"',
+            'kind = "motionbgs_download"',
             'key = "wallhaven-resolution-mode"',
             'key = "wallhaven-top-range"',
             'noctalia.tr("panel.wallhaven.previous_page")',
@@ -4964,6 +5563,83 @@ def test_ui_and_documentation_surface() -> None:
         ),
         "named playlist, schedule, palette, and Wallhaven panel UI",
     )
+
+    provider_index = panel[
+        panel.index("function panelUi.providerInstallIndex()") : panel.index(
+            "panelUi.motionQueueCache"
+        )
+    ]
+    require_all(
+        provider_index,
+        (
+            'local published = type(currentLibrary.provider_installs) == "table"',
+            "nextIndex.wallhaven = type(published.wallhaven) == \"table\"",
+            "nextIndex.motionbgs = type(published.motionbgs) == \"table\"",
+            "panelUi.providerInstallCache = nextIndex",
+            "return nextIndex",
+        ),
+        "coordinator-published provider install index",
+    )
+    assert "for _, entry in ipairs" not in provider_index, (
+        "store rendering must never cold-scan the full library"
+    )
+
+    wallhaven_store = panel[
+        panel.index("local function wallhavenSection") : panel.index(
+            "local function motionBgsSection"
+        )
+    ]
+    require_all(
+        wallhaven_store,
+        (
+            "local installedItems = panelUi.providerInstallIndex().wallhaven",
+            "local installed = installedItems[itemId] ~= nil",
+            'tostring(providerStatus.active_action or "") == "download"',
+            'local downloadState = if installed then "installed" elseif downloading then "active" else "ready"',
+            'text = panelUi.downloadLabel(downloadState, "")',
+            'glyph = if installed then "check" elseif downloading then "loader" else "download"',
+            "enabled = ready and not busy and not installed",
+            'send({ kind = "wallhaven_download", id = tostring(resultItem.id or "") })',
+        ),
+        "inline Wallhaven card download state and action",
+    )
+    motionbgs_store = panel[
+        panel.index("local function motionBgsSection") : panel.index(
+            "local function librarySection"
+        )
+    ]
+    require_all(
+        motionbgs_store,
+        (
+            "local installedItems = panelUi.providerInstallIndex().motionbgs",
+            "local queuedDownloads, queuedDownloadCount = panelUi.motionQueueIndex(motionStatus)",
+            "local queueDepth = math.max(0, math.floor(tonumber(motionStatus.queue_depth) or 0))",
+            "local queueLimit = math.max(1, math.floor(tonumber(motionStatus.queue_limit) or 8))",
+            'local recentDownload = type(motionStatus.last_download) == "table" and motionStatus.last_download or {}',
+            'local installed = installedItems[stateKey] ~= nil or stateKey == recentDownloadKey',
+            "local function downloadButton(requestedQuality)",
+            'local stateKey = slug:lower() .. ":" .. requestedQuality',
+            "local installed = installedItems[stateKey] ~= nil",
+            "local queued = queuedDownloads[stateKey] == true",
+            'elseif active then "active"',
+            'elseif queued then "queued"',
+            "text = panelUi.downloadLabel(downloadState, requestedQuality)",
+            "queueDepth < queueLimit",
+            'send({ kind = "motionbgs_download", slug = slug, quality = requestedQuality })',
+            'downloadButton("hd")',
+            'downloadButton("4k")',
+        ),
+        "inline MotionBGS HD/4K download controls and queue states",
+    )
+    for provider, source in (("wallhaven", wallhaven_store), ("motionbgs", motionbgs_store)):
+        for forbidden in (
+            f'kind = "{provider}_detail"',
+            f'preview.node("{provider}", selected',
+            "results.selected",
+        ):
+            assert forbidden not in source, (
+                f"{provider} store tiles must not reintroduce a duplicate hero/detail round-trip"
+            )
     require_all(
         widget,
         (
@@ -5018,7 +5694,7 @@ def test_ui_and_documentation_surface() -> None:
     assert "refreshPanelState()" not in domain_watches, "one domain commit must not rebuild the panel repeatedly"
     for reset in (
         "resetPanelVisibility()",
-        "playlistVisibleEntries = PLAYLIST_ENTRY_CHUNK",
+        "playlistEntryPage = 1",
         "wallhavenVisibleResults = PROVIDER_RESULT_CHUNK",
         "motionBgsVisibleResults = PROVIDER_RESULT_CHUNK",
     ):
@@ -5097,8 +5773,9 @@ def test_declarative_ui_layout_contract() -> None:
         ),
         "bounded explicit browser grids and split schedule controls",
     )
-    assert panel.count("panelUi.appendExplicitGrid(") == 6, (
-        "the grid helper must serve providers, local libraries, the pairing library, and display playlists"
+    assert panel.count("panelUi.appendExplicitGrid(") == 7, (
+        "the grid helper must serve providers, local libraries, the pairing still picker, "
+        "the pairing library, and display playlists"
     )
 
     explicit_grid = panel[
@@ -5301,12 +5978,17 @@ def test_display_navigation_and_drag_contract() -> None:
         panel_update,
         (
             "if isOpen and dragTokensDirty then",
-            "local completed = stepDragTokenReconciliation()",
-            "if not completed then",
-            "preview.wake()",
+            "if stepDragTokenReconciliation() then",
+            "render()",
+            "else",
+            "local _, redraw = preview.step()",
+            "preview.settle(isOpen and dragTokensDirty)",
         ),
-        "bounded drag-token scheduler",
+        "frame-bounded drag-token scheduler",
     )
+    assert panel_update.index("if isOpen and dragTokensDirty then") < panel_update.index(
+        "preview.step()"
+    ), "drag reconciliation and preview work must not run in the same frame callback"
 
     playlist_drop = panel[
         panel.index("function onPlaylistDrop(payload, value)") : panel.index(
@@ -5507,6 +6189,11 @@ def test_display_navigation_and_drag_contract() -> None:
         playlist_rendering,
         (
             "panelUi.playlistPairingLibrary(playlistId, output)",
+            "local playlistPageCount = math.max(1, math.ceil(#entries / PLAYLIST_ENTRY_CHUNK))",
+            "local playlistFirstEntry = (playlistEntryPage - 1) * PLAYLIST_ENTRY_CHUNK + 1",
+            "local playlistLastEntry = math.min(#entries, playlistFirstEntry + PLAYLIST_ENTRY_CHUNK - 1)",
+            "for index = playlistFirstEntry, playlistLastEntry do",
+            "panelUi.appendPageControls(",
             "local previewPath, sourceAvailable = panelUi.playlistEntryVisualState(entry, output)",
             "playlistEntryPreview(kind, previewPath, active)",
             "panelUi.compactPaletteSwatch(entry, tostring(entry.pairing_id or \"\"))",
@@ -5540,6 +6227,7 @@ def main() -> None:
     test_renderer_crash_backoff_contract()
     test_coordinator_apply_serialization_contract()
     test_dynamic_pair_fingerprint_contract()
+    test_automatic_pairing_preview_contract()
     test_capture_scene_freshness_contract()
     test_managed_library_ownership_contract()
     test_palette_inventory_contract()

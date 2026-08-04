@@ -1,6 +1,6 @@
 # Wall-in-One
 
-Wall-in-One `0.7.0` is a Noctalia v5 wallpaper library for still images, local
+Wall-in-One `0.7.1` is a Noctalia v5 wallpaper library for still images, local
 videos, and installed Wallpaper Engine Workshop projects. Every dynamic source
 is paired with a real still and a Noctalia theme policy. Named playlists can be
 shared across displays while retaining independent playback, engine settings,
@@ -53,8 +53,11 @@ The main workflows are:
    pairing-creation step is required. Customize only the items that need a
    different still or palette.
 2. Search Wallhaven's official API or, when its separately installed helper is
-   available, MotionBGS's bounded public pages under **Shops**. Steam links
-   remain available for acquiring and managing Workshop content.
+   available, MotionBGS's bounded public pages under **Shops**. Download and
+   quality controls live on each result card. Cards distinguish available,
+   queued, downloading, and already-installed media, while MotionBGS keeps a
+   compact persistent queue summary. Steam links remain available for acquiring
+   and managing Workshop content.
 3. Select a display beneath **Home**. Its one page combines renderer controls,
    rotate/shuffle and interval policy, a pinned default playlist, ordered
    calendar overrides, and its owned mpvpaper and `linux-wallpaperengine`
@@ -77,7 +80,15 @@ two timers.
 Provider previews are downloaded through a strict helper and shown to `ui.image`
 only as local files. The private `pluginDataDir()/provider-previews/v1` cache is
 capped at 64 entries, 64 MiB total, and 2 MiB per file. A failed preview leaves
-metadata, source links, and download controls usable.
+metadata, the provider-site action, and download controls usable. Search
+responses are locally paged in fixed 12-card views; preview validation is
+memoized per result generation, and its scheduler advances at most one bounded
+operation per frame.
+Complete panel trees are never rebuilt from a frame callback.
+
+The panel requests a roomy 1160 × 780 floating surface. Fixed dimensions keep
+the hub usable if an older saved Noctalia placement override survives an
+upgrade, without triggering the panel manager's fill-sizing warning.
 
 ## Renderer ownership and per-display engines
 
@@ -128,6 +139,14 @@ and its image signature, optionally decodes it with FFmpeg, then installs it
 atomically. Cancelled or superseded work cannot promote a still or start delayed
 playback.
 
+Opening a video or Workshop item's customization eagerly requests its automatic
+representative through the coordinator's bounded capture queue. The editor
+shows pending, preparing, and ready states, and the generated still is cached by
+the medium/source identity before the wallpaper-derived palette preview runs.
+Choosing a specific representative uses a paged picker over indexed user-owned
+and Wallhaven stills; a manual absolute-path field remains an explicit escape
+hatch. Preparing a still does not apply a wallpaper, palette, or renderer.
+
 The representative remains Noctalia's real wallpaper for lock-screen fallback,
 wallpaper hooks, overview/backdrop consumers, and wallpaper-derived colors while
 the dynamic layer renders above it.
@@ -177,6 +196,12 @@ unreadable, or incompatible, only MotionBGS search and download degrade. Local
 libraries, playlists, renderers, Wallhaven, palettes, and Workshop discovery
 continue normally. The MotionBGS page explains the detected state and retains
 independent **Open MotionBGS** and **Get helper** links.
+
+The bridge publishes the active download's slug and quality plus a bounded view
+of queued downloads. The panel combines that state with the managed video
+library, disables exact duplicates, and labels completed qualities as already
+on disk. The helper protocol does not stream byte-level progress, so the UI
+reports honest queued/active/completed phases rather than inventing a percent.
 
 Each operation is a new helper process. The bridge writes one schema-1 JSON
 request of at most 8 KiB and accepts one schema-1 JSON response of at most
@@ -308,10 +333,13 @@ removed deliberately or become usable again if the source returns.
 
 `runtime.json` schema 6 stores capture provenance, independent run state,
 palette diagnostics, and exact owned Workshop state. Older action values are
-normalized to owned equivalents. Since
-Noctalia rejects reads of settings removed from a manifest, schema 1–4 outputs
-receive the documented schema-5 engine defaults and can then be tailored per
-display without undeclared-setting warnings.
+normalized to owned equivalents. Schema 1–4 outputs receive the documented
+schema-5 engine defaults and can then be tailored per display. Noctalia has no
+plugin-side API for deleting old plugin-setting overrides, so the manifest
+retains four invisible, inert compatibility declarations for the retired
+pre-0.7 global engine keys. Runtime code never reads them; their sole purpose is
+to keep existing user configurations valid while per-display controls remain
+authoritative.
 
 Documents are bounded to 8 MiB, fully validated, journaled, and backed up before
 a coordinated migration. Unknown/corrupt schemas fail closed and remain visible

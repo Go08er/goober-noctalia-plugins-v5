@@ -122,6 +122,7 @@ local status = {
     busy = false,
     active_action = "",
     active_nonce = 0,
+    active_id = "",
     last_nonce = 0,
     last_completed_nonce = 0,
     last_action = "",
@@ -406,6 +407,7 @@ local function statusFingerprint()
         busy = status.busy,
         active_action = status.active_action,
         active_nonce = status.active_nonce,
+        active_id = status.active_id,
         last_nonce = status.last_nonce,
         last_completed_nonce = status.last_completed_nonce,
         last_action = status.last_action,
@@ -424,6 +426,9 @@ local function publishStatus(force)
     status.busy = type(activeOperation) == "table"
     status.active_action = if type(activeOperation) == "table" then tostring(activeOperation.action or "") else ""
     status.active_nonce = if type(activeOperation) == "table" then tonumber(activeOperation.nonce) or 0 else 0
+    status.active_id = if type(activeOperation) == "table" and activeOperation.action == "download"
+        then tostring(activeOperation.id or "")
+        else ""
 
     local fingerprint = statusFingerprint()
     if force ~= true and fingerprint == lastStatusFingerprint then
@@ -451,10 +456,11 @@ local function rejectCommand(nonce, action, kind, message)
     publishStatus()
 end
 
-local function beginOperation(nonce, action)
+local function beginOperation(nonce, action, activeId)
     local operation = {
         nonce = nonce,
         action = action,
+        id = if action == "download" then validWallpaperId(activeId) or "" else "",
         discarded = false,
         generation = operationGeneration,
     }
@@ -1520,7 +1526,7 @@ local function download(command, nonce)
     end
     request.nonce = nonce
 
-    local operation = beginOperation(nonce, "download")
+    local operation = beginOperation(nonce, "download", request.id)
     operation.request = request
     status.last_request_at = nowText()
     local allocated, allocationError = allocateMediaTransport(operation, request)

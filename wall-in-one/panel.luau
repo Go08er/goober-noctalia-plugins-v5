@@ -66,9 +66,9 @@ local entryThemeModeDraft = "inherit"
 local entryThemeSourceDraft = "inherit"
 local entryThemeSelectionDraft = ""
 local entryAddedAtDraft = ""
-local playlistVisibleEntries = PLAYLIST_ENTRY_CHUNK
-local wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
-local motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
+local playlistEntryPage = 1
+local providerResultPages = { wallhaven = 1, motionbgs = 1 }
+local providerResultEpochs = { wallhaven = 0, motionbgs = 0 }
 local libraryPageStills = 1
 local libraryPageVideos = 1
 local libraryPageWorkshops = 1
@@ -77,6 +77,8 @@ local pairingEditorOpen = false
 local pairingEditorKind = "static"
 local editingPairingId = ""
 local pairingEditorRevision = 0
+local pairingStillPickerPage = 1
+local pairingManualStillOpen = false
 local pendingResetPairingId = ""
 local playlistLibraryFilter = "all"
 local playlistLibraryPage = 1
@@ -185,6 +187,9 @@ local previewCompletions = {}
 local previewRetiredPaths = {}
 local previewRetiredPathSet = {}
 local previewFailures = {}
+local previewValidationMemo = {}
+local previewPlan = nil
+local previewSweep = nil
 local previewActive = 0
 local previewSequence = 0
 local previewFailureSequence = 0
@@ -201,16 +206,13 @@ local previewClockSeconds = 0
 local function setPreviewUpdateInterval(interval)
     if previewUpdateInterval ~= interval then
         noctalia.setUpdateInterval(interval)
-        -- setUpdateInterval only throttles update events that the host already
-        -- supplies. Panels need an explicit frame source while bounded work is
-        -- active; otherwise a deferred render can remain pending indefinitely.
-        panel.setNeedsFrameTick(interval == PREVIEW_ACTIVE_POLL_MS)
         previewUpdateInterval = interval
     end
 end
 
 local function wakePreviewWork()
     setPreviewUpdateInterval(PREVIEW_ACTIVE_POLL_MS)
+    panel.setNeedsFrameTick(true)
 end
 
 local function previewNowSeconds()
@@ -275,19 +277,12 @@ local function resetPreviewQueue(scope)
     previewGeneration += 1
     previewQueue = {}
     previewQueued = {}
+    previewValidationMemo = {}
+    previewPlan = nil
+    previewSweep = nil
     if scope ~= nil then
         previewScope = tostring(scope)
     end
-end
-
-local function setPreviewScope(scope)
-    local selected = tostring(scope or "")
-    if selected ~= previewScope then
-        resetPreviewQueue(selected)
-    end
-    -- This is a render-frame marker, separate from the request generation.
-    -- Failures no longer represented by a visible card cannot wake retries.
-    previewInterest += 1
 end
 
 local function previewAbsolutePath(value)
@@ -381,6 +376,32 @@ end
 local function previewKey(provider, identifier)
     local safe = previewIdentifier(provider, identifier)
     return if safe ~= nil then provider .. ":" .. safe else nil
+end
+
+local function validatedPreviewRequest(provider, identifier, url)
+    local rawIdentifier = tostring(identifier or "")
+    local rawUrl = tostring(url or "")
+    local memoKey = tostring(provider or "") .. ":" .. rawIdentifier
+    local memo = previewValidationMemo[memoKey]
+    if
+        type(memo) == "table"
+        and memo.raw_identifier == rawIdentifier
+        and memo.raw_url == rawUrl
+    then
+        return memo
+    end
+    local safeIdentifier = previewIdentifier(provider, rawIdentifier)
+    local safeUrl = validPreviewUrl(provider, rawUrl)
+    local key = if safeIdentifier ~= nil then provider .. ":" .. safeIdentifier else nil
+    memo = {
+        raw_identifier = rawIdentifier,
+        raw_url = rawUrl,
+        identifier = safeIdentifier,
+        url = safeUrl,
+        key = if safeUrl ~= nil then key else nil,
+    }
+    previewValidationMemo[memoKey] = memo
+    return memo
 end
 
 local function previewOwnedFilename(value)
@@ -850,15 +871,17 @@ local function startOnePreviewTask()
 end
 
 local function ensureProviderPreview(provider, identifier, url)
-    local safeIdentifier = previewIdentifier(provider, identifier)
-    local safeUrl = validPreviewUrl(provider, url)
-    local key = previewKey(provider, safeIdentifier)
+    local validated = validatedPreviewRequest(provider, identifier, url)
+    local safeIdentifier = validated.identifier
+    local safeUrl = validated.url
+    local key = validated.key
     if safeIdentifier == nil or safeUrl == nil or key == nil then
         return false
     end
     if not previewCacheInitialized then
         previewInitializationRequested = true
         wakePreviewWork()
+        return false
     elseif not previewCacheReady or previewInitialization ~= nil then
         return false
     end
@@ -904,9 +927,13 @@ end
 
 local function providerPreviewNode(provider, item, width, height, glyph)
     local identifier = if provider == "wallhaven" then tostring(item.id or "") else tostring(item.slug or "")
-    local key = previewKey(provider, identifier)
+    local memo = previewValidationMemo[provider .. ":" .. identifier]
+    local key = if type(memo) == "table" and memo.raw_identifier == identifier then memo.key else nil
     local path = key ~= nil and previewPaths[key] or nil
-    if previewAbsolutePath(path) then
+    -- previewPaths is populated only after bounded path validation or an
+    -- atomic helper promotion. Rendering therefore needs only this O(1)
+    -- lookup; it must never repeat path/URL regex work for every card.
+    if path ~= nil then
         return ui.image({
             width = width,
             height = height,
@@ -929,12 +956,122 @@ local function providerPreviewNode(provider, item, width, height, glyph)
     })
 end
 
+local function previewSelectedFields(provider, selected)
+    if type(selected) ~= "table" then
+        return "", ""
+    end
+    if provider == "wallhaven" then
+        local thumbs = type(selected.thumbs) == "table" and selected.thumbs or {}
+        return tostring(selected.id or ""), tostring(thumbs.large or "")
+    end
+    return tostring(selected.slug or ""), tostring(selected.poster_url or selected.thumbnail_url or "")
+end
+
+local function restartPreviewSweep()
+    if previewSweep ~= nil then
+        return false
+    end
+    if type(previewPlan) ~= "table" or previewPlan.enabled ~= true or not isOpen then
+        previewSweep = nil
+        return false
+    end
+    previewSweep = {
+        provider = previewPlan.provider,
+        items = previewPlan.items,
+        first = previewPlan.first,
+        limit = previewPlan.last,
+        index = previewPlan.first,
+        selected_identifier = previewPlan.selected_identifier,
+        selected_url = previewPlan.selected_url,
+        selected_seen = false,
+        selected_done = false,
+    }
+    wakePreviewWork()
+    return true
+end
+
+local function planProviderPreviews(provider, scope, items, first, last, selected, enabled)
+    local selectedScope = tostring(scope or "")
+    local source = type(items) == "table" and items or {}
+    local selectedIdentifier, selectedUrl = previewSelectedFields(provider, selected)
+    local unchanged = type(previewPlan) == "table"
+        and previewPlan.scope == selectedScope
+        and previewPlan.items == source
+        and previewPlan.first == first
+        and previewPlan.last == last
+        and previewPlan.selected == selected
+        and previewPlan.enabled == (enabled == true)
+    if unchanged then
+        return
+    end
+
+    resetPreviewQueue(selectedScope)
+    previewInterest += 1
+    previewPlan = {
+        provider = provider,
+        scope = selectedScope,
+        items = source,
+        selected = selected,
+        selected_identifier = selectedIdentifier,
+        selected_url = selectedUrl,
+        first = math.max(1, math.floor(tonumber(first) or 1)),
+        last = math.min(#source, 48, math.max(0, math.floor(tonumber(last) or 0))),
+        enabled = enabled == true,
+    }
+    if previewPlan.enabled then
+        if not previewCacheInitialized then
+            previewInitializationRequested = true
+        end
+        restartPreviewSweep()
+    end
+end
+
+local function stepPreviewSweep()
+    local sweep = previewSweep
+    if type(sweep) ~= "table" then
+        return false, false
+    end
+    local item = if sweep.index <= sweep.limit then sweep.items[sweep.index] else nil
+    if sweep.index <= sweep.limit then
+        sweep.index += 1
+        if type(item) == "table" then
+            local identifier
+            local url
+            if sweep.provider == "wallhaven" then
+                local thumbs = type(item.thumbs) == "table" and item.thumbs or {}
+                identifier = tostring(item.id or "")
+                url = tostring(thumbs.large or "")
+            else
+                identifier = tostring(item.slug or "")
+                url = tostring(item.thumbnail_url or "")
+            end
+            local accepted = ensureProviderPreview(sweep.provider, identifier, url)
+            if identifier ~= "" and identifier == sweep.selected_identifier and accepted then
+                sweep.selected_seen = true
+            end
+        end
+        return true, false
+    end
+    if
+        not sweep.selected_done
+        and not sweep.selected_seen
+        and sweep.selected_identifier ~= ""
+    then
+        sweep.selected_done = true
+        ensureProviderPreview(sweep.provider, sweep.selected_identifier, sweep.selected_url)
+        return true, false
+    end
+    previewSweep = nil
+    return true, isOpen
+end
+
 local function previewHasDeferredWork()
     return previewInitializationRequested
         or previewInitialization ~= nil
         or #previewCompletions > 0
         or #previewRetiredPaths > 0
         or previewManifestDirty
+        or (previewSweep ~= nil and #previewQueue < PREVIEW_MAX_QUEUE)
         or (isOpen and previewCacheReady and previewActive < PREVIEW_MAX_CONCURRENT and #previewQueue > 0)
 end
 
@@ -957,6 +1094,9 @@ local function stepPreviewWork()
         noctalia.removeFile(path)
         return true, false
     end
+    if previewSweep ~= nil and #previewQueue < PREVIEW_MAX_QUEUE then
+        return stepPreviewSweep()
+    end
     if previewManifestDirty then
         -- A failed best-effort flush is retried by the next cache touch rather
         -- than spinning this panel callback at the active cadence.
@@ -972,18 +1112,23 @@ end
 
 preview.ensure = ensureProviderPreview
 preview.node = providerPreviewNode
-preview.scope = setPreviewScope
+preview.plan = planProviderPreviews
+-- Absolute-path validation is also needed outside this lexical scope; the
+-- local itself is invisible there and would resolve to a nil global.
+preview.absolutePath = previewAbsolutePath
 preview.retryDue = previewRetryDue
+preview.retry = restartPreviewSweep
 preview.retryPollMs = PREVIEW_RETRY_POLL_MS
 preview.activePollMs = PREVIEW_ACTIVE_POLL_MS
 preview.wake = wakePreviewWork
 preview.step = stepPreviewWork
+preview.hasBoundedWork = previewHasDeferredWork
 preview.refreshClock = function()
     previewClockSeconds = math.max(0, math.floor(tonumber(noctalia.formatTime("%s")) or 0))
 end
 preview.requestRender = function()
     previewRenderPending = true
-    wakePreviewWork()
+    setPreviewUpdateInterval(PREVIEW_ACTIVE_POLL_MS)
 end
 preview.takeRender = function()
     if not previewRenderPending then
@@ -992,11 +1137,12 @@ preview.takeRender = function()
     previewRenderPending = false
     return true
 end
-preview.settle = function()
-    if previewRenderPending or previewHasDeferredWork() then
+preview.settle = function(otherBoundedWork)
+    if otherBoundedWork == true or previewHasDeferredWork() then
         wakePreviewWork()
     else
-        setPreviewUpdateInterval(PREVIEW_RETRY_POLL_MS)
+        panel.setNeedsFrameTick(false)
+        setPreviewUpdateInterval(if previewRenderPending then PREVIEW_ACTIVE_POLL_MS else PREVIEW_RETRY_POLL_MS)
     end
 end
 preview.debugSnapshot = function(key)
@@ -1029,6 +1175,8 @@ preview.debugSnapshot = function(key)
         clock = previewClockSeconds,
         update_interval = previewUpdateInterval,
         scope = previewScope,
+        sweep_index = if type(previewSweep) == "table" then previewSweep.index else 0,
+        sweep_limit = if type(previewSweep) == "table" then previewSweep.limit else 0,
         drag_tokens_dirty = dragTokensDirty,
     }
 end
@@ -1054,9 +1202,9 @@ local function resetLibraryVisibility()
 end
 
 local function resetPanelVisibility()
-    playlistVisibleEntries = PLAYLIST_ENTRY_CHUNK
-    wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
-    motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
+    playlistEntryPage = 1
+    providerResultPages.wallhaven = 1
+    providerResultPages.motionbgs = 1
     resetLibraryVisibility()
     playlistLibraryPage = 1
     playlistNavigationPage = 1
@@ -1446,14 +1594,26 @@ local function paletteNames(source)
     return names
 end
 
+local paletteEntryIndexes = {}
+
 local function paletteInventoryEntry(source, selection)
     local _root, inventory = paletteInventory()
-    for _, entry in ipairs(type(inventory[source]) == "table" and inventory[source] or {}) do
-        if type(entry) == "table" and tostring(entry.name or "") == tostring(selection or "") then
-            return entry
+    local values = type(inventory[source]) == "table" and inventory[source] or {}
+    local cached = paletteEntryIndexes[source]
+    if type(cached) ~= "table" or cached.source ~= values then
+        local index = {}
+        for _, entry in ipairs(values) do
+            if type(entry) == "table" then
+                local name = tostring(entry.name or "")
+                if name ~= "" then
+                    index[name] = entry
+                end
+            end
         end
+        cached = { source = values, index = index }
+        paletteEntryIndexes[source] = cached
     end
-    return nil
+    return cached.index[tostring(selection or "")]
 end
 
 local function basename(path)
@@ -2035,6 +2195,24 @@ local function adaptivePreviewSession()
     end
 end
 
+local function automaticRepresentativePath(kind, source)
+    local root = type(status) == "table" and type(status.library) == "table" and status.library or {}
+    local published = type(root.representative_stills) == "table" and root.representative_stills or nil
+    if published == nil then
+        -- The current coordinator always publishes this fixed lookup. During
+        -- a one-snapshot upgrade gap, let the bounded preparation request hit
+        -- the coordinator cache instead of scanning 1,024 rows in a click.
+        return ""
+    end
+    local values = if kind == "video" then published.video elseif kind == "workshop" then published.workshop else nil
+    local path = tostring(type(values) == "table" and values[source] or "")
+    local info = preview.absolutePath(path) and noctalia.fileInfo(path) or nil
+    if type(info) == "table" and info.isDir ~= true and (tonumber(info.size) or 0) > 0 then
+        return path
+    end
+    return ""
+end
+
 local function adaptivePreviewDescriptor(bundle, pairingId)
     local theme = type(bundle) == "table" and type(bundle.theme) == "table" and bundle.theme or {}
     local scheme = tostring(theme.selection or "")
@@ -2063,23 +2241,26 @@ local function adaptivePreviewDescriptor(bundle, pairingId)
             scheme = scheme,
         }
     end
-    local savedId = tostring(pairingId or "")
     local media = type(bundle.media) == "table" and bundle.media or nil
-    if tostring(still.mode or "") == "automatic" and media ~= nil and savedId ~= "" then
-        local saved = pairingMap()[savedId]
-        local savedMedia = type(saved) == "table" and type(saved.media) == "table" and saved.media or nil
-        if
-            savedMedia == nil
-            or tostring(savedMedia.kind or "") ~= tostring(media.kind or "")
-            or tostring(savedMedia.source or "") ~= tostring(media.source or "")
-        then
+    if tostring(still.mode or "") == "automatic" and media ~= nil then
+        local mediaKind = tostring(media.kind or "")
+        local mediaSource = tostring(media.source or "")
+        if (mediaKind ~= "video" and mediaKind ~= "workshop") or mediaSource == "" then
             return nil
         end
         return {
-            signature = "pairing|" .. tostring(#savedId) .. "|" .. savedId .. "|" .. scheme,
-            path = "",
-            pairing_id = savedId,
+            signature = table.concat({
+                "automatic",
+                mediaKind,
+                tostring(#mediaSource),
+                mediaSource,
+                scheme,
+            }, "|"),
+            path = automaticRepresentativePath(mediaKind, mediaSource),
+            pairing_id = tostring(pairingId or ""),
             scheme = scheme,
+            media_kind = mediaKind,
+            media_source = mediaSource,
         }
     end
     return nil
@@ -2097,7 +2278,7 @@ local function requestPairingAdaptivePreview(bundle, pairingId)
     adaptivePreviewSequence = if adaptivePreviewSequence >= 2147483646 then 1 else adaptivePreviewSequence + 1
     local key = "panel-pairing-preview-" .. tostring(adaptivePreviewSequence)
     adaptivePreviewKeys[descriptor.signature] = key
-    adaptivePreviewStates[descriptor.signature] = nil
+    adaptivePreviewStates[descriptor.signature] = { state = "loading", error = "" }
     local request = {
         kind = "palette_preview",
         key = key,
@@ -2105,11 +2286,43 @@ local function requestPairingAdaptivePreview(bundle, pairingId)
     }
     if descriptor.path ~= "" then
         request.path = descriptor.path
-    end
-    if descriptor.pairing_id ~= "" then
+    elseif descriptor.media_kind ~= nil then
+        request.kind = "pairing_prepare_still"
+        request.media_kind = descriptor.media_kind
+        request.media_source = descriptor.media_source
+        request.output = if selectedScreen ~= "" then selectedScreen else focusedOutput()
+    elseif descriptor.pairing_id ~= "" then
         request.pairing_id = descriptor.pairing_id
     end
     send(request)
+    return true
+end
+
+local function requestAutomaticStillPreparation(kind, source)
+    if
+        pairingEditorOpen ~= true
+        or entryStillModeDraft ~= "automatic"
+        or (kind ~= "video" and kind ~= "workshop")
+        or source == ""
+        or automaticRepresentativePath(kind, source) ~= ""
+    then
+        return false
+    end
+    local signature = "prepare\0" .. kind .. "\0" .. source
+    if adaptivePreviewKeys[signature] ~= nil then
+        return false
+    end
+    adaptivePreviewSequence = if adaptivePreviewSequence >= 2147483646 then 1 else adaptivePreviewSequence + 1
+    local key = "panel-pairing-still-" .. tostring(adaptivePreviewSequence)
+    adaptivePreviewKeys[signature] = key
+    send({
+        kind = "pairing_prepare_still",
+        key = key,
+        media_kind = kind,
+        media_source = source,
+        output = if selectedScreen ~= "" then selectedScreen else focusedOutput(),
+        capture_only = true,
+    })
     return true
 end
 
@@ -2159,6 +2372,8 @@ local function beginPairingEditor(kind, pairing)
     pairingEditorOpen = true
     editingPairingId = if type(pairing) == "table" then tostring(pairing.id or "") else ""
     pendingResetPairingId = ""
+    pairingStillPickerPage = 1
+    pairingManualStillOpen = false
     loadBundleDraft(pairing, kind)
     entryMediaKindDraft = kind
     if kind == "static" then
@@ -2167,7 +2382,13 @@ local function beginPairingEditor(kind, pairing)
     preview.cancel()
     activePage = "library"
     activeSubpage = if kind == "video" then "videos" elseif kind == "workshop" then "workshops" else "images"
-    requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
+    adaptivePreviewKeys[
+        "prepare\0" .. kind .. "\0" .. noctalia.string.trim(entryMediaSourceDraft)
+    ] = nil
+    local requestedPalette = requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
+    if not requestedPalette then
+        requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))
+    end
     render()
 end
 
@@ -2175,6 +2396,8 @@ local function closePairingEditor()
     pairingEditorOpen = false
     editingPairingId = ""
     pendingResetPairingId = ""
+    pairingStillPickerPage = 1
+    pairingManualStillOpen = false
     resetEntryDraft()
 end
 
@@ -2245,6 +2468,28 @@ local function matchingPairingForLibraryEntry(entry)
 end
 
 local panelUi = {}
+
+panelUi.workshopIndexCache = { source = nil, index = {} }
+
+function panelUi.workshopIndex()
+    local currentLibrary = type(status) == "table" and type(status.library) == "table" and status.library or {}
+    local workshops = type(currentLibrary.workshops) == "table" and currentLibrary.workshops or {}
+    local cached = panelUi.workshopIndexCache
+    if cached.source == workshops then
+        return cached.index
+    end
+    local index = {}
+    for _, workshop in ipairs(workshops) do
+        if type(workshop) == "table" then
+            local id = tostring(workshop.id or "")
+            if id ~= "" then
+                index[id] = workshop
+            end
+        end
+    end
+    panelUi.workshopIndexCache = { source = workshops, index = index }
+    return index
+end
 
 local function openLibraryEntryPairing(entry, libraryItem)
     local kind = tostring(type(entry) == "table" and entry.kind or "")
@@ -2368,15 +2613,95 @@ function panelUi.valueOr(value, fallbackKey)
     return if text == "" then noctalia.tr(fallbackKey) else text
 end
 
-function panelUi.providerItems(value)
+function panelUi.providerItems(value, page, pageSize)
     local source = type(value) == "table" and value or {}
+    local total = math.min(#source, 48)
+    local size = math.max(1, math.floor(tonumber(pageSize) or PROVIDER_RESULT_CHUNK))
+    local pages = math.max(1, math.ceil(total / size))
+    local current = math.min(pages, math.max(1, math.floor(tonumber(page) or 1)))
+    local first = (current - 1) * size + 1
+    local last = math.min(total, first + size - 1)
     local items = {}
-    for index = 1, math.min(#source, 48) do
+    for index = first, last do
         if type(source[index]) == "table" then
             table.insert(items, source[index])
         end
     end
-    return items
+    return items, total, current, first, last
+end
+
+panelUi.providerInstallCache = {
+    source = nil,
+    wallhaven = {},
+    motionbgs = {},
+}
+
+function panelUi.providerInstallIndex()
+    local currentLibrary = type(status) == "table" and type(status.library) == "table" and status.library or {}
+    local cached = panelUi.providerInstallCache
+    if cached.source == currentLibrary then
+        return cached
+    end
+
+    local nextIndex = {
+        source = currentLibrary,
+        wallhaven = {},
+        motionbgs = {},
+    }
+    local published = type(currentLibrary.provider_installs) == "table" and currentLibrary.provider_installs or nil
+    if published ~= nil then
+        nextIndex.wallhaven = type(published.wallhaven) == "table" and published.wallhaven or {}
+        nextIndex.motionbgs = type(published.motionbgs) == "table" and published.motionbgs or {}
+    end
+    panelUi.providerInstallCache = nextIndex
+    return nextIndex
+end
+
+panelUi.motionQueueCache = { source = nil, index = {}, count = 0 }
+
+function panelUi.motionQueueIndex(providerStatus)
+    local queued = type(providerStatus) == "table" and providerStatus.queued_downloads or nil
+    local cached = panelUi.motionQueueCache
+    if cached.source == queued then
+        return cached.index, cached.count
+    end
+    local index = {}
+    local count = 0
+    for _, entry in ipairs(type(queued) == "table" and queued or {}) do
+        if type(entry) == "table" then
+            local slug = tostring(entry.slug or ""):lower()
+            local quality = tostring(entry.quality or ""):lower()
+            if slug ~= "" and (quality == "hd" or quality == "4k") then
+                local key = slug .. ":" .. quality
+                if index[key] ~= true then
+                    index[key] = true
+                    count += 1
+                end
+            end
+        end
+    end
+    panelUi.motionQueueCache = { source = queued, index = index, count = count }
+    return index, count
+end
+
+function panelUi.downloadLabel(state, quality)
+    quality = tostring(quality or ""):upper()
+    if quality == "" then
+        if state == "installed" then
+            return noctalia.tr("panel.downloads.installed_plain")
+        elseif state == "active" then
+            return noctalia.tr("panel.downloads.downloading_plain")
+        end
+        return noctalia.tr("panel.wallhaven.download")
+    end
+    if state == "installed" then
+        return noctalia.tr("panel.downloads.installed", { quality = quality })
+    elseif state == "active" then
+        return noctalia.tr("panel.downloads.downloading", { quality = quality })
+    elseif state == "queued" then
+        return noctalia.tr("panel.downloads.queued", { quality = quality })
+    end
+    return noctalia.tr("panel.downloads.download", { quality = quality })
 end
 
 function panelUi.configuredRoot(key)
@@ -2775,28 +3100,31 @@ end
 
 local function wallhavenSection()
     local providerStatus, results = wallhavenData()
-    local items = panelUi.providerItems(results.items)
-    local selected = type(results.selected) == "table" and results.selected or {}
+    local installedItems = panelUi.providerInstallIndex().wallhaven
+    local sourceItems = type(results.items) == "table" and results.items or {}
+    local items, itemCount, localPage, firstItem, lastItem = panelUi.providerItems(
+        sourceItems,
+        providerResultPages.wallhaven,
+        PROVIDER_RESULT_CHUNK
+    )
     local meta = type(results.meta) == "table" and results.meta or {}
     local activeFilters = type(results.filters) == "table" and results.filters or {}
     local ready = providerStatus.available == true and storageValid()
     local busy = providerStatus.busy == true
-    preview.scope("wallhaven:" .. tostring(results.sequence or 0) .. ":" .. (if ready then "ready" else "disabled"))
-    local selectedPreviewQueued = false
-    if ready then
-        for index = 1, math.min(#items, wallhavenVisibleResults) do
-            local item = items[index]
-            local thumbs = type(item) == "table" and type(item.thumbs) == "table" and item.thumbs or {}
-            local previewAccepted = preview.ensure("wallhaven", tostring(item.id or ""), tostring(thumbs.large or ""))
-            if tostring(item.id or "") == tostring(selected.id or "") and previewAccepted then
-                selectedPreviewQueued = true
-            end
-        end
-        if tostring(selected.id or "") ~= "" and not selectedPreviewQueued then
-            local thumbs = type(selected.thumbs) == "table" and selected.thumbs or {}
-            preview.ensure("wallhaven", tostring(selected.id), tostring(thumbs.large or ""))
-        end
-    end
+    preview.plan(
+        "wallhaven",
+        "wallhaven:"
+            .. tostring(providerResultEpochs.wallhaven)
+            .. ":"
+            .. tostring(results.sequence or 0)
+            .. ":"
+            .. (if ready then "ready" else "disabled"),
+        sourceItems,
+        firstItem,
+        lastItem,
+        nil,
+        ready
+    )
     local sortingValues = { "date_added", "relevance", "random", "views", "favorites", "toplist", "hot" }
     local sortingLabels = {
         noctalia.tr("panel.wallhaven.sort_newest"),
@@ -2909,7 +3237,7 @@ local function wallhavenSection()
         request.page = page
         wallhavenPageDraft = tostring(page)
         wallhavenPageInputRevision += 1
-        wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
+        providerResultPages.wallhaven = 1
         preview.cancel()
         send(request)
     end
@@ -2955,7 +3283,7 @@ local function wallhavenSection()
                     wallhavenPageDraft = "1"
                     wallhavenSearchInputRevision += 1
                     wallhavenPageInputRevision += 1
-                    wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
+                    providerResultPages.wallhaven = 1
                     preview.cancel()
                     send({ kind = "wallhaven_clear" })
                 end,
@@ -3105,41 +3433,6 @@ local function wallhavenSection()
             })
         )
     end
-    if tostring(selected.id or "") ~= "" then
-        local selectedItem = selected
-        table.insert(
-            children,
-            ui.column({ gap = 4, padding = 9, radius = 9, fill = "primary/0.08", align = "stretch" }, {
-                ui.row({ justify = "center" }, {
-                    preview.node("wallhaven", selected, 320, 180, "photo"),
-                }),
-                ui.label({
-                    text = noctalia.tr("panel.wallhaven.selected", {
-                        id = tostring(selected.id),
-                        resolution = panelUi.valueOr(selected.resolution, "common.unknown"),
-                    }),
-                    fontSize = 11,
-                    fontWeight = "bold",
-                }),
-                ui.label({
-                    text = tostring(selected.url or selected.short_url or ""),
-                    fontSize = 8,
-                    color = "on_surface_variant",
-                    maxLines = 2,
-                }),
-                ui.button({
-                    text = noctalia.tr("panel.wallhaven.download"),
-                    glyph = "download",
-                    variant = "primary",
-                    controlSize = "sm",
-                    enabled = ready and not busy,
-                    onClick = function()
-                        send({ kind = "wallhaven_download", id = tostring(selectedItem.id or "") })
-                    end,
-                }),
-            })
-        )
-    end
     if #items == 0 then
         table.insert(
             children,
@@ -3194,12 +3487,16 @@ local function wallhavenSection()
         panelUi.appendExplicitGrid(
             children,
             items,
-            wallhavenVisibleResults,
+            #items,
             BROWSER_GRID_COLUMNS,
             function(item)
                 local resultItem = item
-                local itemId = tostring(item.id or "")
-                local isSelected = itemId ~= "" and itemId == tostring(selected.id or "")
+                local itemId = tostring(item.id or ""):lower()
+                local installed = installedItems[itemId] ~= nil
+                local downloading = busy
+                    and tostring(providerStatus.active_action or "") == "download"
+                    and tostring(providerStatus.active_id or ""):lower() == itemId
+                local downloadState = if installed then "installed" elseif downloading then "active" else "ready"
                 return ui.column({
                     key = "wallhaven-result-" .. itemId,
                     width = 232,
@@ -3207,8 +3504,8 @@ local function wallhavenSection()
                     padding = 8,
                     radius = 10,
                     fill = "surface_variant/0.25",
-                    border = if isSelected then "primary/0.65" else "outline/0.25",
-                    borderWidth = if isSelected then 2 else 1,
+                    border = "outline/0.25",
+                    borderWidth = 1,
                     align = "stretch",
                 }, {
                     preview.node("wallhaven", item, 216, 122, "photo"),
@@ -3232,41 +3529,26 @@ local function wallhavenSection()
                         maxWidth = 216,
                         maxLines = 2,
                     }),
-                    ui.row({ gap = 4, align = "center", justify = "end" }, {
-                        ui.button({
-                            glyph = "info-circle",
-                            tooltip = noctalia.tr("panel.wallhaven.details"),
-                            variant = "ghost",
-                            controlSize = "sm",
-                            enabled = ready and not busy,
-                            onClick = function()
-                                send({ kind = "wallhaven_detail", id = tostring(resultItem.id or "") })
-                            end,
-                        }),
-                        ui.button({
-                            glyph = "download",
-                            tooltip = noctalia.tr("panel.wallhaven.download"),
-                            variant = "primary",
-                            controlSize = "sm",
-                            enabled = ready and not busy,
-                            onClick = function()
-                                send({ kind = "wallhaven_download", id = tostring(resultItem.id or "") })
-                            end,
-                        }),
+                    ui.button({
+                        text = panelUi.downloadLabel(downloadState, ""),
+                        glyph = if installed then "check" elseif downloading then "loader" else "download",
+                        variant = if installed then "ghost" else "primary",
+                        controlSize = "sm",
+                        enabled = ready and not busy and not installed,
+                        onClick = function()
+                            send({ kind = "wallhaven_download", id = tostring(resultItem.id or "") })
+                        end,
                     }),
                 })
             end
         )
-        panelUi.appendVisibilityControls(
+        panelUi.appendPageControls(
             children,
-            #items,
-            wallhavenVisibleResults,
+            itemCount,
+            localPage,
             PROVIDER_RESULT_CHUNK,
             function(value)
-                if value < wallhavenVisibleResults then
-                    preview.cancel()
-                end
-                wallhavenVisibleResults = value
+                providerResultPages.wallhaven = value
             end
         )
     end
@@ -3276,8 +3558,14 @@ end
 local function motionBgsSection()
     local provider = type(providers().motionbgs) == "table" and providers().motionbgs or {}
     local motionStatus, results = motionBgsData()
-    local items = panelUi.providerItems(results.items)
-    local selected = type(results.selected) == "table" and results.selected or {}
+    local installedItems = panelUi.providerInstallIndex().motionbgs
+    local queuedDownloads, queuedDownloadCount = panelUi.motionQueueIndex(motionStatus)
+    local sourceItems = type(results.items) == "table" and results.items or {}
+    local items, itemCount, localPage, firstItem, lastItem = panelUi.providerItems(
+        sourceItems,
+        providerResultPages.motionbgs,
+        PROVIDER_RESULT_CHUNK
+    )
     local meta = type(results.meta) == "table" and results.meta or {}
     local integrationReady = provider.integration_available == true
         and motionStatus.available == true
@@ -3285,25 +3573,32 @@ local function motionBgsSection()
     local motionEnabled = settings().use_motionbgs ~= false
     local helperReady = motionStatus.binary_compatible == true
     local busy = motionStatus.busy == true
+    local queueDepth = math.max(0, math.floor(tonumber(motionStatus.queue_depth) or 0))
+    local queueLimit = math.max(1, math.floor(tonumber(motionStatus.queue_limit) or 8))
+    local recentDownload = type(motionStatus.last_download) == "table" and motionStatus.last_download or {}
+    local recentDownloadPath = tostring(recentDownload.path or "")
+    local recentDownloadKey = if recentDownloadPath ~= ""
+            and noctalia.fileExists(recentDownloadPath)
+            and noctalia.fileExists(recentDownloadPath .. ".motionbgs.json")
+        then tostring(recentDownload.slug or ""):lower()
+            .. ":"
+            .. tostring(recentDownload.quality or ""):lower()
+        else ""
     local quality = tostring(settings().motionbgs_quality or "hd")
-    preview.scope("motionbgs:" .. tostring(results.sequence or 0) .. ":" .. (if integrationReady then "ready" else "disabled"))
-    local selectedPreviewQueued = false
-    if integrationReady then
-        for index = 1, math.min(#items, motionBgsVisibleResults) do
-            local item = items[index]
-            local previewAccepted = preview.ensure(
-                "motionbgs",
-                tostring(item.slug or ""),
-                tostring(item.thumbnail_url or "")
-            )
-            if tostring(item.slug or "") == tostring(selected.slug or "") and previewAccepted then
-                selectedPreviewQueued = true
-            end
-        end
-        if tostring(selected.slug or "") ~= "" and not selectedPreviewQueued then
-            preview.ensure("motionbgs", tostring(selected.slug), tostring(selected.poster_url or ""))
-        end
-    end
+    preview.plan(
+        "motionbgs",
+        "motionbgs:"
+            .. tostring(providerResultEpochs.motionbgs)
+            .. ":"
+            .. tostring(results.sequence or 0)
+            .. ":"
+            .. (if integrationReady then "ready" else "disabled"),
+        sourceItems,
+        firstItem,
+        lastItem,
+        nil,
+        integrationReady
+    )
     local modeValues = { "search", "latest", "genre", "4k", "hd" }
     local modeLabels = {
         noctalia.tr("panel.motionbgs.mode_search"),
@@ -3435,7 +3730,7 @@ local function motionBgsSection()
         end
         motionBrowseDraft.page = tostring(page)
         motionPageInputRevision += 1
-        motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
+        providerResultPages.motionbgs = 1
         preview.cancel()
         send({
             kind = "motionbgs_search",
@@ -3445,6 +3740,44 @@ local function motionBgsSection()
             page = page,
         })
     end
+    local helperStatusChildren = {
+        ui.label({
+            text = if not motionEnabled
+                then noctalia.tr("panel.motionbgs.helper_chip_disabled")
+                elseif not helperReady then noctalia.tr("panel.motionbgs.helper_chip_missing")
+                elseif integrationReady
+                then noctalia.tr("panel.motionbgs.helper_chip_ready", {
+                    version = tostring(motionStatus.binary_version or ""),
+                })
+                else noctalia.tr("panel.motionbgs.helper_chip_unavailable"),
+            color = if integrationReady then "primary" else "tertiary",
+            fontSize = 9,
+            flexGrow = 1,
+            maxLines = 2,
+        }),
+    }
+    if not helperReady then
+        table.insert(helperStatusChildren, ui.button({
+            text = noctalia.tr("panel.motionbgs.get_helper"),
+            glyph = "download",
+            variant = "ghost",
+            controlSize = "sm",
+            onClick = function()
+                send({ kind = "motionbgs_helper_open" })
+            end,
+        }))
+        table.insert(helperStatusChildren, ui.button({
+            glyph = "refresh",
+            tooltip = noctalia.tr("panel.motionbgs.retry_helper"),
+            variant = "ghost",
+            controlSize = "sm",
+            enabled = motionEnabled and not busy,
+            onClick = function()
+                send({ kind = "motionbgs_probe" })
+            end,
+        }))
+    end
+    table.insert(helperStatusChildren, panelUi.actionButton("motionbgs_open", "external-link", "ghost", false))
     local children = {
         panelUi.sectionHeader("world-search", noctalia.tr("panel.motionbgs.title"), noctalia.tr("panel.motionbgs.description")),
         ui.row({ gap = 6, align = "center" }, {
@@ -3503,67 +3836,30 @@ local function motionBgsSection()
                     motionBrowseDraft.page = "1"
                     motionQueryInputRevision += 1
                     motionPageInputRevision += 1
-                    motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
+                    providerResultPages.motionbgs = 1
                     preview.cancel()
                     send({ kind = "motionbgs_clear" })
                 end,
             }),
         }),
-        ui.row({ gap = 6, align = "center" }, {
-            ui.label({
-                text = if busy
-                    then noctalia.tr("panel.motionbgs.busy", { action = tostring(motionStatus.active_action or "") })
-                    elseif integrationReady then noctalia.tr("panel.motionbgs.ready")
-                    else noctalia.tr("panel.motionbgs.unavailable"),
-                color = if integrationReady then "primary" else "tertiary",
-                fontSize = 10,
-                flexGrow = 1,
-                maxLines = 3,
-            }),
-            panelUi.actionButton("motionbgs_open", "external-link", "ghost", false),
-        }),
-        ui.row({ gap = 6, align = "center" }, {
-            ui.label({
-                text = if not motionEnabled
-                    then noctalia.tr("panel.motionbgs.helper_disabled")
-                    elseif helperReady
-                    then noctalia.tr("panel.motionbgs.helper_ready", {
-                        version = tostring(motionStatus.binary_version or ""),
-                        path = tostring(motionStatus.binary_path or "wall-in-one-motionbgs"),
-                    })
-                    else noctalia.tr("panel.motionbgs.helper_missing"),
-                color = if helperReady then "on_surface_variant" else "tertiary",
-                fontSize = 9,
-                flexGrow = 1,
-                maxLines = 4,
-            }),
-            ui.button({
-                text = noctalia.tr("panel.motionbgs.get_helper"),
-                glyph = "download",
-                variant = "ghost",
-                controlSize = "sm",
-                onClick = function()
-                    send({ kind = "motionbgs_helper_open" })
-                end,
-            }),
-            ui.button({
-                glyph = "refresh",
-                tooltip = noctalia.tr("panel.motionbgs.retry_helper"),
-                variant = "ghost",
-                controlSize = "sm",
-                enabled = motionEnabled and not busy,
-                onClick = function()
-                    send({ kind = "motionbgs_probe" })
-                end,
-            }),
-        }),
-        ui.label({
-            text = noctalia.tr("panel.motionbgs.fallback"),
-            fontSize = 9,
-            color = "tertiary",
-            maxLines = 5,
-        }),
+        ui.row({ gap = 6, align = "center" }, helperStatusChildren),
     }
+
+    if tostring(motionStatus.active_action or "") == "download" or queuedDownloadCount > 0 then
+        table.insert(children, ui.row({ gap = 6, align = "center" }, {
+            ui.glyph({ name = "download", color = "primary" }),
+            ui.label({
+                text = noctalia.tr("panel.downloads.queue_summary", {
+                    active = if tostring(motionStatus.active_action or "") == "download" then "1" else "0",
+                    queued = tostring(queuedDownloadCount),
+                }),
+                fontSize = 9,
+                color = "on_surface_variant",
+                flexGrow = 1,
+                maxLines = 1,
+            }),
+        }))
+    end
 
     local providerError = tostring(motionStatus.last_error or "")
     if providerError ~= "" then
@@ -3574,53 +3870,6 @@ local function motionBgsSection()
                 fontSize = 10,
                 color = "error",
                 maxLines = 5,
-            })
-        )
-    end
-
-    if tostring(selected.slug or "") ~= "" then
-        local downloads = type(selected.downloads) == "table" and selected.downloads or {}
-        local detail = tostring(selected.duration or "")
-        if detail == "" then
-            detail = tostring(selected.source_url or "")
-        end
-        table.insert(
-            children,
-            ui.column({ gap = 5, padding = 9, radius = 9, fill = "primary/0.08", align = "stretch" }, {
-                ui.row({ justify = "center" }, {
-                    preview.node("motionbgs", selected, 320, 180, "movie"),
-                }),
-                ui.label({
-                    text = tostring(selected.title or selected.slug),
-                    fontSize = 12,
-                    fontWeight = "bold",
-                    maxLines = 2,
-                }),
-                ui.label({ text = detail, fontSize = 9, color = "on_surface_variant", maxLines = 2 }),
-                ui.row({ gap = 6, align = "center" }, {
-                    ui.button({
-                        text = noctalia.tr("panel.motionbgs.download_hd"),
-                        glyph = "download",
-                        variant = if quality == "hd" then "primary" else "ghost",
-                        controlSize = "sm",
-                        flexGrow = 1,
-                        enabled = integrationReady and not busy and type(downloads.hd) == "table",
-                        onClick = function()
-                            send({ kind = "motionbgs_download", slug = tostring(selected.slug), quality = "hd" })
-                        end,
-                    }),
-                    ui.button({
-                        text = noctalia.tr("panel.motionbgs.download_4k"),
-                        glyph = "download",
-                        variant = if quality == "4k" then "primary" else "ghost",
-                        controlSize = "sm",
-                        flexGrow = 1,
-                        enabled = integrationReady and not busy and type(downloads["4k"]) == "table",
-                        onClick = function()
-                            send({ kind = "motionbgs_download", slug = tostring(selected.slug), quality = "4k" })
-                        end,
-                    }),
-                }),
             })
         )
     end
@@ -3637,35 +3886,15 @@ local function motionBgsSection()
     else
         local resultMode = tostring(results.mode or "search")
         local currentPage = math.max(1, math.floor(tonumber(meta.current_page or results.page) or 1))
-        local totalHint = math.max(0, math.floor(tonumber(meta.total_hint) or 0))
         table.insert(
             children,
             ui.label({
-                text = if resultMode == "search"
-                    then noctalia.tr("panel.motionbgs.search_meta", { count = tostring(#items) })
-                    else noctalia.tr("panel.motionbgs.browse_meta", {
-                        page = tostring(currentPage),
-                        count = tostring(#items),
-                        total = if totalHint > 0 then tostring(totalHint) .. "+" else "?",
-                    }),
+                text = noctalia.tr("panel.motionbgs.results_count", { count = tostring(itemCount) }),
                 fontSize = 9,
                 color = "on_surface_variant",
-                maxLines = 3,
+                maxLines = 1,
             })
         )
-        if resultMode == "search" or resultMode == "hd" then
-            table.insert(
-                children,
-                ui.label({
-                    text = if resultMode == "search"
-                        then noctalia.tr("panel.motionbgs.search_unpaged")
-                        else noctalia.tr("panel.motionbgs.hd_unpaged"),
-                    fontSize = 9,
-                    color = "tertiary",
-                    maxLines = 4,
-                })
-            )
-        end
         if meta.pageable == true then
             table.insert(
                 children,
@@ -3698,11 +3927,40 @@ local function motionBgsSection()
         panelUi.appendExplicitGrid(
             children,
             items,
-            motionBgsVisibleResults,
+            #items,
             BROWSER_GRID_COLUMNS,
             function(item)
                 local slug = tostring(item.slug or "")
-                local isSelected = slug ~= "" and slug == tostring(selected.slug or "")
+                local function downloadButton(requestedQuality)
+                    local stateKey = slug:lower() .. ":" .. requestedQuality
+                    local installed = installedItems[stateKey] ~= nil or stateKey == recentDownloadKey
+                    local active = tostring(motionStatus.active_action or "") == "download"
+                        and tostring(motionStatus.active_slug or ""):lower() == slug:lower()
+                        and tostring(motionStatus.active_quality or ""):lower() == requestedQuality
+                    local queued = queuedDownloads[stateKey] == true
+                    local downloadState = if installed
+                        then "installed"
+                        elseif active then "active"
+                        elseif queued then "queued"
+                        else "ready"
+                    return ui.button({
+                        text = panelUi.downloadLabel(downloadState, requestedQuality),
+                        glyph = if installed then "check" elseif active or queued then "loader" else "download",
+                        tooltip = panelUi.downloadLabel(downloadState, requestedQuality),
+                        variant = if requestedQuality == quality and downloadState == "ready" then "primary" else "ghost",
+                        controlSize = "sm",
+                        flexGrow = 1,
+                        enabled = integrationReady
+                            and slug ~= ""
+                            and queueDepth < queueLimit
+                            and not installed
+                            and not active
+                            and not queued,
+                        onClick = function()
+                            send({ kind = "motionbgs_download", slug = slug, quality = requestedQuality })
+                        end,
+                    })
+                end
                 return ui.column({
                     key = "motionbgs-result-" .. slug,
                     width = 232,
@@ -3710,8 +3968,8 @@ local function motionBgsSection()
                     padding = 8,
                     radius = 10,
                     fill = "surface_variant/0.25",
-                    border = if isSelected then "primary/0.65" else "outline/0.25",
-                    borderWidth = if isSelected then 2 else 1,
+                    border = "outline/0.25",
+                    borderWidth = 1,
                     align = "stretch",
                 }, {
                     preview.node("motionbgs", item, 216, 122, "movie"),
@@ -3723,47 +3981,26 @@ local function motionBgsSection()
                         maxLines = 2,
                     }),
                     ui.label({
-                        text = tostring(item.quality or "") .. " · " .. tostring(item.source_url or ""),
+                        text = panelUi.valueOr(item.quality, "common.unknown"),
                         fontSize = 9,
                         color = "on_surface_variant",
                         maxWidth = 216,
-                        maxLines = 2,
+                        maxLines = 1,
                     }),
-                    ui.row({ gap = 4, align = "center", justify = "end" }, {
-                        ui.button({
-                            glyph = "info-circle",
-                            tooltip = noctalia.tr("panel.motionbgs.details"),
-                            variant = "ghost",
-                            controlSize = "sm",
-                            enabled = integrationReady and not busy and slug ~= "",
-                            onClick = function()
-                                send({ kind = "motionbgs_details", slug = slug })
-                            end,
-                        }),
-                        ui.button({
-                            glyph = "download",
-                            tooltip = noctalia.tr("panel.motionbgs.download_default", { quality = quality:upper() }),
-                            variant = "primary",
-                            controlSize = "sm",
-                            enabled = integrationReady and not busy and slug ~= "",
-                            onClick = function()
-                                send({ kind = "motionbgs_download", slug = slug, quality = quality })
-                            end,
-                        }),
+                    ui.column({ gap = 3, align = "stretch" }, {
+                        downloadButton("hd"),
+                        downloadButton("4k"),
                     }),
                 })
             end
         )
-        panelUi.appendVisibilityControls(
+        panelUi.appendPageControls(
             children,
-            #items,
-            motionBgsVisibleResults,
+            itemCount,
+            localPage,
             PROVIDER_RESULT_CHUNK,
             function(value)
-                if value < motionBgsVisibleResults then
-                    preview.cancel()
-                end
-                motionBgsVisibleResults = value
+                providerResultPages.motionbgs = value
             end
         )
     end
@@ -4417,14 +4654,11 @@ function panelUi.playlistEntryVisualState(entry, output)
     if kind == "video" then
         sourceAvailable = source:sub(1, 1) == "/" and noctalia.fileExists(source)
     elseif kind == "workshop" then
-        local currentLibrary = type(status) == "table" and type(status.library) == "table" and status.library or {}
-        for _, workshop in ipairs(type(currentLibrary.workshops) == "table" and currentLibrary.workshops or {}) do
-            if tostring(workshop.id or "") == source then
-                sourceAvailable = true
-                if previewPath == "" then
-                    previewPath = tostring(workshop.preview or "")
-                end
-                break
+        local workshop = panelUi.workshopIndex()[source]
+        if type(workshop) == "table" then
+            sourceAvailable = true
+            if previewPath == "" then
+                previewPath = tostring(workshop.preview or "")
             end
         end
     end
@@ -4620,6 +4854,40 @@ local function pairingKindLabel(kind)
     return noctalia.tr("panel.playlists.entry.media_still")
 end
 
+function panelUi.pairingStillChoices(page, pageSize)
+    local currentLibrary = type(status) == "table" and type(status.library) == "table" and status.library or {}
+    local choiceCache = panelUi.pairingStillChoiceCache
+    if type(choiceCache) ~= "table" or choiceCache.source ~= currentLibrary then
+        local eligible = {}
+        for _, entry in ipairs(type(currentLibrary.stills) == "table" and currentLibrary.stills or {}) do
+            if type(entry) == "table" then
+                local provider = tostring(entry.provider or "")
+                local ownership = tostring(entry.ownership or "")
+                local path = tostring(entry.path or "")
+                if
+                    path:sub(1, 1) == "/"
+                    and path:find("[%c]") == nil
+                    and (ownership == "user" or provider == "local" or provider == "Wallhaven")
+                then
+                    table.insert(eligible, entry)
+                end
+            end
+        end
+        choiceCache = { source = currentLibrary, items = eligible }
+        panelUi.pairingStillChoiceCache = choiceCache
+    end
+    local eligible = choiceCache.items
+    local size = math.max(1, math.floor(tonumber(pageSize) or 6))
+    local pages = math.max(1, math.ceil(#eligible / size))
+    local current = math.min(pages, math.max(1, math.floor(tonumber(page) or 1)))
+    local first = (current - 1) * size + 1
+    local choices = {}
+    for index = first, math.min(#eligible, first + size - 1) do
+        table.insert(choices, eligible[index])
+    end
+    return choices, #eligible, current
+end
+
 local function pairingEditor(kind)
     local dynamic = kind ~= "static"
     local revision = tostring(pairingEditorRevision)
@@ -4635,6 +4903,7 @@ local function pairingEditor(kind)
         label = basename(source)
     end
     local labelValid = label ~= "" and label:find("[%c]") == nil
+    local automaticStillReady = dynamic and automaticRepresentativePath(kind, source) ~= ""
 
     local themeModeValues = { "inherit", "auto", "dark", "light" }
     local themeModeLabels = {
@@ -4720,20 +4989,145 @@ local function pairingEditor(kind)
             selectedIndex = if entryStillModeDraft == "selected" then 1 else 0,
             onChange = function(index)
                 entryStillModeDraft = if math.floor(tonumber(index) or 0) == 1 then "selected" else "automatic"
-                requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
+                local requestedPalette = requestPairingAdaptivePreview(
+                    bundleFromDraft(editingPairingId),
+                    editingPairingId
+                )
+                if entryStillModeDraft == "automatic" and not requestedPalette then
+                    requestAutomaticStillPreparation(kind, source)
+                end
                 render()
             end,
         }))
         if entryStillModeDraft == "selected" then
-            table.insert(children, ui.input({
-                key = "pairing-still-path-" .. revision,
-                value = entryStillPathDraft,
-                placeholder = noctalia.tr("panel.playlists.entry.still_path_placeholder"),
-                onChange = function(value)
-                    entryStillPathDraft = tostring(value or "")
-                    requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
-                    render()
-                end,
+            local stillChoices, stillChoiceCount, stillChoicePage = panelUi.pairingStillChoices(
+                pairingStillPickerPage,
+                6
+            )
+            table.insert(children, ui.label({
+                text = noctalia.tr("panel.pairings.still_library"),
+                fontSize = 10,
+                fontWeight = "bold",
+            }))
+            if #stillChoices == 0 then
+                table.insert(children, ui.label({
+                    text = noctalia.tr("panel.pairings.still_library_empty"),
+                    fontSize = 9,
+                    color = "on_surface_variant",
+                    maxLines = 2,
+                }))
+            else
+                panelUi.appendExplicitGrid(children, stillChoices, #stillChoices, 3, function(choice)
+                    local choicePath = tostring(choice.path or "")
+                    local selectedChoice = choicePath == stillPath
+                    return ui.column({
+                        key = "pairing-still-choice-" .. tostring(choice.id or choicePath),
+                        width = 178,
+                        gap = 4,
+                        padding = 6,
+                        radius = 8,
+                        fill = "surface_variant/0.24",
+                        border = if selectedChoice then "primary/0.7" else "outline/0.25",
+                        borderWidth = if selectedChoice then 2 else 1,
+                        align = "stretch",
+                    }, {
+                        ui.image({
+                            width = 164,
+                            height = 92,
+                            path = choicePath,
+                            fit = "cover",
+                            radius = 7,
+                        }),
+                        ui.label({
+                            text = tostring(choice.name or basename(choicePath)),
+                            fontSize = 9,
+                            fontWeight = "bold",
+                            maxWidth = 164,
+                            maxLines = 1,
+                        }),
+                        ui.button({
+                            text = if selectedChoice
+                                then noctalia.tr("panel.pairings.still_selected")
+                                else noctalia.tr("panel.pairings.still_use"),
+                            glyph = if selectedChoice then "check" else "photo",
+                            variant = if selectedChoice then "primary" else "ghost",
+                            controlSize = "sm",
+                            enabled = not selectedChoice,
+                            onClick = function()
+                                entryStillPathDraft = choicePath
+                                pairingManualStillOpen = false
+                                requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
+                                render()
+                            end,
+                        }),
+                    })
+                end)
+                panelUi.appendPageControls(children, stillChoiceCount, stillChoicePage, 6, function(value)
+                    pairingStillPickerPage = value
+                end)
+            end
+            table.insert(children, ui.row({ gap = 6, align = "center" }, {
+                ui.label({
+                    text = if stillPath == ""
+                        then noctalia.tr("panel.pairings.still_none")
+                        else noctalia.tr("panel.pairings.still_current", { name = basename(stillPath) }),
+                    fontSize = 9,
+                    color = "on_surface_variant",
+                    flexGrow = 1,
+                    maxLines = 1,
+                }),
+                ui.button({
+                    text = if pairingManualStillOpen
+                        then noctalia.tr("panel.pairings.still_manual_hide")
+                        else noctalia.tr("panel.pairings.still_manual_show"),
+                    glyph = "terminal-2",
+                    variant = "ghost",
+                    controlSize = "sm",
+                    onClick = function()
+                        pairingManualStillOpen = not pairingManualStillOpen
+                        render()
+                    end,
+                }),
+            }))
+            if pairingManualStillOpen then
+                table.insert(children, ui.row({ gap = 6, align = "center" }, {
+                    ui.input({
+                        key = "pairing-still-path-" .. revision,
+                        value = entryStillPathDraft,
+                        placeholder = noctalia.tr("panel.playlists.entry.still_path_placeholder"),
+                        flexGrow = 1,
+                        onChange = function(value)
+                            entryStillPathDraft = tostring(value or "")
+                        end,
+                        onSubmit = function(value)
+                            entryStillPathDraft = tostring(value or "")
+                            requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
+                            render()
+                        end,
+                    }),
+                    ui.button({
+                        text = noctalia.tr("panel.pairings.still_manual_use"),
+                        glyph = "check",
+                        variant = "ghost",
+                        controlSize = "sm",
+                        onClick = function()
+                            requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
+                            render()
+                        end,
+                    }),
+                }))
+            end
+        else
+            local captures = type(status) == "table" and type(status.captures) == "table" and status.captures or {}
+            local preparing = type(captures["pairing-preview"]) == "table"
+            table.insert(children, ui.label({
+                text = if preparing
+                    then noctalia.tr("panel.pairings.still_preparing")
+                    elseif automaticStillReady then noctalia.tr("panel.pairings.still_automatic_ready")
+                    else noctalia.tr("panel.pairings.still_automatic_pending"),
+                fontSize = 9,
+                color = if preparing then "primary" else "on_surface_variant",
+                maxLines = 2,
             }))
         end
     end
@@ -5816,7 +6210,7 @@ local function playlistsSection(outputOverride)
                     selectedPlaylistId = ids[math.floor(tonumber(index) or 0) + 1] or ""
                     playlistNameDraft = ""
                     playlistIntervalDraft = ""
-                    playlistVisibleEntries = PLAYLIST_ENTRY_CHUNK
+                    playlistEntryPage = 1
                     resetEntryDraft()
                     scheduleEditorOpen = false
                     resetScheduleDraft(selectedPlaylistId)
@@ -6136,7 +6530,11 @@ local function playlistsSection(outputOverride)
             })
         )
     else
-        for index = 1, math.min(#entries, playlistVisibleEntries) do
+        local playlistPageCount = math.max(1, math.ceil(#entries / PLAYLIST_ENTRY_CHUNK))
+        playlistEntryPage = math.max(1, math.min(playlistPageCount, math.floor(playlistEntryPage)))
+        local playlistFirstEntry = (playlistEntryPage - 1) * PLAYLIST_ENTRY_CHUNK + 1
+        local playlistLastEntry = math.min(#entries, playlistFirstEntry + PLAYLIST_ENTRY_CHUNK - 1)
+        for index = playlistFirstEntry, playlistLastEntry do
             local entry = entries[index]
             local currentEntry = entry
             local entryId = tostring(entry.id or "")
@@ -6248,13 +6646,13 @@ local function playlistsSection(outputOverride)
                 align = "center",
             }, cardChildren))
         end
-        panelUi.appendVisibilityControls(
+        panelUi.appendPageControls(
             children,
             #entries,
-            playlistVisibleEntries,
+            playlistEntryPage,
             PLAYLIST_ENTRY_CHUNK,
             function(value)
-                playlistVisibleEntries = value
+                playlistEntryPage = value
             end
         )
     end
@@ -6527,7 +6925,7 @@ function panelPages.selectPlaylistPage(playlistId)
     selectedPlaylistId = playlistId
     playlistNameDraft = ""
     playlistIntervalDraft = ""
-    playlistVisibleEntries = PLAYLIST_ENTRY_CHUNK
+    playlistEntryPage = 1
     resetEntryDraft()
     closePairingEditor()
     scheduleEditorOpen = false
@@ -6576,8 +6974,8 @@ function panelPages.navigationButton(page, labelKey, glyph)
 end
 
 function panelPages.insetNavigationButton(key, text, selected, onClick, depth)
-    local inset = if tonumber(depth) == 2 then 20 else 10
-    local buttonWidth = if tonumber(depth) == 2 then 114 else 124
+    local inset = if tonumber(depth) == 2 then 36 else 24
+    local buttonWidth = if tonumber(depth) == 2 then 98 else 110
     return ui.row({ key = "nav-inset-row-" .. key, gap = 4, align = "center" }, {
         ui.box({ width = inset, height = 1, fill = "outline/0.35" }),
         ui.button({
@@ -7041,7 +7439,7 @@ function panelPages.engineDraft(output)
     local workshop = type(engines.workshop) == "table" and engines.workshop or {}
     local flags = type(workshop.flags) == "table" and workshop.flags or {}
     cached = {
-        layer = tostring(engines.layer or configuration.internal_renderer_layer or "bottom"),
+        layer = tostring(engines.layer or "bottom"),
         video = {
             enabled = video.enabled ~= false,
             mute = if video.mute ~= nil then video.mute == true else configuration.mpv_mute ~= false,
@@ -7049,7 +7447,7 @@ function panelPages.engineDraft(output)
                 then video.hardware_decode == true
                 else configuration.mpv_hardware_decode ~= false,
             auto_pause = if video.auto_pause ~= nil then video.auto_pause == true else configuration.mpv_auto_pause ~= false,
-            auto_pause_mode = tostring(video.auto_pause_mode or configuration.mpv_auto_pause_mode or "FULL"),
+            auto_pause_mode = tostring(video.auto_pause_mode or "FULL"),
             options = tostring(video.options or configuration.mpv_options or ""),
         },
         workshop = {
@@ -7454,40 +7852,30 @@ end
 
 function update()
     preview.refreshClock()
-    if isOpen and dragTokensDirty then
-        local completed = stepDragTokenReconciliation()
-        if completed then
-            render()
-        end
-        preview.settle()
-        if not completed then
-            preview.wake()
-        end
-        return
+    if isOpen and preview.retryDue() then
+        preview.retry()
     end
     if preview.takeRender() then
         panelPages.renderNow()
-        preview.settle()
-        return
     end
-    local stepped, redraw = preview.step()
-    if stepped then
-        if redraw then
-            render()
-        end
-        preview.settle()
-        return
-    end
-    if isOpen and preview.retryDue() then
-        render()
-    end
-    preview.settle()
+    preview.settle(isOpen and dragTokensDirty)
 end
 
 function onFrameTick(_deltaMs)
-    -- Frame callbacks are coalesced by Noctalia. Each invocation still performs
-    -- only one bounded scheduler step through update().
-    update()
+    -- Frame callbacks may advance one bounded state-machine step. Full UI tree
+    -- construction belongs exclusively to update(), whose requests coalesce.
+    preview.refreshClock()
+    if isOpen and dragTokensDirty then
+        if stepDragTokenReconciliation() then
+            render()
+        end
+    else
+        local _, redraw = preview.step()
+        if redraw then
+            render()
+        end
+    end
+    preview.settle(isOpen and dragTokensDirty)
 end
 
 function onIpc(event, payload)
@@ -7575,9 +7963,11 @@ reloadSharedState = function()
     rendererState = noctalia.state.get(RENDERER_STATUS_KEY)
     motionBgsState = noctalia.state.get(MOTIONBGS_STATUS_KEY)
     motionBgsResultsState = noctalia.state.get(MOTIONBGS_RESULTS_KEY)
+    providerResultEpochs.motionbgs += 1
     palettesState = noctalia.state.get(PALETTES_STATUS_KEY)
     wallhavenState = noctalia.state.get(WALLHAVEN_STATUS_KEY)
     wallhavenResultsState = noctalia.state.get(WALLHAVEN_RESULTS_KEY)
+    providerResultEpochs.wallhaven += 1
     status = composeStatus()
     resolveSelectedPlaylist(if selectedScreen ~= "" then selectedScreen else nil)
     markDragTokensDirty()
@@ -7625,10 +8015,16 @@ noctalia.state.watch(RENDERER_STATUS_KEY, function(nextState)
 end)
 noctalia.state.watch(MOTIONBGS_STATUS_KEY, function(nextState)
     motionBgsState = nextState
+    if type(nextState) ~= "table" or nextState.available ~= true then
+        preview.cancel()
+    end
     refreshPanelState()
 end)
 noctalia.state.watch(MOTIONBGS_RESULTS_KEY, function(nextState)
+    preview.cancel()
     motionBgsResultsState = nextState
+    providerResultEpochs.motionbgs += 1
+    providerResultPages.motionbgs = 1
     refreshPanelState()
 end)
 noctalia.state.watch(PALETTES_STATUS_KEY, function(nextState)
@@ -7637,10 +8033,16 @@ noctalia.state.watch(PALETTES_STATUS_KEY, function(nextState)
 end)
 noctalia.state.watch(WALLHAVEN_STATUS_KEY, function(nextState)
     wallhavenState = nextState
+    if type(nextState) ~= "table" or nextState.available ~= true then
+        preview.cancel()
+    end
     refreshPanelState()
 end)
 noctalia.state.watch(WALLHAVEN_RESULTS_KEY, function(nextState)
+    preview.cancel()
     wallhavenResultsState = nextState
+    providerResultEpochs.wallhaven += 1
+    providerResultPages.wallhaven = 1
     refreshPanelState()
 end)
 reloadSharedState()

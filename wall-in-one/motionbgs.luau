@@ -63,7 +63,11 @@ local status = {
     available = false,
     busy = false,
     active_action = "",
+    active_slug = "",
+    active_quality = "",
     queue_depth = 0,
+    queue_limit = MAX_QUEUE,
+    queued_downloads = {},
     last_nonce = 0,
     last_completed_nonce = 0,
     last_action = "",
@@ -380,12 +384,38 @@ local function providerAvailable()
         and probeBusy ~= true
 end
 
+local function queuedDownloadStatus()
+    local queued = {}
+    for _, operation in ipairs(pendingOperations) do
+        if #queued >= MAX_QUEUE then
+            break
+        end
+        if type(operation) == "table" and operation.kind == "download" then
+            local slug = validSlug(operation.slug)
+            local quality = tostring(operation.quality or ""):lower()
+            if slug ~= nil and (quality == "hd" or quality == "4k") then
+                table.insert(queued, {
+                    slug = slug,
+                    quality = quality,
+                })
+            end
+        end
+    end
+    return queued
+end
+
 local function publishStatus()
+    local activeDownload = not probeBusy
+        and type(activeOperation) == "table"
+        and activeOperation.kind == "download"
     sequence += 1
     status.sequence = sequence
     status.busy = probeBusy or type(activeOperation) == "table"
     status.active_action = if probeBusy then "probe" elseif type(activeOperation) == "table" then tostring(activeOperation.kind or "") else ""
+    status.active_slug = if activeDownload then tostring(activeOperation.slug or "") else ""
+    status.active_quality = if activeDownload then tostring(activeOperation.quality or "") else ""
     status.queue_depth = #pendingOperations
+    status.queued_downloads = queuedDownloadStatus()
     status.download_directory = configuredDownloadDirectory()
     status.available = providerAvailable()
     status.updated_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
@@ -1306,6 +1336,46 @@ local function enqueue(operation)
     return true, nil
 end
 
+local function downloadIsActiveOrPending(slug, quality)
+    if
+        type(activeOperation) == "table"
+        and activeOperation.kind == "download"
+        and activeOperation.cancelled ~= true
+        and activeOperation.slug == slug
+        and activeOperation.quality == quality
+    then
+        return true
+    end
+    for _, operation in ipairs(pendingOperations) do
+        if
+            type(operation) == "table"
+            and operation.kind == "download"
+            and operation.cancelled ~= true
+            and operation.slug == slug
+            and operation.quality == quality
+        then
+            return true
+        end
+    end
+    return false
+end
+
+local function downloadIsInstalled(slug, quality)
+    local download = status.last_download
+    if type(download) ~= "table"
+        or tostring(download.slug or ""):lower() ~= slug
+        or tostring(download.quality or ""):lower() ~= quality
+    then
+        return false
+    end
+    local path = tostring(download.path or "")
+    local sidecar = tostring(download.sidecar or "")
+    return validAbsolutePath(path)
+        and sidecar == path .. ".motionbgs.json"
+        and noctalia.fileExists(path)
+        and noctalia.fileExists(sidecar)
+end
+
 local function queueOrFail(operation)
     local queued, reason = enqueue(operation)
     if not queued then
@@ -1362,6 +1432,20 @@ local function handleCommand(command)
         if quality ~= "hd" and quality ~= "4k" then
             failNonce(nonce, action, "invalid-quality", "Quality must be hd or 4k")
             return
+        end
+        if action == "download" then
+            if downloadIsInstalled(slug, quality) then
+                completeNonce(nonce, action)
+                return
+            elseif downloadIsActiveOrPending(slug, quality) then
+                failNonce(
+                    nonce,
+                    action,
+                    "duplicate",
+                    "That MotionBGS wallpaper and quality combination is already active or queued"
+                )
+                return
+            end
         end
         queueOrFail({
             kind = action,

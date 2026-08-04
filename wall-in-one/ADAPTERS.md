@@ -1,6 +1,6 @@
 # Wall-in-One provider and renderer architecture
 
-Wall-in-One `0.7.0` has four integration boundaries: Noctalia's public wallpaper
+Wall-in-One `0.7.1` has four integration boundaries: Noctalia's public wallpaper
 and theme APIs, provider services shipped by Wall-in-One, the separately
 installed MotionBGS helper program, and dynamic wallpaper processes started and
 supervised by Wall-in-One. It does not discover, open, signal, or exchange state
@@ -10,8 +10,8 @@ one-shot provider adapter, not a renderer or long-lived plugin service.
 ## Routed panel
 
 Noctalia plugins cannot create independent application windows. Wall-in-One
-therefore uses one normal panel configured as a full-size floating view
-(`width = "fill"`, `height = "fill"`). Its hierarchy is local Luau route state,
+therefore uses one normal panel configured as a roomy floating view
+(`width = 1160`, `height = 780`). Its hierarchy is local Luau route state,
 not a collection of simultaneously rendered sections:
 
 - **Home** — readiness, setup, and concise status, followed by one inset route
@@ -39,6 +39,20 @@ disabled. Applying or adding it to a playlist never requires a separate create
 step. Customization is optional. Apply, playlist add, drag/drop, and customize
 all pass through the same validated bundle boundary.
 
+The customization editor replaces its ordinary raw still-path field with a
+fixed six-item page over indexed user-owned and Wallhaven stills. Only the
+selected page is materialized; an explicit manual-path escape hatch remains for
+media outside the index. Opening an automatic video/Workshop customization
+queues representative preparation through the coordinator rather than doing
+capture or palette extraction in a panel callback.
+
+Shop routes render fixed 12-card local pages even when a provider returns 36–48
+items. Preview URL/path validation is memoized for the current result generation
+and a one-item-at-a-time frame scheduler populates the private cache. Frame
+callbacks never construct a complete panel tree. Result cards own their direct
+download/quality controls and expose installed, queued, and active state; no
+duplicated selected-item hero is rendered above the grid.
+
 ## Coordinator and persisted state
 
 The coordinator publishes a small protocol-4 lifecycle object on
@@ -55,6 +69,12 @@ The panel accepts a domain snapshot only when its service instance and revision
 match the lifecycle object. Commands carry monotonically increasing nonces and
 are never replayed automatically. The renderer, palette, Wallhaven, and
 MotionBGS bridge use their own bounded versioned state keys.
+
+The lifecycle snapshot's bounded `captures` map is also presentation state for
+the item editor. The dedicated `pairing-preview` slot reports preparation in
+progress. A successful editor-requested capture updates only the current
+medium/source pair registry and library scan; it never writes the applied
+per-output pair, changes Noctalia's wallpaper/palette, or starts a renderer.
 
 Schema 5 retains the field name `pairings`, but this is item-profile and snapshot
 plumbing rather than a catalog users must populate. Library items synthesize a
@@ -82,8 +102,9 @@ row wins.
 All of these controls share the display's combined page beneath **Home**.
 Schema 1–4 outputs receive the documented schema-5 engine defaults during
 migration; afterward the settings live only with that display. This avoids
-reading removed, undeclared manifest keys, which current Noctalia intentionally
-rejects.
+reading retired global engine values. Four invisible manifest declarations
+accept old host-owned overrides because API 17 has no configuration-deletion
+binding; no runtime reads those inert compatibility fields.
 
 ## Per-display engine configuration
 
@@ -221,6 +242,11 @@ JPG/PNG type, and atomically install both image and provenance without
 overwriting an existing pair. The optional API key is supplied only through a
 private header file. Public SFW browsing works without it.
 
+Status includes the current download's `active_id`. The panel intersects that
+identifier with managed-library `provider_id` records, so a card moves from
+available to downloading to already-on-disk and cannot enqueue an installed
+item again.
+
 ## MotionBGS process boundary
 
 MotionBGS has no stable public API. Version 0.7 therefore removes its network,
@@ -237,6 +263,12 @@ when Noctalia finds it on `PATH`, or a user-selected absolute executable path
 from the advanced `motionbgs_binary_path` setting. This prevents the setting
 from becoming an arbitrary shell-command surface. The program may later move
 to a dedicated repository without changing the process interface.
+
+Bridge status publishes `active_slug`, `active_quality`, and a queue-bounded
+`queued_downloads` list. Exact slug/quality duplicates are rejected while
+active or pending; unrelated qualities and items retain normal queue behavior.
+The UI combines these fields with managed-library sidecars. The RPC is
+one-shot, not streaming, so byte-level progress is intentionally unavailable.
 
 The bundled `scripts/motionbgs-provider` launcher is a protocol and resource
 gate, not a second parser. It resolves and verifies the executable, removes

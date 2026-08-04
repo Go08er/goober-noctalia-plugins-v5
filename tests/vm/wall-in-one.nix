@@ -650,8 +650,20 @@ let
         source=${fixtureMotionBgsThumbnail}
         ;;
       *)
-        printf 'WIO-THUMB1\terror\tfixture-url\t0\tunexpected provider thumbnail URL\n'
-        exit 64
+        if [[ $provider == motionbgs \
+          && $url =~ ^https://motionbgs\.com/i/c/364x205/media/([0-9]+)/nature-([0-9]+)\.3840x2160\.jpg$ ]]; then
+          media_id=$((10#''${BASH_REMATCH[1]}))
+          nature_id=$((10#''${BASH_REMATCH[2]}))
+          if (( nature_id >= 1 && nature_id <= 36 && media_id == 5000 + nature_id )); then
+            source=${fixtureMotionBgsThumbnail}
+          else
+            printf 'WIO-THUMB1\terror\tfixture-url\t0\tunexpected provider thumbnail URL\n'
+            exit 64
+          fi
+        else
+          printf 'WIO-THUMB1\terror\tfixture-url\t0\tunexpected provider thumbnail URL\n'
+          exit 64
+        fi
         ;;
     esac
 
@@ -1563,9 +1575,16 @@ let
             render = render,
             renderNow = panelPages.renderNow,
             onIpc = onIpc,
+            frameTick = onFrameTick,
+            sustained = false,
+            frameTicks = 0,
+            renderPasses = 0,
         }
 
         panelPages.renderNow = function()
+            if vmPreview.sustained then
+                vmPreview.renderPasses += 1
+            end
             if vmPreview.provider == "" then
                 vmPreview.renderNow()
                 return
@@ -1573,7 +1592,6 @@ let
             if not isOpen then
                 return
             end
-
             local section = if vmPreview.provider == "wallhaven"
                 then wallhavenSection()
                 else motionBgsSection()
@@ -1590,6 +1608,13 @@ let
                     gap = 10,
                 }, { section }),
             }))
+        end
+
+        onFrameTick = function(deltaMs)
+            if vmPreview.sustained then
+                vmPreview.frameTicks += 1
+            end
+            vmPreview.frameTick(deltaMs)
         end
 
         onIpc = function(event, payload)
@@ -1650,6 +1675,7 @@ let
                     meta = { current_page = 1, last_page = 1, total = #items },
                 }
                 wallhavenState = { available = true, busy = false }
+                providerResultEpochs.wallhaven += 1
                 vmPreview.provider = ""
                 status = composeStatus()
                 status.storage_valid = true
@@ -1663,6 +1689,112 @@ let
                         .. " page=" .. tostring(activePage)
                         .. " subpage=" .. tostring(activeSubpage)
                 )
+                return
+            elseif event == "vm-motion-sustained-start" then
+                preview.cancel()
+                local items = {}
+                for index = 1, 36 do
+                    local slug = "nature-" .. tostring(index)
+                    table.insert(items, {
+                        slug = slug,
+                        title = "Nature " .. tostring(index),
+                        quality = "4K",
+                        source_url = "https://motionbgs.com/" .. slug,
+                        thumbnail_url = "https://motionbgs.com/i/c/364x205/media/"
+                            .. tostring(5000 + index)
+                            .. "/"
+                            .. slug
+                            .. ".3840x2160.jpg",
+                        poster_url = "https://motionbgs.com/media/"
+                            .. tostring(5000 + index)
+                            .. "/"
+                            .. slug
+                            .. ".3840x2160.jpg",
+                        duration = "00:30",
+                        downloads = {},
+                    })
+                end
+                motionBgsResultsState = {
+                    schema = 1,
+                    kind = "search",
+                    sequence = 904,
+                    mode = "search",
+                    items = items,
+                    selected = items[1],
+                    meta = { current_page = 1, pageable = false, total_hint = #items },
+                }
+                motionBgsState = {
+                    available = true,
+                    busy = false,
+                    binary_compatible = true,
+                }
+                providerResultEpochs.motionbgs += 1
+                providerResultPages.motionbgs = 1
+                -- Exercise the production route (header, navigation, and the
+                -- fixed provider page), not the smaller screenshot wrapper.
+                vmPreview.provider = ""
+                vmPreview.sustained = true
+                vmPreview.frameTicks = 0
+                vmPreview.renderPasses = 0
+                status = composeStatus()
+                status.storage_valid = true
+                if type(status.providers) ~= "table" then
+                    status.providers = {}
+                end
+                if type(status.providers.motionbgs) ~= "table" then
+                    status.providers.motionbgs = {}
+                end
+                status.providers.motionbgs.integration_available = true
+                activePage = "shops"
+                activeSubpage = "motionbgs"
+                render()
+                local visible = panelUi.providerItems(items, providerResultPages.motionbgs, PROVIDER_RESULT_CHUNK)
+                noctalia.log(
+                    "WALL_IN_ONE_VM_MOTION_SUSTAINED_START "
+                        .. tostring(payload or "")
+                        .. " items=" .. tostring(#items)
+                        .. " visible=" .. tostring(#visible)
+                )
+                return
+            elseif event == "vm-motion-sustained-probe" then
+                local snapshot = preview.debugSnapshot("motionbgs:nature-1")
+                local source = type(motionBgsResultsState) == "table"
+                        and type(motionBgsResultsState.items) == "table"
+                        and motionBgsResultsState.items
+                    or {}
+                local visible = panelUi.providerItems(source, providerResultPages.motionbgs, PROVIDER_RESULT_CHUNK)
+                noctalia.log(
+                    "WALL_IN_ONE_VM_MOTION_SUSTAINED "
+                        .. tostring(payload or "")
+                        .. " items=" .. tostring(#source)
+                        .. " visible=" .. tostring(#visible)
+                        .. " frames=" .. tostring(vmPreview.frameTicks)
+                        .. " renders=" .. tostring(vmPreview.renderPasses)
+                        .. " initialized=" .. tostring(snapshot.initialized)
+                        .. " ready=" .. tostring(snapshot.ready)
+                        .. " initialization_phase=" .. tostring(snapshot.initialization_phase)
+                        .. " initialization_requested=" .. tostring(snapshot.initialization_requested)
+                        .. " queue=" .. tostring(snapshot.queue_depth)
+                        .. " active=" .. tostring(snapshot.active)
+                        .. " dirty=" .. tostring(snapshot.manifest_dirty)
+                        .. " render_pending=" .. tostring(snapshot.render_pending)
+                        .. " entries=" .. tostring(snapshot.entries)
+                        .. " paths=" .. tostring(snapshot.paths)
+                        .. " last_used=" .. tostring(snapshot.key_last_used)
+                        .. " interval=" .. tostring(snapshot.update_interval)
+                        .. " scope=" .. tostring(snapshot.scope)
+                        .. " sweep=" .. tostring(snapshot.sweep_index)
+                        .. "/" .. tostring(snapshot.sweep_limit)
+                        .. " drag_dirty=" .. tostring(snapshot.drag_tokens_dirty)
+                        .. " open=" .. tostring(snapshot.is_open)
+                )
+                return
+            elseif event == "vm-motion-sustained-stop" then
+                vmPreview.sustained = false
+                vmPreview.provider = ""
+                preview.cancel()
+                vmPreview.render()
+                noctalia.log("WALL_IN_ONE_VM_MOTION_SUSTAINED_STOP " .. tostring(payload or ""))
                 return
             elseif event == "vm-preview-cache-diagnostic" then
                 local snapshot = preview.debugSnapshot("wallhaven:aa0000")
@@ -1716,6 +1848,7 @@ let
                         meta = { current_page = 1, last_page = 1, total = 1 },
                     }
                     wallhavenState = { available = true, busy = false }
+                    providerResultEpochs.wallhaven += 1
                     vmPreview.provider = provider
                     status = composeStatus()
                     status.storage_valid = true
@@ -1740,6 +1873,7 @@ let
                         items = { item },
                         selected = item,
                     }
+                    providerResultEpochs.motionbgs += 1
                     vmPreview.provider = provider
                     status = composeStatus()
                     status.storage_valid = true
@@ -4118,6 +4252,181 @@ pkgs.testers.runNixOSTest (
       for provider in ("wallhaven", "motionbgs"):
           render_provider_preview(provider)
       assert len(machine.succeed("cat " + shlex.quote(thumbnail_log)).splitlines()) == 2
+
+      # Regression for the live 0.7.0 failure: a 36-result MotionBGS set must
+      # remain a fixed 12-card production route while its page-scoped thumbnail
+      # sweep advances one bounded scheduler step per frame callback. Any render
+      # reached from that scheduler remains capped at the current 12-card page.
+      machine.succeed("printf '%s\\n' good > " + shlex.quote(thumbnail_mode))
+      sustained_token = "motion-36"
+      assert noctalia_msg(
+          f"plugin ${pluginId}:hub all vm-motion-sustained-start {sustained_token}"
+      ).strip() == "ok: dispatched 1"
+      wait_log(
+          f"WALL_IN_ONE_VM_MOTION_SUSTAINED_START {sustained_token} "
+          "items=36 visible=12"
+      )
+      nature_entries = [
+          (
+              f"motionbgs:nature-{index}",
+              "https://motionbgs.com/i/c/364x205/media/"
+              f"{5000 + index}/nature-{index}.3840x2160.jpg",
+          )
+          for index in range(1, 13)
+      ]
+      nature_keys = [key for key, _url in nature_entries]
+      nature_predicate = (
+          ".schema == 1 and (["
+          + ",".join(
+              f'(.entries[{json.dumps(key)}].provider == "motionbgs" '
+              f'and .entries[{json.dumps(key)}].url == {json.dumps(url)} '
+              f'and .entries[{json.dumps(key)}].bytes > 0 '
+              f'and (.entries[{json.dumps(key)}].filename | type) == "string")'
+              for key, url in nature_entries
+          )
+          + "] | all)"
+      )
+      try:
+          machine.wait_until_succeeds(
+              "${lib.getExe pkgs.jq} -e "
+              + shlex.quote(nature_predicate)
+              + " "
+              + shlex.quote(preview_manifest),
+              timeout=45,
+          )
+      except Exception as sustained_error:
+          timeout_token = "motion-36-timeout"
+          diagnostic_ipc = machine.execute(
+              noctalia_command(
+                  f"plugin ${pluginId}:hub all vm-motion-sustained-probe {timeout_token}"
+              )
+          )
+          machine.sleep(1)
+          diagnostic_log = machine.execute(
+              journal
+              + " | grep -F -- "
+              + shlex.quote(f"WALL_IN_ONE_VM_MOTION_SUSTAINED {timeout_token}")
+              + " | tail -n 1"
+          )
+          sustained_diagnostic = (
+              str(diagnostic_log[1] or "").strip() or "<probe unavailable>"
+          )
+          try:
+              manifest_value = json.loads(machine.succeed("cat " + shlex.quote(preview_manifest)))
+              manifest_entries = manifest_value.get("entries", {})
+              missing_nature = [key for key in nature_keys if key not in manifest_entries]
+              manifest_diagnostic = json.dumps({
+                  "entries": len(manifest_entries),
+                  "nature": len([key for key in manifest_entries if key.startswith("motionbgs:nature-")]),
+                  "missing": missing_nature,
+              })
+          except Exception as manifest_error:
+              manifest_diagnostic = "unreadable manifest: " + repr(manifest_error)
+          thumbnail_diagnostic = machine.succeed(
+              "tail -n 80 " + shlex.quote(thumbnail_log) + " 2>/dev/null || true"
+          ).strip()
+          watchdog_diagnostic = machine.succeed(
+              journal
+              + " | grep -E -- "
+              + shlex.quote(
+                  "exceeded its CPU budget|"
+                  "plugin panel '${pluginId}:hub' disabled after repeated timeouts"
+              )
+              + " | tail -n 20 || true"
+          ).strip()
+          journal_diagnostic = machine.succeed(journal + " | tail -n 220").strip()
+          raise AssertionError(
+              "36-result MotionBGS preview sweep did not settle:\n"
+              + "IPC exit="
+              + str(diagnostic_ipc[0])
+              + " output="
+              + str(diagnostic_ipc[1] or "").strip()
+              + "\n"
+              + sustained_diagnostic
+              + "\nmanifest:\n"
+              + manifest_diagnostic
+              + "\nthumbnail helper calls:\n"
+              + thumbnail_diagnostic
+              + "\nwatchdog markers:\n"
+              + (watchdog_diagnostic or "none")
+              + "\nrecent journal:\n"
+              + journal_diagnostic
+          ) from sustained_error
+
+      machine.sleep(2)
+      probe_token = "motion-36-settled"
+      assert noctalia_msg(
+          f"plugin ${pluginId}:hub all vm-motion-sustained-probe {probe_token}"
+      ).strip() == "ok: dispatched 1"
+      sustained_line = machine.wait_until_succeeds(
+          journal
+          + " | grep -F -- "
+          + shlex.quote(f"WALL_IN_ONE_VM_MOTION_SUSTAINED {probe_token}")
+          + " | tail -n 1",
+          timeout=10,
+      ).strip()
+      sustained_fields = {
+          part.split("=", 1)[0]: part.split("=", 1)[1]
+          for part in sustained_line.split()
+          if "=" in part
+      }
+      assert sustained_fields["items"] == "36", sustained_line
+      assert sustained_fields["visible"] == "12", sustained_line
+      assert int(sustained_fields["frames"]) > 0, sustained_line
+      assert int(sustained_fields["renders"]) >= 2, sustained_line
+      assert sustained_fields["initialized"] == "true", sustained_line
+      assert sustained_fields["ready"] == "true", sustained_line
+      assert sustained_fields["initialization_phase"] == "nil", sustained_line
+      assert sustained_fields["initialization_requested"] == "false", sustained_line
+      assert sustained_fields["queue"] == "0", sustained_line
+      assert sustained_fields["active"] == "0", sustained_line
+      assert sustained_fields["dirty"] == "false", sustained_line
+      assert sustained_fields["render_pending"] == "false", sustained_line
+      assert int(sustained_fields["entries"]) <= 64, sustained_line
+      assert 12 <= int(sustained_fields["paths"]) <= 64, sustained_line
+      assert int(float(sustained_fields["last_used"])) > 1, sustained_line
+      assert sustained_fields["interval"] == "5000", sustained_line
+      assert sustained_fields["sweep"] == "0/0", sustained_line
+      assert sustained_fields["drag_dirty"] == "false", sustained_line
+      assert sustained_fields["open"] == "true", sustained_line
+      assert sustained_fields["scope"].startswith("motionbgs:"), sustained_line
+      nature_calls = [
+          line.split("\t")
+          for line in machine.succeed("cat " + shlex.quote(thumbnail_log)).splitlines()
+          if "/nature-" in line
+      ]
+      assert len(nature_calls) == 12, nature_calls
+      assert {call[2] for call in nature_calls} == {
+          url for _key, url in nature_entries
+      }, nature_calls
+      settled_frames = int(sustained_fields["frames"])
+      machine.sleep(2)
+      idle_token = "motion-36-idle"
+      assert noctalia_msg(
+          f"plugin ${pluginId}:hub all vm-motion-sustained-probe {idle_token}"
+      ).strip() == "ok: dispatched 1"
+      idle_line = machine.wait_until_succeeds(
+          journal
+          + " | grep -F -- "
+          + shlex.quote(f"WALL_IN_ONE_VM_MOTION_SUSTAINED {idle_token}")
+          + " | tail -n 1",
+          timeout=10,
+      ).strip()
+      idle_fields = {
+          part.split("=", 1)[0]: part.split("=", 1)[1]
+          for part in idle_line.split()
+          if "=" in part
+      }
+      assert int(idle_fields["frames"]) - settled_frames <= 2, idle_line
+      machine.fail(f"{journal} | grep -F -- 'exceeded its CPU budget'")
+      machine.fail(
+          f"{journal} | grep -F -- \"plugin panel '${pluginId}:hub' disabled after repeated timeouts\""
+      )
+      assert noctalia_msg(
+          f"plugin ${pluginId}:hub all vm-motion-sustained-stop {sustained_token}"
+      ).strip() == "ok: dispatched 1"
+      wait_log(f"WALL_IN_ONE_VM_MOTION_SUSTAINED_STOP {sustained_token}")
+
       machine.fail(
           "find "
           + shlex.quote(preview_cache)

@@ -297,6 +297,15 @@
       "state": "State: {state} · Entry {cursor}/{count}",
       "title": "Assigned playlist"
     },
+    "downloads": {
+      "download": "Download {quality}",
+      "downloading": "{quality} downloading",
+      "downloading_plain": "Downloading",
+      "installed": "{quality} on disk",
+      "installed_plain": "Already on disk",
+      "queue_summary": "Downloads: {active} active · {queued} queued",
+      "queued": "{quality} queued"
+    },
     "library": {
       "apply": "Apply + pair",
       "add": "Add to playlist",
@@ -327,7 +336,7 @@
       "pairing_browser_description": "Browse media directly. Video and Wallpaper Engine items use their selected, cached, or project preview still.",
       "saved_pairing": "Customized",
       "steam_owned": "Managed by Steam",
-      "still_automatic": "Still: generated automatically when first needed",
+      "still_automatic": "Still: prepared automatically for palette preview",
       "still_preview": "Still: project or cached preview",
       "still_selected": "Still: selected representative image",
       "still_source": "Still: original image",
@@ -360,7 +369,7 @@
       "browse_meta": "Page {page} · {count} shown · {total} catalog entries",
       "busy": "MotionBGS is processing: {action}",
       "clear": "Clear search",
-      "description": "Search MotionBGS, page through latest, genre/tag, or 4K catalogs, inspect a result, and save a bounded HD or 4K MP4.",
+      "description": "Search MotionBGS, page through latest, genre/tag, or 4K catalogs, and save a bounded HD or 4K MP4 directly from its result card.",
       "details": "Load download details",
       "download_4k": "Download 4K",
       "download_default": "Download {quality}",
@@ -390,6 +399,10 @@
       },
       "hd_unpaged": "MotionBGS currently redirects HD page 2 into its unfiltered catalog, so Wall-in-One deliberately exposes only the trustworthy first HD page.",
       "helper_disabled": "MotionBGS browsing is disabled in plugin settings. Other Wall-in-One features and the direct site link remain available.",
+      "helper_chip_disabled": "MotionBGS disabled",
+      "helper_chip_missing": "MotionBGS helper needed",
+      "helper_chip_ready": "MotionBGS helper {version} ready",
+      "helper_chip_unavailable": "MotionBGS helper unavailable",
       "helper_missing": "MotionBGS browsing needs the separately installed wall-in-one-motionbgs helper. Set its path in plugin settings or install it on PATH; other Wall-in-One features remain available.",
       "helper_ready": "External helper {version} ready: {path}",
       "latest_note": "Pageable newest-wallpapers catalog",
@@ -405,6 +418,7 @@
       "quality_hd_note": "HD catalog (first page only)",
       "ready": "External public-page helper ready. Requests are serialized, cached, same-origin, and size/time limited.",
       "retry_helper": "Detect the MotionBGS helper again",
+      "results_count": "{count} results",
       "search": "Search",
       "search_meta": "{count} results in MotionBGS's single search response",
       "search_placeholder": "Search video wallpapers",
@@ -470,7 +484,19 @@
       "palette_preview_loading": "Generating this item's exact Noctalia palette…",
       "palette_preview_error": "Palette preview failed: {error}",
       "palette_preview_unavailable": "No preview colors are available for this palette.",
-      "snapshot_notice": "Playlist entries follow customized item defaults; resetting an item updates its linked entries to the current defaults."
+      "snapshot_notice": "Playlist entries follow customized item defaults; resetting an item updates its linked entries to the current defaults.",
+      "still_automatic_pending": "The representative still will be prepared by the background service when capture settings are available.",
+      "still_automatic_ready": "The automatic representative still is ready for palette preview.",
+      "still_current": "Selected: {name}",
+      "still_library": "Choose from the still-image library",
+      "still_library_empty": "No user or Wallhaven still images are indexed yet.",
+      "still_manual_hide": "Hide manual path",
+      "still_manual_show": "Manual path…",
+      "still_manual_use": "Use path",
+      "still_none": "No representative still selected",
+      "still_preparing": "Preparing the automatic still in the background…",
+      "still_selected": "Selected",
+      "still_use": "Use this still"
     },
     "playlists": {
       "apply": "Apply now",
@@ -640,7 +666,7 @@
       "category_people": "People",
     "clear": "Clear search",
     "color_any": "Any color",
-      "description": "Search Wallhaven's official API, inspect a result, and save a validated JPG or PNG into Wall-in-One's managed image library.",
+      "description": "Search Wallhaven's official API and save a validated JPG or PNG directly from its result card into Wall-in-One's managed image library.",
       "default_name": "Wallpaper",
       "details": "Load details",
       "download": "Download",
@@ -759,6 +785,10 @@
     "cycle_start_on_load": {
       "description": "Resume non-empty saved playlist runs when Wall-in-One loads. One-entry playlists apply once and park.",
       "label": "Start saved playlists on load"
+    },
+    "retired_compatibility": {
+      "description": "Hidden compatibility declaration for a retired pre-0.7 global setting; per-display engine controls are authoritative.",
+      "label": "Retired Wall-in-One setting"
     },
     "color": {
       "description": "Theme-token color for this bar placement.",
