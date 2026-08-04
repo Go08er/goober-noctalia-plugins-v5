@@ -31,7 +31,47 @@ All notable staging changes will be recorded here.
 - Remove the now-empty plugin-settings button from the details panel and point
   users to the exact per-placement editor instead.
 
-## Unreleased — Wall-in-One 0.6.0
+## Unreleased — Wall-in-One 0.7.0
+
+- Move MotionBGS HTTP, HTML parsing, metadata caching, and downloads out of
+  Noctalia's in-process Luau callbacks into the separately installed,
+  one-shot `wall-in-one-motionbgs` Python 3.11+ program. Keep
+  `motionbgs.luau` as a thin bridge with no update tick or provider parser.
+- Detect only the fixed `wall-in-one-motionbgs` command on `PATH`, with an
+  advanced absolute-path override. Probe the external program for the schema-1
+  search/details/download/clear interface, bound request files to 8 KiB and
+  response files to 128 KiB, and degrade only MotionBGS when the program is
+  missing or incompatible. Keep independent **Open MotionBGS** and **Get
+  helper** links in the panel.
+- Preserve the provider boundary's same-origin redirect validation, disabled
+  ambient curl configuration, file-size backstop, MIME/signature cross-checks,
+  bounded cache, atomic no-replace media installation, and sidecar ownership.
+  Bind every RPC to a revocable per-operation guard and end-to-end deadline,
+  and reject a final download route whose numeric media ID differs from the
+  selected detail record before installation. Reject successful responses with
+  missing or contradictory cache/source/time metadata, receipt provenance, or
+  clear acknowledgement before publishing them to the coordinator.
+  The staged helper currently lives in the repository's top-level
+  `motionbgs-helper/` directory and can move to a dedicated repository without
+  changing the plugin RPC contract.
+- Fix fresh, non-customized Library-card editing by declaring the `panelUi`
+  namespace before `openLibraryEntryPairing` closes over it. Add source-order
+  and real fresh-Workshop callback coverage for the branch that previously
+  resolved `panelUi` as a nil global.
+- Bound Wallhaven shop navigation, large-result presentation, and preview
+  scheduling so a route click does not concentrate list and thumbnail work in
+  one panel callback.
+- Page local-library and playlist-library cards in fixed 24-item views and
+  playlist navigation in fixed 16-item views. Rebuild drag/drop indexes in
+  64-record update slices, preserve the previous complete generation until an
+  atomic swap, and include connected displays that do not yet have persisted
+  output configuration.
+- Validate provider-preview manifests, prune owned files, and remove owned
+  orphans in four-entry update slices instead of one initialization callback.
+  Keep virtual-library drag tokens separate from persisted-pairing tokens so
+  paging and rescans cannot retain stale render-only payloads indefinitely.
+
+## Wall-in-One 0.6.0 - Routed hub and owned renderers
 
 - Replace the attached all-in-one scroll with a full-size floating routed panel:
   Home with one inset route per display; Library with

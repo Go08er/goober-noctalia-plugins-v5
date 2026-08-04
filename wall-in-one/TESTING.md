@@ -1,6 +1,6 @@
 # Wall-in-One test record
 
-Wall-in-One `0.6.0` is tested as one owned wallpaper stack: routed UI, provider
+Wall-in-One `0.7.0` is tested as one owned wallpaper stack: routed UI, provider
 services, persisted item-profile/playback state, and exact renderer children.
 Tests must not require another wallpaper plugin, private state, or cross-plugin
 IPC.
@@ -12,14 +12,20 @@ Run from the repository root:
 ```bash
 noctalia plugins lint wall-in-one
 python3 wall-in-one/tests/test_contract.py
+bash wall-in-one/scripts/motionbgs-provider self-test
+python3 motionbgs-helper/wall-in-one-motionbgs self-test
+python3 -m unittest discover -s motionbgs-helper/tests -p 'test_*.py' -v
 nix build -L path:.#vm-test-wall-in-one
 ```
 
-The offline contract checks manifest/state schemas, translations, shell-helper
+The offline contract checks manifest/state schemas, translations, helper
 self-tests, bounded files and provider routes, exact renderer argv/PID cleanup,
-root ownership, migration, and source-level Luau invariants. The VM compiles and
-loads all five services plus the real panel, exercises state commands against
-disposable fixtures, and rejects callback CPU-budget errors.
+root ownership, migration, and source-level Luau invariants. The standalone
+MotionBGS self-test checks local URL and parser invariants. Its unittest suite
+exercises parser, cache, protocol, and install boundaries without network
+access. The VM compiles and loads all five services, including the thin
+MotionBGS bridge, plus the real panel; it exercises state commands against
+disposable fixtures and rejects callback CPU-budget errors.
 
 ## Routed panel contract
 
@@ -50,6 +56,15 @@ still; all three get an implicit adaptive wallpaper theme policy and can be
 applied or added without first creating a profile. Optional Customize, Reset to
 defaults, and sidecar-gated managed-media deletion remain distinct compact
 actions. Reset and managed deletion require two-step destructive confirmation.
+Invoke Customize on a fresh Workshop card with no customized profile and assert
+that the synthesized automatic-still bundle opens the editor. The callback must
+not resolve a presentation namespace as a global; retain the generic
+use-before-local-namespace contract check.
+
+Navigate repeatedly into Wallhaven with a maximum-size result fixture and a
+full preview backlog. Route selection, large-list preparation, preview
+scheduling, and rendering must stay bounded, and the journal must contain no
+panel callback CPU-budget overrun or timeout-disable sequence.
 
 ## Explicit roots and storage gating
 
@@ -59,8 +74,8 @@ other, or create the selected root.
 
 - With no image root, do not scan images, create image managed children, run a
   Wallhaven download, export a still, or start automatic capture.
-- With no video root, do not scan videos, initialize MotionBGS metadata/network
-  work, create its managed child, or download video.
+- With no video root, do not scan videos, initialize the MotionBGS bridge cache,
+  launch its external program, create its managed child, or download video.
 - A missing root must not prevent the other root's independent library from
   working.
 - Home is setup-first while either root is unavailable. Provider/Steam direct
@@ -73,7 +88,9 @@ After selecting existing roots, assert these exact derived locations:
 - `<video root>/Wall-in-One/MotionBGS`.
 
 Each Library medium page must report its selected root, derived directories,
-relevant defaults, and private `pluginDataDir()` cache locations. Direct-root files are user-owned.
+relevant defaults, and private `pluginDataDir()` cache locations. MotionBGS must
+report `pluginDataDir()/motionbgs-bridge-v1/cache`, not the retired in-process
+cache location. Direct-root files are user-owned.
 Managed deletion requires a direct child, expected marker, matching adjacent
 sidecar, and a current opaque library ID. Path substitution, nested paths,
 tampered sidecars, and stale IDs fail closed.
@@ -140,34 +157,67 @@ interruption, or sidecar promotion failure leaves no managed file.
 
 ## MotionBGS provider
 
-Pin schema-1 command/ack/status/result keys; search/details/download/clear;
-80-byte query, 1–48 results, queue eight, one-second request spacing, one-MiB
-HTML, three redirects, and 16–512 MiB MP4 bounds.
+Pin the existing schema-1 command/ack/status/result keys and
+search/details/download/clear actions. The Luau service must remain a bridge:
+no `update()` callback, HTTP implementation, HTML selectors, provider cache
+parser, or download transport may return to `motionbgs.luau`. Exercise several
+large cold external parses and reject every Noctalia callback CPU-budget error;
+the work must occur in the one-shot process rather than being spread across
+service ticks.
 
-The parser must preserve one anchor per callback, switch to 16ms only while
-parser state is active, and restore 250ms on success, parse error, cancellation,
-configuration disable, launch refusal, and exit. Use the live-like listing with
-355 irrelevant anchors plus 36 cards (391 anchors total). Including EOF and
-publication, 393 callbacks take about 6.3 seconds and must remain at or below
-seven seconds; the 250ms cadence would take about 98 seconds. Repeat at least
-three large cold parses and reject any Noctalia CPU-budget error.
+Test binary discovery in both supported forms: the exact
+`wall-in-one-motionbgs` name on `PATH`, and a readable absolute
+`motionbgs_binary_path`. Reject relative paths, directories, control characters,
+arbitrary command strings, missing executables, malformed probe output,
+incompatible schema, and incomplete capabilities. Missing or incompatible
+programs must degrade only MotionBGS; local libraries, Wallhaven, palettes,
+playlists, and renderers must stay usable, and the panel must retain both the
+direct-site and **Get helper** actions.
 
-Assert listing metadata performs exactly one pass over `<link>` elements in only
-the first 16 KiB of the document, stops after 32 links, and derives the total
-hint from that same prefix. Reject a return to full-document pagination passes;
-that work previously exceeded Noctalia's 25 ms callback deadline after card
-parsing.
+Pin `WIO-MBGS-PROBE1` and `WIO-MBGS-RPC1` interface schema 1. The probe must
+advertise exactly search/details/download/clear. RPC request files are capped at
+8 KiB and response files at 128 KiB, use owned regular no-symlink paths beneath
+`pluginDataDir()/motionbgs-bridge-v1/cache/rpc`, and are removed on success,
+error, cancellation, reload, and exit. The external cache belongs beneath
+`pluginDataDir()/motionbgs-bridge-v1/cache`; neither bridge nor helper may
+restore the retired in-process cache location.
 
-Test `/search?q=night` with effective URL `/tag:night/` as accepted. Reject
-`/tag:nature/`, malformed/cross-origin destinations, and canonical tags that do
-not exactly equal the lowercased space-to-hyphen query. Restore a cached search
-only through the same route validator.
+Each request must carry the same unique cancellation-guard path passed on the
+helper command line. Remove the guard while an RPC is waiting for the lock and
+while a fake media transfer is active; both must stop without a response or
+installed pair. Exercise the 30-second non-download and 75-second download
+helper deadlines under the bridge's 40/80-second process timeouts.
 
-Fixtures also cover unpaged text search; pageable latest, genre/tag, and 4K;
-first-page-only HD; explicit empty results; changed markup; challenge pages;
-strict image origins; numeric HD/4K download IDs; `ftyp`; atomic MP4 and
-`.motionbgs.json`; cancellation; and no temporary-file leaks. Do not execute
-third-party JavaScript or automate repeated live requests.
+The download response must include `cached`, `source_url`, `fetched_at`, the
+full normalized `selected` detail object, and `download`. Reject a response that
+omits, truncates, or contradicts those fields before publishing results or
+managed-download status.
+
+Keep the launcher as a protocol/resource gate. Assert exact executable
+resolution, private transport output, sanitized Python environment, bounded
+single-line completion records, cancellation, and `ulimit -f` backstops. A
+one-shot program must exit after each probe or RPC; no helper daemon or updater
+is installed, launched, or supervised by the plugin.
+
+Run the standalone program against offline fixtures covering 80-byte queries,
+1–48 results, one-second network spacing, one-MiB HTML, bounded parser
+tags/attributes, three same-origin redirects, unpaged text search, pageable
+latest/genre/tag/4K, first-page-only HD, explicit empty results, changed markup,
+challenge pages, and exact `/search?q=night` to `/tag:night/`
+canonicalization. Reject `/tag:nature/`, malformed paths, cross-origin
+destinations, and any curl effective URL that differs from the requested hop.
+
+Transport tests must disable ambient curl configuration and preserve the strict
+origin allowlist. Cross-check HTML and MP4 MIME types with signatures, enforce
+the 16–512 MiB MP4 bound, accept only numeric HD/4K download IDs, and require
+atomic no-replace MP4 plus `.motionbgs.json` sidecar installation. Cover bounded
+cache restore/clear, lock serialization, interruption, cancellation, conflict,
+and temporary-file cleanup. Do not execute third-party JavaScript, bypass a
+challenge, or automate repeated live requests.
+
+Also pin explicit `:443` canonicalization and final download identity: a
+same-origin redirect may resolve to the selected ID's MP4, but a different ID,
+query-bearing route, or mismatched curl effective URL must fail before install.
 
 An optional live smoke test may make one ordinary search, one detail request,
 and one small download through the panel. Stop on a challenge or changed access

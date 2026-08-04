@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract gate for Wall-in-One 0.6.
+"""Offline contract gate for Wall-in-One 0.7.
 
 The test deliberately avoids a compositor and the network.  It pins the
 manifest/state protocols statically, runs each shell helper's local checks,
@@ -27,6 +27,7 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
 
 
 def text(path: str) -> str:
@@ -51,7 +52,7 @@ def test_manifest_and_translations() -> None:
     manifest = tomllib.loads(manifest_source)
     assert manifest["id"] == "goober/wall-in-one"
     assert manifest["name"] == "Wall-in-One"
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.7.0"
     assert manifest["plugin_api"] == 17
     # Dependencies are catalog metadata, not an enable-time gate. Providers
     # still fail soft if an installation is incomplete, while curl is honestly
@@ -75,6 +76,7 @@ def test_manifest_and_translations() -> None:
     required = {
         "use_wallhaven",
         "use_motionbgs",
+        "motionbgs_binary_path",
         "capture_directory",
         "video_directory",
         "auto_capture",
@@ -141,6 +143,13 @@ def test_manifest_and_translations() -> None:
         43200,
     )
     assert settings["motionbgs_quality"]["default"] == "hd"
+    assert settings["motionbgs_binary_path"]["type"] == "file"
+    assert settings["motionbgs_binary_path"]["default"] == ""
+    assert settings["motionbgs_binary_path"]["advanced"] is True
+    assert settings["motionbgs_binary_path"]["visible_when"] == {
+        "key": "use_motionbgs",
+        "values": ["true"],
+    }
     assert [item["value"] for item in settings["motionbgs_quality"]["options"]] == ["hd", "4k"]
     for key, default, minimum, maximum in (
         ("motionbgs_result_limit", 48, 1, 48),
@@ -1553,12 +1562,57 @@ def test_item_default_provenance_contract() -> None:
     assert 'kind == "pairing_delete"' not in commands
     assert "function wallInOne.deletePairing" not in service
 
+    panel_ui_declaration = panel.index("local panelUi = {}")
+    open_editor_start = panel.index("local function openLibraryEntryPairing")
+    assert panel_ui_declaration < open_editor_start, (
+        "the panelUi namespace must be local before the fresh-library edit callback closes over it"
+    )
     open_editor = panel[
-        panel.index("local function openLibraryEntryPairing") : panel.index(
-            "local function actionLabel"
-        )
+        open_editor_start : panel.index("local function actionLabel")
     ]
-    assert "type(existing) == \"table\" and existing.customized == true" in open_editor
+    require_all(
+        open_editor,
+        (
+            'if type(existing) == "table" and existing.customized == true then',
+            "beginPairingEditor(kind, existing)",
+            "local defaults = panelUi.virtualLibraryPairing(entry, libraryItem, nil)",
+            'defaults.id = type(existing) == "table" and tostring(existing.id or "") or ""',
+            "beginPairingEditor(kind, defaults)",
+        ),
+        "customized and fresh library-card edit paths",
+    )
+    customized_begin = open_editor.index("beginPairingEditor(kind, existing)")
+    customized_return = open_editor.index("return", customized_begin)
+    default_bundle = open_editor.index(
+        "local defaults = panelUi.virtualLibraryPairing(entry, libraryItem, nil)"
+    )
+    default_identity = open_editor.index("defaults.id =", default_bundle)
+    default_begin = open_editor.index("beginPairingEditor(kind, defaults)", default_identity)
+    assert customized_begin < customized_return < default_bundle < default_identity < default_begin
+
+    # Namespace tables are intentionally declared at top level. Only inspect
+    # member/index expressions in code before each declaration: anchoring the
+    # declaration and masking quoted strings/comment tails avoids treating a
+    # nested scratch table, documentation, or translation text as a binding
+    # defect.
+    namespace_declarations = re.finditer(
+        r"^local ([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{",
+        panel,
+        flags=re.MULTILINE,
+    )
+    quoted = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*' ''', re.VERBOSE)
+    for declaration in namespace_declarations:
+        namespace = declaration.group(1)
+        member = re.compile(rf"\b{re.escape(namespace)}\s*(?:\.|\[)")
+        for line_number, raw_line in enumerate(
+            panel[: declaration.start()].splitlines(),
+            start=1,
+        ):
+            code = quoted.sub("", raw_line).split("--", 1)[0]
+            assert member.search(code) is None, (
+                f"top-level local table {namespace!r} is used before its declaration "
+                f"on panel.luau line {line_number}"
+            )
 
     library_card = panel[
         panel.index("function panelUi.libraryCard") : panel.index(
@@ -1575,6 +1629,9 @@ def test_item_default_provenance_contract() -> None:
             "local pairingResetArmed = customized and pendingResetPairingId == profileId",
             "defaultBundle.id = profileId",
             'send({ kind = "pairing_reset", pairing = defaultBundle })',
+            'tooltip = if customized',
+            'else noctalia.tr("panel.pairings.new")',
+            "openLibraryEntryPairing(editableEntry, metadata)",
             'tooltip = noctalia.tr("panel.pairings.reset")',
             'variant = if pairingResetArmed then "primary" else "ghost"',
             'noctalia.tr("panel.pairings.confirm_reset")',
@@ -1643,15 +1700,33 @@ def test_item_default_provenance_contract() -> None:
         library_items,
         (
             "local sourceItems = if kind == \"static\"",
-            "for _, sourceItem in ipairs(sourceItems) do",
+            "local total = #sourceItems",
+            "local last = math.min(total, first + maximum - 1)",
+            "for index = first, last do",
+            "local sourceItem = sourceItems[index]",
             "add(entry, sourceItem, matchingPairingForLibraryEntry(entry))",
-            "return items, currentLibrary",
+            "return items, currentLibrary, total",
         ),
         "source-authoritative indexed library",
     )
     assert "sortedPairingIds(kind)" not in library_items
     assert "pairingMap()[id]" not in library_items
     assert "still_path = tostring(sourceItem.preview" not in library_items
+
+    library_page = panel[
+        panel.index("local function librarySection") : panel.index(
+            "local function playlistActionButton"
+        )
+    ]
+    require_all(
+        library_page,
+        (
+            "(page - 1) * LIBRARY_PAGE_SIZE",
+            "LIBRARY_PAGE_SIZE",
+            "panelUi.appendPageControls(children, total, page",
+        ),
+        "fixed-size local-library pages",
+    )
 
     library_preview = panel[
         panel.index("function panelUi.libraryPreviewPath") : panel.index(
@@ -1716,10 +1791,14 @@ def test_item_default_provenance_contract() -> None:
         (
             'for _, kind in ipairs({ "static", "video", "workshop" }) do',
             'if playlistLibraryFilter == "all" or playlistLibraryFilter == kind then',
-            "panelUi.appendExplicitGrid(children, items, playlistLibraryVisible, PLAYLIST_LIBRARY_COLUMNS",
+            "local take = math.min(remaining, math.max(0, kindTotal - kindOffset))",
+            "panelUi.appendExplicitGrid(children, items, #items, PLAYLIST_LIBRARY_COLUMNS",
+            "panelUi.appendPageControls(",
             "panelUi.libraryThumbnail(",
             "compactPaletteSwatch(bundle, pairingId)",
             'local pairingId = if customized then tostring(existing.id or "") else ""',
+            "dragLibraryPairingTokenBySignature[signature]",
+            "dragLibraryPairingByToken[dragToken]",
             'dragType = "wio-library-item"',
             "payload = dragToken",
             "previewAncestor = 2",
@@ -3248,6 +3327,8 @@ def test_provider_preview_panel_contract() -> None:
             "local PREVIEW_RETRY_BASE_SECONDS = 15",
             "local PREVIEW_RETRY_MAX_SECONDS = 300",
             "local PREVIEW_RETRY_POLL_MS = 5000",
+            "local PREVIEW_ACTIVE_POLL_MS = 16",
+            "local PREVIEW_INIT_BATCH = 4",
             'local PREVIEW_PROTOCOL = "WIO-THUMB1"',
             "local function previewRetryReady(url)",
             "local function previewRetryDue()",
@@ -3258,14 +3339,24 @@ def test_provider_preview_panel_contract() -> None:
             "local function savePreviewManifest()",
             "local function prunePreviewCache()",
             "local function initializePreviewCache()",
+            "local function stepPreviewInitialization()",
             "local function previewHelperResult(result)",
+            "local function markPreviewManifestDirty()",
+            "local function queuePreviewCompletion(task, result)",
+            "local function startOnePreviewTask()",
             "local function ensureProviderPreview(provider, identifier, url)",
             "local function providerPreviewNode(provider, item, width, height, glyph)",
-            "pumpPreviewQueue = function()",
+            "local function stepPreviewWork()",
             "preview.ensure = ensureProviderPreview",
             "preview.node = providerPreviewNode",
             "preview.scope = setPreviewScope",
             "preview.retryDue = previewRetryDue",
+            "preview.step = stepPreviewWork",
+            "preview.refreshClock = function()",
+            "preview.requestRender = function()",
+            "preview.takeRender = function()",
+            "preview.settle = function()",
+            "preview.debugSnapshot = function(key)",
             "preview.cancel = function()",
             "preview.close = function()",
         ),
@@ -3276,6 +3367,15 @@ def test_provider_preview_panel_contract() -> None:
             "local function clearPreviewFailure"
         )
     ]
+    preview_clock = panel[
+        panel.index("local function previewNowSeconds") : panel.index(
+            "local function previewRetryReady"
+        )
+    ]
+    assert "return previewClockSeconds" in preview_clock
+    assert "noctalia." not in preview_clock, (
+        "render-time cache lookups must consume the update tick's cached clock"
+    )
     require_all(
         retry_due,
         (
@@ -3362,15 +3462,25 @@ def test_provider_preview_panel_contract() -> None:
             "tonumber(manifestInfo.size) <= PREVIEW_MAX_MANIFEST_BYTES",
             "#raw <= PREVIEW_MAX_MANIFEST_BYTES",
             "tonumber(decoded.schema) == PREVIEW_CACHE_SCHEMA",
+            "retained < PREVIEW_MAX_ENTRIES * 2",
+            'phase = "validate"',
+            "local function preparePreviewPrune(initialization)",
+            "local function preparePreviewCleanup(initialization)",
+            "local function stepPreviewInitialization()",
+            "for _ = 1, PREVIEW_INIT_BATCH do",
             "previewEntryValid(key, entry)",
-            "prunePreviewCache()",
+            "previewPaths[key] = previewEntryPath(entry)",
             "noctalia.listDir(previewCacheDirectory)",
             'name == "manifest.json.tmp"',
+            "markPreviewManifestDirty()",
         ),
         "bounded preview cache initialization and schema discard",
     )
     assert initialization.index("noctalia.fileInfo(previewManifestPath)") < initialization.index(
         "noctalia.readFile(previewManifestPath)"
+    )
+    assert "savePreviewManifest()" not in initialization, (
+        "cache initialization must defer its manifest rewrite to a separate callback"
     )
 
     helper_result = panel[
@@ -3390,7 +3500,9 @@ def test_provider_preview_panel_contract() -> None:
     )
 
     completion = panel[
-        panel.index("local function finishPreviewTask") : panel.index("pumpPreviewQueue = function()")
+        panel.index("local function finishPreviewTask") : panel.index(
+            "local function queuePreviewCompletion"
+        )
     ]
     require_all(
         completion,
@@ -3406,33 +3518,42 @@ def test_provider_preview_panel_contract() -> None:
             "recordPreviewFailure(task.url)",
             "noctalia.renameFile(task.staging_path, finalPath)",
             "prunePreviewCache()",
-            "savePreviewManifest()",
+            "markPreviewManifestDirty()",
             "noctalia.removeFile(task.staging_path)",
         ),
         "post-helper preview promotion gate",
     )
+    for forbidden in ("render()", "savePreviewManifest()", "noctalia.runAsync("):
+        assert forbidden not in completion, (
+            f"preview completion must defer {forbidden!r} to a bounded scheduler step"
+        )
 
-    pump = panel[
-        panel.index("pumpPreviewQueue = function()") : panel.index(
+    start_one = panel[
+        panel.index("local function startOnePreviewTask()") : panel.index(
             "local function ensureProviderPreview"
         )
     ]
     require_all(
-        pump,
+        start_one,
         (
-            "previewActive < PREVIEW_MAX_CONCURRENT",
+            "previewActive >= PREVIEW_MAX_CONCURRENT",
+            "previewInitialization ~= nil",
             "task.generation == previewGeneration",
             "previewPending[task.key] == nil",
             "previewRetryReady(task.url)",
+            "previewPaths[task.key] ~= nil",
             '" fetch "',
             "previewShellQuote(task.provider)",
             "previewShellQuote(task.url)",
             "previewShellQuote(task.staging_path)",
             "noctalia.runAsync(command",
+            "queuePreviewCompletion(task, result)",
             "40000",
         ),
-        "bounded and de-duplicated preview work queue",
+        "one-at-a-time de-duplicated preview task starter",
     )
+    assert start_one.count("noctalia.runAsync(") == 1
+    assert "while " not in start_one, "one update tick must never start a loop of preview helpers"
 
     ensure = panel[
         panel.index("local function ensureProviderPreview") : panel.index(
@@ -3445,21 +3566,58 @@ def test_provider_preview_panel_contract() -> None:
             "#previewQueue < PREVIEW_MAX_QUEUE",
             "generation = previewGeneration",
             "previewRetryReady(safeUrl)",
+            "previewInitializationRequested = true",
+            "local cachedPath = previewPaths[key]",
+            "markPreviewManifestDirty()",
+            "retirePreviewEntry(key, entry)",
+            "wakePreviewWork()",
         ),
-        "hard-bounded generation-aware preview enqueue",
+        "render-safe generation-aware preview lookup and enqueue",
     )
+    for forbidden in (
+        "initializePreviewCache(",
+        "previewEntryValid(",
+        "savePreviewManifest(",
+        "startOnePreviewTask(",
+        "noctalia.fileInfo(",
+        "noctalia.fileExists(",
+        "noctalia.runAsync(",
+        "noctalia.removeFile(",
+        "noctalia.formatTime(",
+    ):
+        assert forbidden not in ensure, f"render-time preview lookup can call {forbidden!r}"
     assert "previewFailedUrls" not in panel, "preview failures must not remain permanent for the runtime"
+
+    deferred_step = panel[
+        panel.index("local function stepPreviewWork()") : panel.index(
+            "preview.ensure = ensureProviderPreview"
+        )
+    ]
+    require_all(
+        deferred_step,
+        (
+            "initializePreviewCache()",
+            "stepPreviewInitialization()",
+            "table.remove(previewCompletions, 1)",
+            "finishPreviewTask(completion.task, completion.result)",
+            "table.remove(previewRetiredPaths, 1)",
+            "previewManifestDirty = false",
+            "savePreviewManifest()",
+            "startOnePreviewTask()",
+        ),
+        "single-operation deferred preview scheduler",
+    )
+    assert "while " not in deferred_step
 
     preview_node = panel[
         panel.index("local function providerPreviewNode") : panel.index(
-            "local function resetLibraryVisibility"
+            "local function previewHasDeferredWork"
         )
     ]
     require_all(
         preview_node,
         (
             "previewAbsolutePath(path)",
-            "noctalia.fileExists(path)",
             "return ui.image({",
             "path = path",
             'fit = "cover"',
@@ -3473,6 +3631,8 @@ def test_provider_preview_panel_contract() -> None:
     )
     for forbidden in ("http://", "https://", "thumbnail_url", "poster_url", "thumbs"):
         assert forbidden not in preview_node, f"preview image node can consume remote data directly: {forbidden}"
+    for forbidden in ("noctalia.fileExists(", "noctalia.fileInfo(", "previewEntryValid("):
+        assert forbidden not in preview_node, f"preview node performs render-time I/O via {forbidden!r}"
 
     wallhaven_section = panel[
         panel.index("local function wallhavenSection") : panel.index("local function motionBgsSection")
@@ -3480,6 +3640,20 @@ def test_provider_preview_panel_contract() -> None:
     motionbgs_section = panel[
         panel.index("local function motionBgsSection") : panel.index("local function librarySection")
     ]
+    provider_items = panel[
+        panel.index("function panelUi.providerItems(value)") : panel.index(
+            "function panelUi.configuredRoot"
+        )
+    ]
+    require_all(
+        provider_items,
+        (
+            'local source = type(value) == "table" and value or {}',
+            "for index = 1, math.min(#source, 48) do",
+            'if type(source[index]) == "table" then',
+        ),
+        "malformed provider-item filtering",
+    )
     for source, provider, remote_field in (
         (wallhaven_section, "wallhaven", "thumbs"),
         (motionbgs_section, "motionbgs", "thumbnail_url"),
@@ -3487,6 +3661,7 @@ def test_provider_preview_panel_contract() -> None:
         require_all(
             source,
             (
+                "local items = panelUi.providerItems(results.items)",
                 remote_field,
                 f'preview.ensure("{provider}"',
                 f'preview.node("{provider}"',
@@ -3519,10 +3694,39 @@ def test_provider_preview_panel_contract() -> None:
     assert "preview.close()" in on_settings, "opening settings must cancel queued preview presentation work"
     require_all(
         on_settings,
-        ("function update()", "if isOpen and preview.retryDue() then", "render()"),
-        "bounded preview retry wakeup",
+        (
+            "function update()",
+            "preview.refreshClock()",
+            "if preview.takeRender() then",
+            "panelPages.renderNow()",
+            "local stepped, redraw = preview.step()",
+            "if isOpen and preview.retryDue() then",
+            "preview.settle()",
+            "function onFrameTick(_deltaMs)",
+            "update()",
+        ),
+        "bounded redraw and preview-work scheduler",
     )
-    assert "noctalia.setUpdateInterval(preview.retryPollMs)" in panel
+    scheduler = panel[
+        panel.index("local function setPreviewUpdateInterval") : panel.index(
+            "local function wakePreviewWork"
+        )
+    ]
+    require_all(
+        scheduler,
+        (
+            "noctalia.setUpdateInterval(interval)",
+            "panel.setNeedsFrameTick(interval == PREVIEW_ACTIVE_POLL_MS)",
+        ),
+        "host-backed active preview scheduler",
+    )
+    initializer = panel[
+        panel.index("preview.initializeScheduler = function()") : panel.index(
+            "preview.cancel = function()"
+        )
+    ]
+    assert "panel.setWantsSecondTicks(true)" in initializer
+    assert "preview.initializeScheduler()" in panel
 
     navigation = panel[
         panel.index("function panelPages.selectPage") : panel.index(
@@ -3530,6 +3734,21 @@ def test_provider_preview_panel_contract() -> None:
         )
     ]
     assert navigation.count("preview.cancel()") >= 3, "page changes must retire invisible preview generations"
+    shop_navigation = navigation[
+        navigation.index("function panelPages.selectShopPage") : navigation.index(
+            "function panelPages.selectPlaylistPage"
+        )
+    ]
+    require_all(
+        shop_navigation,
+        (
+            'if activePage == "shops" and activeSubpage == subpage then',
+            "return",
+            "render()",
+        ),
+        "idempotent deferred shop navigation",
+    )
+    assert shop_navigation.index('activePage == "shops"') < shop_navigation.index("preview.cancel()")
 
     for image_call in re.findall(r"ui\.image\(\{(.*?)\}\)", panel, flags=re.DOTALL):
         assert "http://" not in image_call and "https://" not in image_call
@@ -4387,479 +4606,292 @@ def test_renderer_supervisor() -> None:
 
 
 def test_motionbgs_contract() -> None:
-    service = text("motionbgs.luau")
-    helper_path = ROOT / "scripts" / "motionbgs-provider"
+    """Pin the thin Luau bridge and the separately installed process boundary."""
+
+    bridge = text("motionbgs.luau")
+    launcher_path = ROOT / "scripts" / "motionbgs-provider"
+    launcher = launcher_path.read_text(encoding="utf-8")
+    helper_root = ROOT.parent / "motionbgs-helper"
+    helper_path = helper_root / "wall-in-one-motionbgs"
+    helper_tests_path = helper_root / "tests" / "test_helper.py"
     helper = helper_path.read_text(encoding="utf-8")
+    helper_tests = helper_tests_path.read_text(encoding="utf-8")
+
+    # The ScriptRuntime entry is now a bounded bridge. In particular, there is
+    # no periodic service callback and no provider markup parser left for
+    # Noctalia's per-callback CPU watchdog to interrupt.
     require_all(
-        service,
+        bridge,
         (
             "local SCHEMA = 1",
-            "local CACHE_SCHEMA = 2",
+            "local RPC_SCHEMA = 1",
             'local COMMAND_KEY = "wall_in_one_motionbgs_command_v1"',
             'local COMMAND_ACK_KEY = "wall_in_one_motionbgs_command_ack_v1"',
             'local STATUS_KEY = "wall_in_one_motionbgs_status_v1"',
             'local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"',
-            "local MAX_RESULTS = 48",
-            "local SEARCH_ANCHORS_PER_TICK = 1",
-            "local SEARCH_PARSE_INTERVAL_MS = 16",
-            "local IDLE_UPDATE_INTERVAL_MS = 250",
-            "local function setUpdateCadence(intervalMs)",
-            "noctalia.setUpdateInterval(intervalMs)",
+            'local INSTALL_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/motionbgs-helper"',
+            'local BINARY_NAME = "wall-in-one-motionbgs"',
+            'local PROBE_PROTOCOL = "WIO-MBGS-PROBE1"',
+            'local RPC_PROTOCOL = "WIO-MBGS-RPC1"',
             "local MAX_QUEUE = 8",
-            "local MAX_CACHE_SEARCHES = 8",
-            "local MAX_CACHE_DETAILS = 48",
-            "local MAX_HTML_RESPONSE_BYTES = 1024 * 1024",
-            "local LISTING_META_PREFIX_BYTES = 16384",
-            "local LISTING_META_LINK_LIMIT = 32",
-            'local MANAGED_DOWNLOAD_SUFFIX = "/Wall-in-One/MotionBGS"',
-            'local MANAGED_DIRECTORY_MARKER = ".wall-in-one-motionbgs-managed.json"',
-            '"deletion_authority":"adjacent .motionbgs.json sidecar required"',
-            'settingInt("motionbgs_result_limit", MAX_RESULTS, 1, MAX_RESULTS)',
-            'settingInt("motionbgs_cache_minutes", 30, 5, 1440)',
-            'settingInt("motionbgs_max_download_mb", 256, 16, 512)',
-            'configuredDirectory("video_directory")',
-            'videoRoot .. MANAGED_DOWNLOAD_SUFFIX',
-            "local function configuredVideoRootExists()",
-            'local function prepareDownloadDirectory()',
-            'if not providerAvailable() then',
-            'local rootInfo = videoRoot ~= "" and noctalia.fileInfo(videoRoot) or nil',
-            'local made, makeError = noctalia.mkdirAll(directory)',
-            'writeManagedDirectoryMarker(directory)',
-            'cacheDirectory = dataDirectory .. "/motionbgs"',
-            'quality == "4k"',
-            'kind == "site-markup" or kind == "challenge"',
-            "challengePage",
-            "local function beginSearchParse(html, limit)",
-            "local function appendSearchCard(parser, attributes, body)",
-            "local function advanceSearchParse(parser)",
-            "processed < SEARCH_ANCHORS_PER_TICK",
-            'local normalizedDigits = digits:gsub(",", "")',
-            "tonumber(normalizedDigits)",
-            "local function beginSearchOperation(operation, transport)",
-            "local function advanceSearchOperation(operation)",
-            "parser.ready = true",
-            "deferred = beginSearchOperation(operation, transport)",
-            "if not deferred then",
-            'type(activeOperation.search_parse) == "table"',
-            "advanceSearchOperation(activeOperation)",
-            "local function normalizedBrowseRequest(candidate)",
-            "local function browseUrl(request)",
-            "local function canonicalSearchSlug(value)",
-            "local function listingRouteMatches(request, value)",
-            "local function parseListingMeta(html, request, itemCount)",
-            'mode ~= "search" and mode ~= "latest" and mode ~= "genre" and mode ~= "4k" and mode ~= "hd"',
-            "MotionBGS text search does not expose pagination",
-            "MotionBGS currently redirects HD pages after page 1 into the unfiltered catalog",
-            'request.mode == "latest" or request.mode == "genre" or request.mode == "4k"',
-            'request.mode == "latest"',
-            'return table.concat({',
-            "parseDetailsHtml",
-            "normalizeStillImageUrl",
-            'for _, attribute in ipairs({ "data-src", "data-lazy-src", "data-original", "src" }) do',
-            'for _, attribute in ipairs({ "data-srcset", "srcset", "data-src", "src" }) do',
-            'candidate:match("^%s*([^%s]+)")',
-            'spanText(body, "ttl")',
-            'path:match("^/dl/([%w]+)/(%d+)/?$")',
-            "normalizeSiteUrl",
-            "cache.searches",
-            "cache.details",
-            "local function rebuildOrderedCache(order, values, maximum, validator)",
-            "if #reversed >= maximum then",
-            "rebuildOrderedCache(candidate.search_order, candidate.searches, MAX_CACHE_SEARCHES, validCachedSearch)",
-            "rebuildOrderedCache(candidate.detail_order, candidate.details, MAX_CACHE_DETAILS, validCachedDetail)",
-            "nonceValue(command.nonce)",
+            "local MAX_REQUEST_BYTES = 8 * 1024",
+            "local MAX_RESPONSE_BYTES = 128 * 1024",
+            "local DOWNLOAD_OPERATION_BUDGET_MS = 75000",
+            "local DOWNLOAD_TIMEOUT_MS = 80000",
+            "local RPC_OPERATION_BUDGET_MS = 30000",
+            'local OPERATION_GUARD_CONTENT = "WIO-MBGS-GUARD1\\n"',
+            "local function configuredBinary()",
+            'settingString("motionbgs_binary_path", "")',
+            "noctalia.commandExists(BINARY_NAME)",
+            "local function probeResult(result)",
+            'ipairs({ "search", "details", "download", "clear" })',
+            "local function launcherRpcResult(operation, result)",
+            '(payload.cached ~= true and payload.cached ~= false)',
+            'responseSource ~= detail.source_url',
+            'fetchedAt ~= detail.fetched_at',
+            'sidecar.downloaded_at ~= downloadedAt',
+            "readBoundedRegularFile(path, MAX_RESPONSE_BYTES)",
+            "local function atomicWriteJson(path, value)",
+            "#encoded + 1 > MAX_REQUEST_BYTES",
+            'local temporary = path .. ".tmp"',
+            "noctalia.renameFile(temporary, path)",
+            "local function requestPayload(operation)",
+            "guard_path = operation.guard_path",
+            "operation_timeout_ms = if operation.kind == \"download\"",
+            'if payload.cleared ~= true then',
+            '"MotionBGS helper returned an invalid clear result"',
+            "local function launchOperation(operation)",
+            "local function atomicWriteGuard(path)",
+            "operation.request_path, operation.response_path, operation.guard_path = requestPaths(operation)",
+            "for _, path in ipairs({ operation.guard_path, operation.request_path, operation.response_path }) do",
+            'shellQuote(launcherPath)\n        .. " rpc "',
+            "local function startProbe(_force, commandNonce)",
+            'shellQuote(launcherPath)\n        .. " probe "',
             'action == "search"',
-            'action == "details"',
-            'action == "download"',
+            "local function queryEncode(value)",
+            'local expected = BASE_URL .. "/search?q=" .. queryEncode(request.query)',
+            'action == "details" or action == "download"',
             'action == "clear"',
+            'action == "probe"',
             "noctalia.state.watch(COMMAND_KEY",
             "function onConfigChanged()",
-            "local operationGeneration = 0",
-            "local function invalidateOperations(message, forceBarrier)",
-            "operationGeneration += 1",
-            "setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)",
-            "setUpdateCadence(SEARCH_PARSE_INTERVAL_MS)",
-            "operation.generation ~= operationGeneration",
-            'return nil, "protocol", "MotionBGS helper returned a cross-origin or malformed effective URL"',
-            "local function cleanupCancelledDownload(operation, result)",
-            "local path = validatedDownloadPath(operation, transport)",
-            'noctalia.removeFile(path .. ".motionbgs.json")',
-            'invalidateOperations("MotionBGS requests were cancelled by cache clear", true)',
-            'invalidateOperations("MotionBGS integration was disabled or became unavailable", false)',
             "function onExit(_signal, _reason)",
-            "acknowledgeCancellation(activeOperation, cancellation)",
-            "for _, operation in ipairs(pendingOperations) do",
-            "noctalia.state.set(STATUS_KEY, status)",
+            "binary_available = false",
+            "binary_compatible = false",
+            'probe_state = "idle"',
+            'availability_reason = "initializing"',
+            "install_url = INSTALL_URL",
+            'publishProbeFailure(requestedNonce, "binary-missing"',
+            'pluginDataDirectory:gsub("/+$", "") .. "/motionbgs-bridge-v1"',
+            'cacheDirectory = dataDirectory .. "/cache"',
+            'rpcDirectory = cacheDirectory .. "/rpc"',
+            'local MANAGED_DOWNLOAD_SUFFIX = "/Wall-in-One/MotionBGS"',
+            'local MANAGED_DIRECTORY_MARKER = ".wall-in-one-motionbgs-managed.json"',
         ),
-        "MotionBGS service",
+        "thin MotionBGS ScriptRuntime bridge",
     )
-    assert service.count('local function hasClass(attributes, wanted)') == 1
+    assert re.search(r"(?m)^function\s+update\s*\(", bridge) is None
+    assert "noctalia.setUpdateInterval" not in bridge
+    assert bridge.count("noctalia.runAsync(") == 2, (
+        "the bridge should launch only one probe path and one serialized RPC path"
+    )
+    for parser_artifact in (
+        "beginSearchParse",
+        "advanceSearchParse",
+        "parseListingMeta",
+        "parseDetailsHtml",
+        "challengePage",
+        "SEARCH_ANCHORS_PER_TICK",
+        "MAX_HTML_RESPONSE_BYTES",
+        "html:gmatch",
+        "<a ",
+    ):
+        assert parser_artifact not in bridge, f"in-process MotionBGS parser artifact remains: {parser_artifact}"
+    assert re.search(r"\bcurl\b", bridge, re.IGNORECASE) is None
+    assert bridge.count("(payload.cached ~= true and payload.cached ~= false)") == 3
+    assert bridge.count("responseSource ~= detail.source_url") == 2
+    assert bridge.count("fetchedAt ~= detail.fetched_at") == 2
+    assert bridge.count("if payload.cleared ~= true then") == 1
 
-    def integer_constant(name: str) -> int:
-        match = re.search(rf"^local {re.escape(name)} = ([0-9]+)$", service, re.MULTILINE)
-        assert match is not None, f"MotionBGS service is missing integer constant {name}"
-        return int(match.group(1))
-
-    anchors_per_tick = integer_constant("SEARCH_ANCHORS_PER_TICK")
-    parse_interval_ms = integer_constant("SEARCH_PARSE_INTERVAL_MS")
-    idle_interval_ms = integer_constant("IDLE_UPDATE_INTERVAL_MS")
-    listing_meta_prefix_bytes = integer_constant("LISTING_META_PREFIX_BYTES")
-    listing_meta_link_limit = integer_constant("LISTING_META_LINK_LIMIT")
-    assert anchors_per_tick == 1, "MotionBGS parser must preserve one anchor per callback"
-    assert parse_interval_ms == 16
-    assert idle_interval_ms == 250
-    assert 0 < listing_meta_prefix_bytes <= 64 * 1024
-    assert 0 < listing_meta_link_limit <= 64
-    # The VM fixture deliberately carries 355 unrelated navigation anchors in
-    # addition to its 36 wallpaper cards. Include the EOF and publication
-    # callbacks so the fixture remains practical without weakening the
-    # one-anchor-per-callback CPU-budget boundary.
-    realistic_anchor_count = 355 + 36
-    realistic_parse_callbacks = (realistic_anchor_count + anchors_per_tick - 1) // anchors_per_tick + 2
-    assert realistic_parse_callbacks * parse_interval_ms <= 7000
-
-    listing_meta = service[
-        service.index("local function parseListingMeta") : service.index("local function metaContent")
-    ]
+    # The bundled script is only a launcher/protocol gate. It cannot choose a
+    # provider URL or perform network work, and it enforces both sides of the
+    # request/response size contract before data reaches the ScriptRuntime.
     require_all(
-        listing_meta,
+        launcher,
         (
-            "local metadataHtml = html:sub(1, LISTING_META_PREFIX_BYTES)",
-            "local metadataLower = metadataHtml:lower()",
-            'local headClose = metadataLower:find("</head", 1, true)',
-            "while linksSeen < LISTING_META_LINK_LIMIT do",
-            'local startAt = metadataLower:find("<link", cursor, true)',
-            'local finishAt = metadataLower:find(">", startAt + 5, true)',
-            'relationToken(attributes, "prev")',
-            'relationToken(attributes, "next")',
-            "total_hint = listingTotalHint(metadataHtml)",
+            "set -uo pipefail",
+            "readonly probe_wire='WIO-MBGS-PROBE1'",
+            "readonly rpc_wire='WIO-MBGS-RPC1'",
+            "readonly max_request_bytes=$((8 * 1024))",
+            "readonly max_response_bytes=$((128 * 1024))",
+            "valid_absolute_path()",
+            "owned_regular_file()",
+            "owned_writable_directory()",
+            "guard_ready()",
+            "resolve_binary()",
+            "[[ -f $candidate && -x $candidate ]]",
+            "[[ -f $path && ! -L $path ]]",
+            '[[ $owner == "$(id -u)"',
+            "ulimit -f",
+            "PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1",
+            'run_bounded 8 "$binary" probe --protocol 1',
+            '"$binary" rpc --protocol 1 --request "$request" --response "$response" --guard "$guard"',
+            "RPC cancellation guard was removed before completion",
+            '[[ -e $response || -L $response ]]',
+            'owned_regular_file "$response" 2 "$max_response_bytes"',
+            '[[ $actual_bytes != "$reported_bytes" ]]',
+            "expected probe BINARY, rpc BINARY REQUEST RESPONSE GUARD, or self-test",
         ),
-        "head-only plain-search MotionBGS listing metadata parser",
+        "bounded MotionBGS launcher",
     )
-    assert "metadataHtml:gmatch(" not in listing_meta
-    assert "metadataLower:gmatch(" not in listing_meta
-    assert "html:gmatch(" not in listing_meta
-    assert "relatedPageUrl" not in service
-
-    challenge_probe = service[
-        service.index("local function challengePage") : service.index("local function beginSearchParse")
-    ]
-    assert ':sub(1, LISTING_META_PREFIX_BYTES):lower()' in challenge_probe
-    empty_probe = service[
-        service.index("local function advanceSearchParse") : service.index("local function relationToken")
-    ]
-    assert ':sub(1, LISTING_META_PREFIX_BYTES):lower()' in empty_probe
-
-    cadence_helper = service[
-        service.index("local function setUpdateCadence") : service.index("local previousStatus")
-    ]
-    require_all(
-        cadence_helper,
-        (
-            "currentUpdateIntervalMs == intervalMs",
-            "noctalia.setUpdateInterval(intervalMs)",
-            "currentUpdateIntervalMs = intervalMs",
-        ),
-        "MotionBGS update-cadence helper",
-    )
-    assert service.count("noctalia.setUpdateInterval(") == 1
-
-    invalidation = service[
-        service.index("local function invalidateOperations") : service.index("local function nonceValue")
-    ]
-    assert "setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)" in invalidation
-    finish_operation = service[
-        service.index("local function finishNetworkOperation") : service.index("local function beginSearchOperation")
-    ]
-    assert finish_operation.index("setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)") < finish_operation.index(
-        "activeOperation == operation"
-    )
-    begin_search = service[
-        service.index("local function beginSearchOperation") : service.index("local function advanceSearchOperation")
-    ]
-    assert begin_search.index("operation.search_parse = parser") < begin_search.index(
-        "setUpdateCadence(SEARCH_PARSE_INTERVAL_MS)"
-    )
-    launch_failure = service[
-        service.index("if not accepted then") : service.index("return true", service.index("if not accepted then"))
-    ]
-    assert "finishNetworkOperation(operation)" in launch_failure
-    exit_handler = service[service.index("function onExit") : service.index("initializeStorage()", service.index("function onExit"))]
-    assert "setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)" in exit_handler
-    assert service.count("setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)") >= 4
-
-    route_validation = service[
-        service.index("local function canonicalSearchSlug") : service.index("local function normalizeStillImageUrl")
-    ]
-    require_all(
-        route_validation,
-        (
-            'return validSlug(query:lower():gsub("%s+", "-"))',
-            'actual == "/search"',
-            "local canonicalSlug = canonicalSearchSlug(request.query)",
-            'actual == "/tag:" .. canonicalSlug',
-        ),
-        "exact MotionBGS canonical search redirect",
-    )
-    cache_validation = service[
-        service.index("local function validCachedSearch") : service.index("local function validCachedDetail")
-    ]
-    assert "not listingRouteMatches(request, record.source_url)" in cache_validation
-
-    still_parser = service[
-        service.index("local function normalizeStillImageUrl") : service.index(
-            "local function challengePage"
-        )
-    ]
-    require_all(
-        still_parser,
-        (
-            "^https://motionbgs%.com/media/",
-            "^https://motionbgs%.com/i/c/",
-            "tonumber(width) > 4096",
-            'lower:match("%.jpe?g$")',
-            'attributeValue(attributes, attribute)',
-            '"data-src", "data-lazy-src", "data-original", "src"',
-            '"data-srcset", "srcset", "data-src", "src"',
-        ),
-        "MotionBGS lazy still candidate selection",
-    )
-    assert still_parser.index('"data-src"') < still_parser.index('"src"'), (
-        "MotionBGS lazy data-src must be considered before a placeholder src"
-    )
-
-    bounded_reader = service[
-        service.index("local function readBoundedRegularFile") : service.index(
-            "local function configuredDirectory"
-        )
-    ]
-    require_all(
-        bounded_reader,
-        (
-            "local info = noctalia.fileInfo(path)",
-            "info.isDir == true",
-            "expectedBytes < 1",
-            "expectedBytes > maximumBytes",
-            "local raw = noctalia.readFile(path)",
-            "#raw ~= expectedBytes",
-            "#raw > maximumBytes",
-        ),
-        "MotionBGS bounded regular-file reader",
-    )
-    assert bounded_reader.index("noctalia.fileInfo(path)") < bounded_reader.index("noctalia.readFile(path)")
-
-    managed_marker = service[
-        service.index("local function writeManagedDirectoryMarker") : service.index(
-            "local function prepareDownloadDirectory"
-        )
-    ]
-    require_all(
-        managed_marker,
-        (
-            "readBoundedRegularFile(marker, MAX_MANAGED_MARKER_BYTES)",
-            "current ~= MANAGED_DIRECTORY_MARKER_CONTENT",
-            "managed MotionBGS directory marker is invalid",
-        ),
-        "fail-closed MotionBGS marker read",
-    )
-    assert "noctalia.readFile(marker)" not in managed_marker
-
-    cache_load = service[
-        service.index("local function loadCache") : service.index("local function fresh")
-    ]
-    require_all(
-        cache_load,
-        ("readBoundedRegularFile(cachePath, MAX_CACHE_BYTES)", "#raw > MAX_CACHE_BYTES"),
-        "bounded MotionBGS cache read",
-    )
-    assert "noctalia.readFile(cachePath)" not in cache_load
-
-    search_response = service[
-        service.index("local function beginSearchOperation") : service.index("local function enqueueDownload")
-    ]
-    detail_response = service[
-        service.index("local function performDetails") : service.index("local function performDownload")
-    ]
-    for response_reader in (search_response, detail_response):
-        assert "readBoundedRegularFile(transport.path, MAX_HTML_RESPONSE_BYTES)" in response_reader
-        assert "noctalia.readFile(transport.path)" not in response_reader
-
-    configured_download = service[
-        service.index("local function configuredDownloadDirectory") : service.index(
-            "local function cacheTtlSeconds"
-        )
-    ]
-    require_all(
-        configured_download,
-        (
-            'local videoRoot = configuredDirectory("video_directory")',
-            'videoRoot .. MANAGED_DOWNLOAD_SUFFIX',
-        ),
-        "MotionBGS download-directory resolution",
-    )
-    assert "motionbgs_download_directory" not in service
-
-    prepare_download = service[
-        service.index("local function prepareDownloadDirectory") : service.index("local function publishStatus")
-    ]
-    assert prepare_download.index('noctalia.fileInfo(videoRoot)') < prepare_download.index(
-        "if not providerAvailable() then"
-    )
-    assert prepare_download.index("if not providerAvailable() then") < prepare_download.index(
-        "noctalia.mkdirAll(directory)"
-    )
-    assert prepare_download.index("noctalia.mkdirAll(directory)") < prepare_download.index(
-        "writeManagedDirectoryMarker(directory)"
-    )
-
-    initialize_storage = service[
-        service.index("local function initializeStorage") : service.index("function update()")
-    ]
-    require_all(
-        initialize_storage,
-        (
-            "not configuredVideoRootExists()",
-            'not settingBool("use_motionbgs", true)',
-            "or not status.curl_available",
-            "or not status.helper_available",
-            'cacheDirectory = dataDirectory .. "/motionbgs"',
-            "prepareDownloadDirectory()",
-        ),
-        "separate MotionBGS metadata and managed-media storage",
-    )
-    assert initialize_storage.index("not configuredVideoRootExists()") < initialize_storage.index(
-        "noctalia.pluginDataDir()"
-    )
-
-    validated_download = service[
-        service.index("local function validatedDownloadPath") : service.index(
-            "local function cleanupCancelledDownload"
-        )
-    ]
-    require_all(
-        validated_download,
-        (
-            'local sidecarPath = path .. ".motionbgs.json"',
-            "readBoundedRegularFile(sidecarPath, MAX_PROVIDER_SIDECAR_BYTES)",
-            "#sidecarRaw <= MAX_PROVIDER_SIDECAR_BYTES",
-            "or tonumber(sidecar.schema) ~= 1",
-            'or sidecar.plugin ~= "goober/wall-in-one"',
-            'or sidecar.provider ~= "MotionBGS"',
-            "or sidecar.path ~= path",
-            'or sidecar.source_page ~= BASE_URL .. "/" .. tostring(operation.slug or "")',
-            "or tonumber(sidecar.bytes) ~= bytes",
-        ),
-        "MotionBGS helper-result provenance validation",
-    )
-    assert "noctalia.readFile(sidecarPath)" not in validated_download
-    require_all(
-        helper,
-        (
-            "expected fetch-html, download, or self-test",
-            "WIO-MBG1",
-            "fetch-html",
-            "download",
-            "self-test",
-            "max_redirects=3",
-            "same-origin",
-            "exec curl --disable",
-            ".motionbgs-body.",
-            ".motionbgs.json",
-            'printf \'  "plugin": "goober/wall-in-one",\\n\'',
-            'printf \'  "provider": "MotionBGS",\\n\'',
-            'printf \'  "path": "%s",\\n\' "$(json_escape "$final")"',
-            'mv -f -- "$body" "$output"',
-            'mv -f -- "$sidecar_tmp" "$sidecar"',
-        ),
-        "MotionBGS helper",
-    )
-    motion_curl = helper[helper.index("exec curl") : helper.index("curl_rc=$?")]
-    assert motion_curl.index("--disable") < motion_curl.index("--silent")
+    assert re.search(r"\bcurl\b", launcher, re.IGNORECASE) is None
     for forbidden in ("cloudscraper", "selenium", "playwright", "chromedriver"):
-        assert forbidden not in helper.lower(), f"MotionBGS helper attempts challenge bypass: {forbidden}"
-
-    syntax_targets = [
-        ROOT / "scripts" / "capture-still",
-        ROOT / "scripts" / "renderer-supervisor",
-        helper_path,
-    ]
-    for script in syntax_targets:
-        subprocess.run(["bash", "-n", str(script)], check=True)
-    result = subprocess.run(
-        ["bash", str(helper_path), "self-test"],
+        assert forbidden not in launcher.lower()
+    subprocess.run(["bash", "-n", str(launcher_path)], check=True)
+    launcher_self_test = subprocess.run(
+        ["bash", str(launcher_path), "self-test"],
         check=True,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=10,
     )
-    assert result.stdout.strip() == "WIO-MBG1\tok\tself-test", result.stdout
+    assert launcher_self_test.stdout.strip() == "WIO-MBG1\tok\tself-test"
 
-    # Exercise the helper's successful download path without touching the
-    # network. This verifies the adjacent sidecar values as serialized, rather
-    # than merely pinning source-code strings.
-    with tempfile.TemporaryDirectory(prefix="wall-in-one-motionbgs-provenance-") as temporary:
-        temp = Path(temporary)
-        fake_bin = temp / "bin"
-        fake_bin.mkdir()
-        fake_curl = fake_bin / "curl"
-        fake_curl.write_text(
-            """#!/usr/bin/env bash
-set -u
-header=
-output=
-url=
-while (( $# > 0 )); do
-  case $1 in
-    --dump-header) header=$2; shift 2 ;;
-    --output) output=$2; shift 2 ;;
-    --url) url=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-[[ -n $header && -n $output && $url == https://motionbgs.com/* ]] || exit 64
-printf 'HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n\r\n' >"$header"
-printf '0000ftypisomwall-in-one-fixture' >"$output"
-printf '200'
-""",
-            encoding="utf-8",
-        )
-        fake_curl.chmod(0o755)
-        downloads = temp / "downloads"
-        downloads.mkdir()
-        environment = os.environ.copy()
-        environment["PATH"] = f"{fake_bin}:{environment.get('PATH', '')}"
-        downloaded = subprocess.run(
-            [
-                "bash",
-                str(helper_path),
-                "download",
-                "42",
-                "fixture-motion",
-                "hd",
-                str(downloads),
-                "Fixture Motion",
-                "16",
-                "10",
-            ],
-            check=True,
-            env=environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-        )
-        fields = downloaded.stdout.strip().split("\t")
-        assert fields[:3] == ["WIO-MBG1", "ok", "200"], downloaded.stdout
-        payload = Path(fields[-1])
-        assert payload == downloads / "fixture-motion.hd.mp4"
-        provenance = json.loads(Path(f"{payload}.motionbgs.json").read_text(encoding="utf-8"))
-        assert provenance["schema"] == 1
-        assert provenance["plugin"] == "goober/wall-in-one"
-        assert provenance["provider"] == "MotionBGS"
-        assert provenance["path"] == str(payload)
-        assert provenance["source_page"] == "https://motionbgs.com/fixture-motion"
-        assert provenance["bytes"] == payload.stat().st_size
+    # HTTP, HTML parsing, cache mutation, and transactional MP4 installation
+    # live in the separately installed Python program, not in the plugin.
+    assert helper_path.is_file()
+    assert helper_path.stat().st_mode & stat.S_IXUSR
+    assert helper.startswith("#!/usr/bin/env python3\n")
+    require_all(
+        helper,
+        (
+            'VERSION = "1.0.0"',
+            "PROTOCOL = 1",
+            'PROBE_WIRE = "WIO-MBGS-PROBE1"',
+            'RPC_WIRE = "WIO-MBGS-RPC1"',
+            "CAPABILITIES = \"search,details,download,clear\"",
+            "MAX_REQUEST_BYTES = 8 * 1024",
+            "MAX_RESPONSE_BYTES = 128 * 1024",
+            "MAX_HTML_BYTES = 1024 * 1024",
+            "MAX_CACHE_BYTES = 2 * 1024 * 1024",
+            "MAX_SEARCH_CACHE = 8",
+            "MAX_DETAIL_CACHE = 48",
+            "MAX_REDIRECTS = 3",
+            "MIN_OPERATION_TIMEOUT_MS = 5 * 1000",
+            "MAX_OPERATION_TIMEOUT_MS = 75 * 1000",
+            'GUARD_CONTENT = b"WIO-MBGS-GUARD1\\n"',
+            "from html.parser import HTMLParser",
+            "class _ListingParser(_BoundedParser):",
+            "class _DetailParser(_BoundedParser):",
+            "def _validate_request_keys(request: dict[str, Any], action: str) -> None:",
+            'action not in {"search", "details", "download", "clear"}',
+            "_read_bounded_file(request_path, MAX_REQUEST_BYTES)",
+            "only the exact MotionBGS HTTPS origin is accepted",
+            '"--disable"',
+            '"--proto",\n        "=https"',
+            '"--proto-redir",\n        "=https"',
+            '"--max-redirs",\n        "0"',
+            "if effective != requested:",
+            "def _require_guard(path: str) -> None:",
+            "def _remaining_seconds(",
+            "def _validate_download_route(value: str, quality: str, identifier: str) -> str:",
+            "download resolved to a different MotionBGS media id",
+            "resource.setrlimit(resource.RLIMIT_FSIZE",
+            'transfer["content_type"] not in {"text/html", "application/xhtml+xml"}',
+            'prefix[4:8] != b"ftyp"',
+            "fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+            "os.link(temporary, output, follow_symlinks=False)",
+            "os.link(transfer_path, destination, follow_symlinks=False)",
+            'CACHE_NAME = "cache-v1.json"',
+            'sidecar_destination = destination + ".motionbgs.json"',
+            "payload = _encode_json(result, MAX_RESPONSE_BYTES)",
+            "size = _write_no_replace(response, payload, MAX_RESPONSE_BYTES)",
+            '_emit_fields(RPC_WIRE, "ok", request["request_id"], response, size)',
+        ),
+        "standalone MotionBGS program",
+    )
+    for forbidden in ("cloudscraper", "selenium", "playwright", "chromedriver", "requests"):
+        assert forbidden not in helper.lower(), f"standalone MotionBGS helper contains {forbidden}"
+    subprocess.run(["python3", "-m", "py_compile", str(helper_path)], check=True)
+
+    # Keep the external process implementation independently testable. Count
+    # the intentionally focused cases and execute them through discovery so a
+    # renamed test module cannot silently fall out of this aggregate gate.
+    test_methods = re.findall(r"(?m)^    def (test_[a-z0-9_]+)\(", helper_tests)
+    assert len(test_methods) == 15, test_methods
+    assert len(set(test_methods)) == 15
+    helper_env = os.environ.copy()
+    helper_env["NO_COLOR"] = "1"
+    helper_env.pop("FORCE_COLOR", None)
+    helper_suite = subprocess.run(
+        ["python3", "-m", "unittest", "discover", "-s", str(helper_root / "tests"), "-p", "test_*.py", "-v"],
+        cwd=ROOT.parent,
+        env=helper_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=75,
+    )
+    assert helper_suite.returncode == 0, helper_suite.stdout + helper_suite.stderr
+    helper_stderr = ANSI_ESCAPE_RE.sub("", helper_suite.stderr)
+    assert ANSI_ESCAPE_RE.sub("", "\x1b[32mOK\x1b[0m") == "OK"
+    assert "Ran 15 tests" in helper_stderr
+    assert helper_stderr.rstrip().endswith("OK"), helper_stderr
+
+    # Coordinator state distinguishes the always-available direct site from
+    # optional integrated browsing, surfaces helper diagnostics, and lets the
+    # user reprobe or open the fixed installation page.
+    coordinator = text("service.luau")
+    require_all(
+        coordinator,
+        (
+            'local MOTIONBGS_HELPER_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/motionbgs-helper"',
+            'motionbgs_binary_path = wallInOne.settingString("motionbgs_binary_path", "")',
+            "providers.motionbgs.integration_available = providers.motionbgs.allowed",
+            "and motionBgsStatus.available == true",
+            "providers.motionbgs.binary_available = type(motionBgsStatus) == \"table\"",
+            "providers.motionbgs.binary_compatible = type(motionBgsStatus) == \"table\"",
+            "providers.motionbgs.install_url = MOTIONBGS_HELPER_URL",
+            "providers.motionbgs.available = providers.motionbgs.browser_available",
+            "function wallInOne.openMotionBgsHelper()",
+            'elseif kind == "motionbgs_probe" then',
+            'elseif kind == "motionbgs_helper_open" then',
+            '(action ~= "probe" and providers.motionbgs.integration_available ~= true)',
+        ),
+        "MotionBGS coordinator integration",
+    )
+
+    catalog = tomllib.loads((ROOT.parent / "catalog.toml").read_text(encoding="utf-8"))
+    catalog_entry = next(entry for entry in catalog["plugin"] if entry["id"] == "goober/wall-in-one")
+    assert catalog_entry["version"] == "0.7.0"
+    public_docs = {
+        "plugin README": text("README.md").lower(),
+        "adapter architecture": text("ADAPTERS.md").lower(),
+        "testing guide": text("TESTING.md").lower(),
+        "repository README": (ROOT.parent / "README.md").read_text(encoding="utf-8").lower(),
+        "changelog": (ROOT.parent / "CHANGELOG.md").read_text(encoding="utf-8").lower(),
+        "helper README": (helper_root / "README.md").read_text(encoding="utf-8").lower(),
+    }
+    for label, document in public_docs.items():
+        assert "motionbgs" in document, f"{label} omits MotionBGS"
+        assert "wall-in-one-motionbgs" in document, f"{label} omits the external helper name"
+    require_all(
+        public_docs["plugin README"],
+        ("separately installed", "get helper", "only motionbgs"),
+        "Wall-in-One public MotionBGS install/degraded-mode documentation",
+    )
+    require_all(
+        public_docs["adapter architecture"],
+        ("process boundary", "8 kib", "128 kib", "has no `update()`"),
+        "MotionBGS process-boundary architecture documentation",
+    )
+    require_all(
+        public_docs["testing guide"],
+        ("standalone program", "cpu-budget", "missing", "incompatible"),
+        "MotionBGS test documentation",
+    )
+    assert "0.7.0" in public_docs["changelog"]
 
 
 def test_ui_and_documentation_surface() -> None:
@@ -4994,7 +5026,7 @@ def test_ui_and_documentation_surface() -> None:
 
     readme = text("README.md").lower()
     for phrase in (
-        "0.6",
+        "0.7",
         "directly starts",
         "does not hand playback",
         "per-display",
@@ -5019,7 +5051,7 @@ def test_ui_and_documentation_surface() -> None:
         "64 entries",
         "64 mib",
         "2 mib",
-        "same-origin redirects",
+        "same-origin",
         "only as local files",
     ):
         assert phrase in readme, f"README does not document {phrase!r}"
@@ -5163,6 +5195,15 @@ def test_display_navigation_and_drag_contract() -> None:
         "panel.nav.display_schedule",
     ):
         assert retired_route not in navigation, f"display navigation still exposes retired route {retired_route!r}"
+    require_all(
+        navigation,
+        (
+            "local playlistPages = math.max(1, math.ceil(#playlistIds / PLAYLIST_NAV_PAGE_SIZE))",
+            "local firstPlaylist = (playlistNavigationPage - 1) * PLAYLIST_NAV_PAGE_SIZE + 1",
+            "local lastPlaylist = math.min(#playlistIds, firstPlaylist + PLAYLIST_NAV_PAGE_SIZE - 1)",
+        ),
+        "bounded playlist navigation pages",
+    )
 
     select_screen = panel[
         panel.index("function panelPages.selectScreenPage(output)") : panel.index(
@@ -5217,30 +5258,83 @@ def test_display_navigation_and_drag_contract() -> None:
     assert 'noctalia.tr("panel.pairings.new")' not in library_section
 
     token_reconciliation = panel[
-        panel.index("local function reconcileDragTokens()") : panel.index(
+        panel.index("local function markDragTokensDirty()") : panel.index(
             "-- Every insertion zone shares one callback."
         )
     ]
     require_all(
         token_reconciliation,
         (
-            "local nextPlaylistByToken = {}",
-            "local nextPlaylistTokenById = {}",
+            "dragTokenGeneration += 1",
+            "dragReconcile = nil",
+            "resetLibraryDragTokens()",
+            "local function stepDragTokenReconciliation()",
+            "for _ = 1, DRAG_RECONCILE_BATCH do",
+            "state.generation ~= dragTokenGeneration",
+            'phase = "pairings"',
+            "for _, descriptor in ipairs(noctalia.outputs()) do",
+            'outputs[output] = { schedules = {} }',
             "playlist.quick_choice ~= true",
             'nextDragToken("r")',
-            "nextPlaylistByToken[token] = id",
-            "nextPlaylistTokenById[id] = token",
+            "state.playlist_by_token[token] = id",
+            "state.playlist_token_by_id[id] = token",
             'local namespace = "@schedule:" .. output',
             'nextDragToken("s")',
             'nextDragToken("q")',
-            "schedule_output = output",
+            "schedule_output = state.active_output",
             "schedule_id = scheduleId",
-            'targetTokens["@default"] = defaultToken',
+            'state.active_target_tokens["@default"] = defaultToken',
             'display_role = "default"',
-            "dragPlaylistByToken = nextPlaylistByToken",
-            "dragPlaylistTokenById = nextPlaylistTokenById",
+            'elseif state.phase == "commit" then',
+            "dragPlaylistByToken = state.playlist_by_token",
+            "dragPlaylistTokenById = state.playlist_token_by_id",
+            "libraryPairingCache.index = state.library_pairing_index",
+            "dragTokensDirty = false",
         ),
-        "opaque playlist and schedule drag tokens",
+        "bounded opaque playlist and schedule drag-token reconciliation",
+    )
+    assert token_reconciliation.index('elseif state.phase == "commit" then') \
+        < token_reconciliation.index("dragTokensDirty = false")
+
+    panel_update = panel[panel.index("function update()") : panel.index("function onIpc")]
+    require_all(
+        panel_update,
+        (
+            "if isOpen and dragTokensDirty then",
+            "local completed = stepDragTokenReconciliation()",
+            "if not completed then",
+            "preview.wake()",
+        ),
+        "bounded drag-token scheduler",
+    )
+
+    playlist_drop = panel[
+        panel.index("function onPlaylistDrop(payload, value)") : panel.index(
+            "function onDisplayPlaylistDrop(payload, value)"
+        )
+    ]
+    require_all(
+        playlist_drop,
+        (
+            "local pairingId = dragPairingByToken[payloadToken]",
+            "pairingId = dragLibraryPairingByToken[payloadToken]",
+        ),
+        "separate bounded library drag-token namespace",
+    )
+
+    library_watch = panel[
+        panel.index("noctalia.state.watch(LIBRARY_STATE_KEY") : panel.index(
+            "noctalia.state.watch(RENDERER_STATUS_KEY"
+        )
+    ]
+    require_all(
+        library_watch,
+        (
+            "local adopted, changed = adoptDomain(libraryState, nextState)",
+            "if changed then",
+            "resetLibraryDragTokens()",
+        ),
+        "library-generation drag-token retirement",
     )
 
     schedule_drop = panel[
@@ -5460,7 +5554,7 @@ def main() -> None:
     test_ui_and_documentation_surface()
     test_declarative_ui_layout_contract()
     test_display_navigation_and_drag_contract()
-    print("Wall-in-One v0.6 offline contract passed.")
+    print("Wall-in-One v0.7 offline contract passed.")
 
 
 if __name__ == "__main__":

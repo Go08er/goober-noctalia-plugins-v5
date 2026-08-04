@@ -1,4 +1,4 @@
-# Wall-in-One 0.5 manual test
+# Wall-in-One 0.7 manual test
 
 Use the VM test or a genuinely separate nested Wayland/Noctalia session. A
 fresh profile launched into the active desktop is not isolation: Noctalia's CLI
@@ -33,16 +33,19 @@ external owner.
 
 1. Import the repository through Noctalia's Git source flow and enable
    `goober/wall-in-one` from its catalog entry. Confirm all five services
-   (`coordinator`, `renderer`, `motionbgs`, `palettes`, and `wallhaven`) start
-   and the hub, shortcut, and `goober/wall-in-one:wall-in-one` widget load
-   without undeclared-setting, glyph, or Luau errors.
+   (`coordinator`, `renderer`, the thin `motionbgs` bridge, `palettes`, and
+   `wallhaven`) start and the hub, shortcut, and
+   `goober/wall-in-one:wall-in-one` widget load without undeclared-setting,
+   glyph, or Luau errors. Do this once without installing the external
+   `wall-in-one-motionbgs` program: only the MotionBGS page should be degraded,
+   with **Open MotionBGS** and **Get helper** still available.
 2. Add two widget placements. Give them different glyphs, labels, label
    visibility, and colors. Open Noctalia's native searchable icon selector from
    each placement, choose different icons, reload, and confirm each placement
    keeps its own choice.
 3. Change the left, middle, and right gesture mappings in the hub. Exercise a
    native action, a provider panel, a capture action, a scheduler action, and
-   **Open Wall-in-One**. Reload and confirm the schema-4 gesture map persists.
+   **Open Wall-in-One**. Reload and confirm the schema-5 gesture map persists.
 4. Add the Control Center shortcut. Left and right mappings must work; the
    shortcut must not synthesize a middle-click callback.
 
@@ -336,7 +339,7 @@ Use both `rotate` and `shuffle`, and test the explicit random navigation action.
    the global Noctalia palette. The other display still receives its own still
    and dynamic renderer.
 8. Seed a valid schema-3 playlist/output configuration and schema-6 runtime,
-   then start schema 4. Migration must create reusable pairing records and
+   then start schema 5. Migration must create reusable pairing records and
    occurrence links, expand every schedule without a month filter to all twelve
    months, and preserve the original schedule array as top-to-bottom precedence.
    With **start on load** off, definitions, stable IDs, history, schedule
@@ -411,30 +414,58 @@ respect the provider's request interval.
    report that limitation visibly; API, parser, authentication, or panel
    availability must never remove the direct-site fallback.
 
-## MotionBGS best-effort provider
+## MotionBGS external helper
 
-MotionBGS exposes public pages rather than a stable API, so begin with the
-offline fixture used by the VM test.
+MotionBGS exposes public pages rather than a stable API. Its HTTP, parser,
+cache, and download work now belongs to the separately installed one-shot
+Python 3.11+ program, not Noctalia's Luau service. Begin with the offline helper
+and VM fixtures; live-site behavior is exploratory.
 
-1. Search a fixture containing same-origin cards with `span.ttl`, thumbnails,
-   and numeric media IDs. Result count must obey the configured 1–24 bound.
-2. Open details containing same-origin HD/4K `/dl/<quality>/<id>/` links. Then
-   request the same search/details inside the cache TTL and confirm no second
-   helper fetch occurs.
-3. Feed an anti-bot challenge, unknown markup, cross-origin redirect, unsafe
-   URL, oversized response, invalid content type, and malformed helper status.
-   Each must fail closed with a bounded diagnostic; no browser automation or
-   challenge bypass is allowed.
-4. Download the local MP4 fixture. Confirm bounded size/time, an MP4 signature,
-   atomic install, and the adjacent `.motionbgs.json` provenance sidecar. With
-   no advanced override, the destination is the marked
+1. With the helper absent, confirm only MotionBGS search/download is degraded.
+   The page must explain the missing binary and retain working **Open
+   MotionBGS** and **Get helper** buttons. Wallhaven, local libraries,
+   playlists, palettes, Workshop discovery, and renderer controls must remain
+   unchanged.
+2. Obtain `motionbgs-helper/wall-in-one-motionbgs` through the **Get helper**
+   link. First install it as the exact executable name
+   `wall-in-one-motionbgs` on the isolated session's `PATH`, mark it executable,
+   leave the advanced path setting empty, and request a reprobe. Then remove it
+   from that test PATH, select its absolute executable with **MotionBGS helper
+   program**, and reprobe again. Relative paths, a directory, a renamed
+   arbitrary command, malformed probe output, or incompatible capabilities must
+   fail closed for MotionBGS only.
+3. Capture one successful `WIO-MBGS-PROBE1` schema-1 probe and one
+   `WIO-MBGS-RPC1` schema-1 operation. Confirm each action starts a fresh process
+   and exits; requests never exceed 8 KiB, responses never exceed 128 KiB, and
+   transport files are private regular files beneath
+   `pluginDataDir()/motionbgs-bridge-v1/cache/rpc`. Cache data must stay beneath
+   `pluginDataDir()/motionbgs-bridge-v1/cache`; the retired in-process cache
+   location must not be restored or reused.
+4. Search a fixture containing same-origin cards, thumbnails, and numeric media
+   IDs. Result count must obey the configured 1–48 bound. Open details
+   containing same-origin HD/4K `/dl/<quality>/<id>/` links, then repeat the
+   request inside the cache TTL and confirm the one-shot program performs no
+   second HTTP fetch.
+5. Feed an anti-bot challenge, unknown markup, cross-origin or mismatched
+   effective URL, unsafe path, oversized response, invalid MIME/signature pair,
+   and malformed RPC output. Each must fail closed with a bounded diagnostic.
+   Confirm ambient curl configuration is disabled, redirects never leave the
+   strict origin allowlist, and no browser automation or challenge bypass is
+   attempted.
+6. Download the local MP4 fixture. Confirm bounded size/time plus the file-size
+   backstop, MP4 MIME/signature agreement, atomic no-replace install, and the
+   adjacent `.motionbgs.json` provenance sidecar. The destination is the marked
    `Wall-in-One/MotionBGS` child beneath `video_directory`, not the user-owned
-   root itself.
-5. Test clear, monotonic command nonces, bounded queueing, serialized requests,
-   result/status mirroring in the coordinator, and the direct website fallback
-   when the public-page adapter is unavailable. Clear or disable the provider
-   during an in-flight fixture request and confirm its late completion cannot
-   repopulate cache/results or publish a success acknowledgement.
+   root itself. The response must retain `cached`, `source_url`, `fetched_at`,
+   the complete selected detail record, and the download receipt.
+7. Test clear, monotonic command nonces, bounded queueing, serialized network
+   starts, result/status mirroring in the coordinator, and the direct website
+   fallback. Clear, disable, or reprobe during an in-flight fixture request and
+   confirm its late completion cannot publish success/results, install media,
+   or leak request/response/temporary files. A search/detail cache write that
+   atomically committed just before guard revocation may remain as harmless
+   metadata; clear once more when an empty metadata cache is the desired final
+   state.
 
 Live-site behavior is exploratory because site markup can change. Do not make a
 release depend on a successful public-network request.
@@ -444,10 +475,11 @@ release depend on a successful public-network request.
 After several mappings, pairings, playlist edits, and schedules, inspect plugin
 data:
 
-- `config.json` is schema 4 and contains `gestures`, the reusable `pairings`
-  catalog, named `playlists`, and per-output fallback/Quick Choice, playback
-  override, and list-ordered month/weekday schedule configuration;
-- every catalog pairing is a stable-ID media/still/theme bundle. Every playlist
+- `config.json` is schema 5 and contains `gestures`, item-profile `pairings`
+  plumbing, named `playlists`, per-display engines, and per-output fallback/Quick
+  Choice, playback override, and list-ordered month/weekday schedule
+  configuration;
+- every item profile is a stable-ID media/still/theme bundle. Every playlist
   occurrence has its own stable entry ID, a validated bundle snapshot, and an
   optional `pairing_id` link; detaching a deleted catalog item preserves that
   snapshot;
@@ -500,8 +532,10 @@ must remain intact.
 
 The offline headless equivalent is
 [`tests/vm/wall-in-one.nix`](../vm/wall-in-one.nix). Run it with
-`nix build -L path:.#vm-test-wall-in-one`. The current schema-4/runtime-6,
-palette, native-Wallhaven, managed-MotionBGS, and named-playlist tree passes that
-full integration VM. Repeat it after any code or harness change before using
-this checklist on a disposable live profile; the VM does not certify real GPU,
-audio, lock-screen, compositor-layer, or shell-theme behavior.
+`nix build -L path:.#vm-test-wall-in-one`. The current schema-5/runtime-6,
+palette, native-Wallhaven, external-MotionBGS bridge/helper, and named-playlist
+tree are covered by that full integration VM. Repeat it after any code or
+harness change before using this checklist on a disposable live profile; the VM
+does not certify real GPU, audio, lock-screen, compositor-layer, or shell-theme
+behavior. In particular, mpvpaper is not installed on the current host, so this
+record makes no live internal-video playback claim.

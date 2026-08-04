@@ -21,7 +21,7 @@ inside the guest. Once every file is committed, `.#...` is equivalent.
 | --- | --- |
 | `vm-test` | Hydra rendering, actions, hot reload, settings, and native searchable glyph picker |
 | `vm-test-nocvox` | NocVox singleton listener, state/control matrix, diagnostics, validation, privacy, and teardown |
-| `vm-test-wall-in-one` | Five-service startup, provider policy, reusable pairings/playlists, month-aware schedules, adaptive palette and provider-thumbnail rendering, internal renderer ownership and crash backoff, MotionBGS fixtures, schema-3→4/runtime-6 migration, panel compilation/IPC, and teardown persistence |
+| `vm-test-wall-in-one` | Five-service startup, provider policy, reusable pairings/playlists, month-aware schedules, adaptive palette and provider-thumbnail rendering, internal renderer ownership and crash backoff, external MotionBGS bridge/helper fixtures, schema-3→5/runtime-6 migration, panel compilation/IPC, and teardown persistence |
 
 Each suite also exposes an interactive driver by adding `-driver` to its
 package name. For example:
@@ -69,14 +69,14 @@ notification call.
 
 ## Wall-in-One
 
-The complete schema-4/runtime-6, palette, native-Wallhaven, managed-MotionBGS,
+The complete schema-5/runtime-6, palette, native-Wallhaven, external-MotionBGS,
 and playlist VM is the authoritative integration gate. Run `nix build -L
 path:.#vm-test-wall-in-one` after any plugin or harness change; an older result
 is not evidence for a changed staging tree.
 
 The Wall-in-One suite imports all five production services (`coordinator`,
-`renderer`, `motionbgs`, `palettes`, and `wallhaven`) beside controlled
-Wallhaven-panel, W Engine, and mpvpaper fixtures. It pins the `plugins list`
+`renderer`, the thin `motionbgs` bridge, `palettes`, and `wallhaven`) beside
+controlled Wallhaven-panel, W Engine, and mpvpaper fixtures. It pins the `plugins list`
 grammar, rejects look-alike status tokens, exercises provider panels and service
 IPC, checks versioned palette/Wallhaven state, and verifies that every detected
 integration can be force-disabled without disabling its provider plugin. `auto`
@@ -97,7 +97,9 @@ Before opening the attached hub, the suite compiles the exact materialized
 `panel.luau` with the pinned Luau compiler. It then requires a real panel-open
 log, a changed compositor screenshot, a provider probe initiated by `onOpen`,
 and successful panel IPC. Luau load failures, `onOpen` failures, and local-
-register exhaustion fail the gate explicitly.
+The panel probe also opens a fresh Workshop card's synthesized-default editor
+and drives the bounded Wallhaven navigation path; a nil namespace lookup or
+callback CPU-budget overrun fails the guest.
 
 Wallhaven and MotionBGS thumbnail presentation is also exercised without the
 internet. The shipped thumbnail helper first runs its own boundary self-test;
@@ -134,11 +136,11 @@ global leader; an explicit lock-screen image remains an external override. The
 offline helper gate additionally rejects structurally invalid WebP and
 header-only AVIF when no decoder is available.
 
-A persistent config-schema-4 named playlist mixes static, video, and Workshop
-occurrences linked to reusable catalog pairings. A separate explicit schema-3
-fixture proves migration creates those catalog links, defaults an omitted month
-filter to all twelve months, removes numeric priority, and retains the original
-schema-3 document as the migration backup. The guest exercises pairing save,
+A migrated config-schema-5 named playlist mixes static, video, and Workshop
+occurrences linked to reusable item profiles. The explicit schema-3 fixture
+proves migration creates those links, defaults an omitted month filter to all
+twelve months, removes numeric priority, and retains the original schema-3
+document as the migration backup. The guest exercises pairing save,
 linked-occurrence synchronization, add, stable-ID placement, and safe catalog
 deletion that detaches but preserves a playlist snapshot. It also pins
 per-output shuffle/interval overrides and clean inheritance back to playlist
@@ -167,24 +169,36 @@ video removes only its managed automatic still. Native Wallhaven downloads are
 managed only when their exact `.wallhaven.json` sidecar validates; files written
 by the separate official plugin remain user-owned and non-deletable here.
 
-MotionBGS is tested without internet access. A guest-only conservative helper
-returns pinned search/detail HTML and a tiny local MP4 through the exact
-`WIO-MBG1` protocol. Tests cover same-origin parsing, bounded results, HD/4K
-links, the same route validation used for pageable latest/genre/4K catalogs, a
-36-card pageable genre fixture, per-page cache hits without another
-fetch, rejection of the site's broken HD-page shape before transport,
-serialized commands, challenge and
-unknown-markup failures, cross-origin rejection, atomic MP4 install, provenance
-sidecar creation, clear, and status/results mirroring. Provider previews use a
-second exact-protocol fixture and real image pixels. The shipped helper's
-local self-test runs before the fixture is substituted.
+MotionBGS is tested without internet access and without putting provider work
+back into Luau. The guest exposes a separately installed one-shot
+`wall-in-one-motionbgs` fixture, exercises the bridge's exact
+`WIO-MBGS-PROBE1`/`WIO-MBGS-RPC1` schema-1 interface, and bounds JSON requests
+to 8 KiB and responses to 128 KiB. It verifies the advanced absolute-path
+setting and configured-binary probe path. Fixed-name `PATH` discovery plus
+missing, malformed, and incompatible binaries are pinned by the offline
+contract; they are not simulated by this VM. Cache state stays under
+`motionbgs-bridge-v1/cache`, its RPC files use the `cache/rpc` child, and every
+one-shot process and transport file terminates cleanly.
+
+The external-program fixture returns pinned normalized search/detail JSON and
+installs a tiny local MP4. It exercises bridge request validation, bounded
+results, HD/4K fields, pageable latest/genre/4K state, cache hits without
+another simulated transport, first-page-only HD, serialized starts, normalized
+failure propagation, atomic no-replace MP4 installation, provenance sidecar
+creation, schema-1 cache replacement on clear, and complete download
+response/result mirroring. Provider previews use a second exact-protocol
+fixture and real image pixels. Provider HTML parsing, redirects, effective-URL
+checks, and MIME/signature validation belong to the standalone helper's Python
+unit suite. The VM runs the bundled launcher and real standalone program's
+network-free self-tests, then probes the configured fake before exercising its
+normalized protocol responses.
 
 The guest currently seeds a config-schema-3 playlist/schedule fixture and a
-runtime-schema-1 pair fixture, confirms migration to config schema 4 and runtime
+runtime-schema-1 pair fixture, confirms migration to config schema 5 and runtime
 schema 6, then checks linked pairing snapshots, migration backups,
 corrupt-state fail-closed behavior, and cleanup of `.tmp`, `.part`, staging,
 FIFO, socket, and owned-child artifacts. The offline contract covers the wider
-supported config-schema-1/2 and runtime-schema-1–5 migration matrix, coordinated
+supported config-schema-1–4 and runtime-schema-1–5 migration matrix, coordinated
 transaction recovery, the 8 MiB read/write ceiling, bounded nested
 maps/arrays/paths, deterministic pair pruning, stable playlist entry IDs, and
 active-capture staging cleanup. Extending the VM itself across every legacy

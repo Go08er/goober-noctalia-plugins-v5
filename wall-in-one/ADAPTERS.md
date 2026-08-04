@@ -1,10 +1,11 @@
 # Wall-in-One provider and renderer architecture
 
-Wall-in-One `0.6.0` has three integration boundaries: Noctalia's public
-wallpaper and theme APIs, provider services shipped by Wall-in-One, and dynamic
-wallpaper processes started and supervised by Wall-in-One. It does not discover,
-open, signal, or exchange state with separate wallpaper extensions; all shop
-and renderer behavior belongs to Wall-in-One.
+Wall-in-One `0.7.0` has four integration boundaries: Noctalia's public wallpaper
+and theme APIs, provider services shipped by Wall-in-One, the separately
+installed MotionBGS helper program, and dynamic wallpaper processes started and
+supervised by Wall-in-One. It does not discover, open, signal, or exchange state
+with separate wallpaper extensions. The optional MotionBGS program is a
+one-shot provider adapter, not a renderer or long-lived plugin service.
 
 ## Routed panel
 
@@ -53,7 +54,7 @@ referenced by revision:
 The panel accepts a domain snapshot only when its service instance and revision
 match the lifecycle object. Commands carry monotonically increasing nonces and
 are never replayed automatically. The renderer, palette, Wallhaven, and
-MotionBGS services use their own bounded versioned state keys.
+MotionBGS bridge use their own bounded versioned state keys.
 
 Schema 5 retains the field name `pairings`, but this is item-profile and snapshot
 plumbing rather than a catalog users must populate. Library items synthesize a
@@ -191,9 +192,11 @@ Managed children are derived, not separately configurable:
 Each Library medium page reports its root, derived directories, relevant
 defaults, and Wall-in-One's private bounded metadata/preview cache locations.
 Private caches remain under `pluginDataDir()` and are not presented as library
-media. No provider metadata storage or network command is initialized before
-its matching root is ready; the palette service is likewise dormant until the
-explicit image root exists.
+media. The MotionBGS bridge uses
+`pluginDataDir()/motionbgs-bridge-v1/cache`; its short-lived schema-1 transport
+files use that root's `rpc` child. No provider metadata storage or network
+command is initialized before its matching root is ready; the palette service
+is likewise dormant until the explicit image root exists.
 
 Root files are user-owned and never deletable from the panel. A managed file is
 deletable only when it is a direct child of the expected marked directory and
@@ -218,39 +221,81 @@ JPG/PNG type, and atomically install both image and provenance without
 overwriting an existing pair. The optional API key is supplied only through a
 private header file. Public SFW browsing works without it.
 
-## MotionBGS shop service
+## MotionBGS process boundary
 
-MotionBGS has no stable public API. The `motionbgs` service therefore uses only
-public unauthenticated pages through a same-origin helper with curl configuration
-disabled, a three-redirect cap, one-MiB HTML limit, and serialized one-second
-request spacing. It does not log in, bypass a challenge, execute page scripts,
-or crawl multiple pages to manufacture search results.
+MotionBGS has no stable public API. Version 0.7 therefore removes its network,
+HTML parser, provider cache, and download implementation from Noctalia's Luau
+runtime. The `motionbgs` service is now a thin bridge: it has no `update()`
+callback, watches the existing schema-1 command key, validates settings and
+normalized results, serializes a bounded queue, and publishes the existing
+schema-1 acknowledgement/status/result state.
 
-Text search is one unpaged result set. Latest, genre/tag, and 4K catalogs use
-validated previous/next routes; HD remains first-page-only while MotionBGS
-redirects later HD pages into the unfiltered catalog. Details accept only a
-validated slug and downloads only numeric `/dl/hd|4k/<id>/` routes. MP4 files
-are size/type/signature checked and atomically installed with provenance.
+The provider implementation is the separately installed one-shot Python 3.11+
+program `wall-in-one-motionbgs`, currently staged in the repository's top-level
+`motionbgs-helper/` directory. The bridge accepts only that fixed command name
+when Noctalia finds it on `PATH`, or a user-selected absolute executable path
+from the advanced `motionbgs_binary_path` setting. This prevents the setting
+from becoming an arbitrary shell-command surface. The program may later move
+to a dedicated repository without changing the process interface.
 
-Listing parsing preserves one anchor per update callback so one complex card
-cannot consume the host's callback CPU budget. The service switches from its
-250ms idle cadence to 16ms only while parser state is active, then restores the
-idle cadence on success, error, cancellation, configuration disable, launch
-refusal, or exit. The live-like fixture contains 355 unrelated anchors and 36
-cards: 391 anchors plus EOF and publication schedule 393 small callbacks, or
-roughly 6.3 seconds instead of roughly 98 seconds at the idle cadence.
+The bundled `scripts/motionbgs-provider` launcher is a protocol and resource
+gate, not a second parser. It resolves and verifies the executable, removes
+ambient Python path injection, creates private bounded stdout/stderr files, and
+applies an OS file-size limit before execution. A compatibility check runs:
 
-Pagination metadata is extracted in one pass over at most 32 `<link>` elements
-within the first 16 KiB of the document head; the title-derived total hint uses
-that same prefix. The bound removes the former full-document pagination scans
-that could breach Noctalia's 25 ms update-callback deadline after card parsing.
+```text
+wall-in-one-motionbgs probe --protocol 1
+```
 
-MotionBGS may canonicalize an exact text tag search from `/search?q=X` to
-`/tag:<slug>/`. Wall-in-One accepts that redirect only on the same origin and
-only when the tag equals the normalized query (lowercase with normalized spaces
-replaced by hyphens and still passing the strict slug validator). A different
-tag, catalog route, malformed path, or cross-origin destination fails closed.
-The same rule validates restored search-cache records.
+The exact probe record is `WIO-MBGS-PROBE1`, schema 1, and must advertise
+`search,details,download,clear`. Each accepted command then creates one JSON
+request of at most 8 KiB and one no-replace JSON response of at most 128 KiB
+under `pluginDataDir()/motionbgs-bridge-v1/cache/rpc`. The launcher invokes one
+`WIO-MBGS-RPC1` schema-1 operation and exits. The external program owns HTTP,
+HTML parsing, its `motionbgs-bridge-v1/cache` data, request-rate serialization,
+and managed MP4 installation; the Luau bridge validates the normalized result
+again before publishing it.
+
+Every RPC is also bound to a unique one-line cancellation guard in that same
+private directory. The guard path appears in both the request and launcher
+arguments. Configuration changes, service exit, and operation invalidation
+remove it first; the helper checks it before network hops, at bounded
+search/detail checkpoints, and immediately before no-replace installation.
+Non-download work has a 30-second helper deadline. A cold download has a
+75-second helper deadline inside an 80-second Noctalia process timeout, covering
+the possible 20-second detail fetch, request spacing, and 50-second media fetch.
+
+A download response carries `cached`, `source_url`, `fetched_at`, the complete
+normalized `selected` detail record, and the `download` receipt. The bridge
+cross-validates that detail and receipt against the requested slug, quality,
+managed path, and installed provenance before updating results or status.
+
+The external program uses public unauthenticated pages only. Curl's ambient
+configuration is disabled. Every request is restricted to the MotionBGS HTTPS
+origin; redirects are followed explicitly with a three-hop ceiling, strict
+same-origin validation, and effective-URL equality for each hop. HTML is capped
+at one MiB and parser tag/attribute work is bounded. Text search is unpaged;
+latest, genre/tag, and 4K use validated previous/next routes; HD remains
+first-page-only. Exact `/search?q=X` to `/tag:<normalized-X>/`
+canonicalization is accepted, while a different tag, catalog, malformed path,
+or cross-origin destination fails closed.
+
+Details accept only a validated slug and downloads only numeric
+`/dl/hd|4k/<id>/` routes. File-size limits are backed by `ulimit -f`; HTML and
+MP4 MIME types are cross-checked with content signatures; cache and transport
+files are bounded regular files; and an MP4 plus its provenance sidecar are
+installed atomically without replacing an existing destination. The program
+does not log in, bypass a challenge, execute page scripts, or crawl multiple
+pages to manufacture results.
+
+A same-origin download redirect is accepted only when its final `/dl/...` or
+`/media/<id>/*.mp4` route still names the ID selected from the detail page. A
+different ID, unexpected query, or unrelated same-origin route fails before a
+file can be installed.
+
+Missing, unreadable, or protocol-incompatible programs set a bounded degraded
+state for MotionBGS only. The rest of Wall-in-One continues normally, and the
+panel retains independent direct-site and helper-download links.
 
 The selector profile was independently implemented from the public site, with
 WaifuX revision `ff44ecba11227ff965074ad3320096fa5827781c` used only as a

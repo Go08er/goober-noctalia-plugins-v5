@@ -1,6 +1,6 @@
 # Wall-in-One
 
-Wall-in-One `0.6.0` is a Noctalia v5 wallpaper library for still images, local
+Wall-in-One `0.7.0` is a Noctalia v5 wallpaper library for still images, local
 videos, and installed Wallpaper Engine Workshop projects. Every dynamic source
 is paired with a real still and a Noctalia theme policy. Named playlists can be
 shared across displays while retaining independent playback, engine settings,
@@ -52,9 +52,9 @@ The main workflows are:
    immediately usable with an implicit adaptive wallpaper palette; no separate
    pairing-creation step is required. Customize only the items that need a
    different still or palette.
-2. Search Wallhaven's official API or MotionBGS's bounded public-page service
-   under **Shops**. Steam links remain available for acquiring and managing
-   Workshop content.
+2. Search Wallhaven's official API or, when its separately installed helper is
+   available, MotionBGS's bounded public pages under **Shops**. Steam links
+   remain available for acquiring and managing Workshop content.
 3. Select a display beneath **Home**. Its one page combines renderer controls,
    rotate/shuffle and interval policy, a pinned default playlist, ordered
    calendar overrides, and its owned mpvpaper and `linux-wallpaperengine`
@@ -147,34 +147,62 @@ a six-hour last-known-good community catalog. Noctalia has one shell palette,
 so an optional leader display is the sole writer; otherwise deterministic
 transition order makes the latest successful apply authoritative.
 
-## MotionBGS provider and fallback
+## MotionBGS external helper and fallback
 
-MotionBGS has no versioned public API. Wall-in-One uses public unauthenticated
-pages only, serialized one second apart, with same-origin redirects, bounded
-HTML/results/downloads, atomic MP4 installation, and provenance sidecars. It
-does not log in, bypass challenges, execute page scripts, or crawl in bulk.
-**Open MotionBGS** remains available if markup changes.
+MotionBGS has no versioned public API, so its integration is optional and
+process-isolated. Wall-in-One ships a thin `motionbgs` Luau bridge and a bounded
+launcher, but not an in-process HTTP client or HTML parser. Install the
+one-shot Python 3.11+ program from this repository's top-level
+[`motionbgs-helper/`](../motionbgs-helper/) directory as the executable
+`wall-in-one-motionbgs` on `PATH`. Alternatively, select that executable's
+absolute path with the advanced **MotionBGS helper program** setting. The
+program is staged separately here for 0.7 and may later move to its own
+repository without changing the interface.
+
+From a repository checkout, one user-local installation is:
+
+```bash
+install -Dm755 motionbgs-helper/wall-in-one-motionbgs \
+  "$HOME/.local/bin/wall-in-one-motionbgs"
+wall-in-one-motionbgs probe --protocol 1
+```
+
+Ensure `$HOME/.local/bin` is on the environment inherited by Noctalia, or use
+the advanced absolute-path setting instead. The plugin does not install or
+update this program.
+
+The bridge probes interface schema 1 and requires the exact
+search/details/download/clear capability set. If the program is absent,
+unreadable, or incompatible, only MotionBGS search and download degrade. Local
+libraries, playlists, renderers, Wallhaven, palettes, and Workshop discovery
+continue normally. The MotionBGS page explains the detected state and retains
+independent **Open MotionBGS** and **Get helper** links.
+
+Each operation is a new helper process. The bridge writes one schema-1 JSON
+request of at most 8 KiB and accepts one schema-1 JSON response of at most
+128 KiB. Request/response transport lives under
+`pluginDataDir()/motionbgs-bridge-v1/cache/rpc`; the external program owns its
+bounded metadata cache in the parent
+`pluginDataDir()/motionbgs-bridge-v1/cache`. The bridge has no `update()`
+callback and performs no provider HTTP, HTML parsing, cache maintenance, or
+media download work inside Noctalia's Luau runtime.
+
+The external program uses only public unauthenticated pages, serializes network
+starts at least one second apart, and accepts only the MotionBGS HTTPS origin.
+Ambient curl configuration is disabled. Redirects are followed explicitly,
+remain same-origin, and require each curl effective URL to equal the requested
+URL. HTML and MP4 size limits have an OS file-size backstop; declared MIME is
+cross-checked against content signatures; downloads use atomic no-replace
+installation plus provenance sidecars. It does not log in, bypass challenges,
+execute page scripts, or crawl in bulk.
 
 Text search is unpaged. Latest, genre/tag, and 4K catalogs use validated
 previous/next routes; HD is first-page-only while later HD pages redirect to an
-unfiltered catalog.
-
-Listing parsing remains one anchor per callback for Noctalia's CPU budget. The
-service temporarily uses a 16ms update cadence only while parsing, then restores
-its 250ms idle cadence on every terminal path. The live-like fixture contains
-355 unrelated anchors plus 36 wallpaper cards (391 anchors total), so its 393
-parse/EOF/publication callbacks take roughly 6.3 seconds instead of roughly 98
-seconds at the idle cadence.
-
-Pagination and total metadata are scanned once from only the first 16 KiB of the
-document head, with at most 32 `<link>` elements inspected. This replaces the
-old full-document pagination passes that could exceed Noctalia's 25 ms callback
-budget after card parsing.
-
-MotionBGS may canonicalize `/search?q=X` to `/tag:<slug>/`. Wall-in-One accepts
-only a same-origin tag exactly equal to the normalized query (lowercase, spaces
-to hyphens, strict slug); mismatched catalogs and cross-origin redirects fail
-closed. Cached search records use the same validation.
+unfiltered catalog. MotionBGS may canonicalize `/search?q=X` to
+`/tag:<slug>/`; the helper accepts only a same-origin tag exactly equal to the
+normalized query. Mismatched catalogs, unsafe paths, changed markup, and
+cross-origin destinations fail closed. **Open MotionBGS** remains available if
+the helper is missing or the site changes.
 
 ## Local libraries
 
@@ -223,6 +251,8 @@ Manifest ID: `goober/wall-in-one`.
 Manifest dependencies are `bash`, `curl`, and `sha256sum`; capabilities still
 fail soft at runtime. Optional commands are:
 
+- Python 3.11+ and the separately installed `wall-in-one-motionbgs` program for
+  MotionBGS search, details, caching, and managed downloads;
 - `ffmpeg` for still extraction and validation;
 - `mpvpaper` for video playback;
 - `linux-wallpaperengine` for Workshop playback and rendered capture;
@@ -230,8 +260,10 @@ fail soft at runtime. Optional commands are:
 - `steam` or `xdg-open` for Steam/Workshop links; and
 - `xdg-open` for direct provider-site fallbacks.
 
-Network failures affect only the relevant shop. Downloaded media, local
-libraries, item profiles, playlists, and direct links remain available.
+Network failures or a missing MotionBGS program affect only the relevant shop.
+Downloaded media, local libraries, item profiles, playlists, and direct links
+remain available. Python 3.11+ is not an enable-time dependency for the base
+plugin; it is required only when using the optional external MotionBGS program.
 
 ## Settings
 
@@ -244,6 +276,9 @@ settings wall.
 
 MotionBGS defaults are HD, 48 results, 30-minute metadata TTL, and 256 MiB
 maximum download; bounds are 1–48 results, 5–1,440 minutes, and 16–512 MiB.
+Leave **MotionBGS helper program** empty to detect the fixed
+`wall-in-one-motionbgs` name on `PATH`, or select an absolute executable path
+there. Wall-in-One does not accept an arbitrary shell command in this setting.
 The MIT license covers plugin code, not downloaded artwork. Provider sidecars
 record provenance and deletion authority, not redistribution permission.
 
@@ -251,8 +286,10 @@ record provenance and deletion authority, not redistribution permission.
 
 Noctalia loads each manifest entry into an isolated `ScriptRuntime`; the pinned
 Luau surface has no supported shared-module loader. The coordinator and panel
-therefore remain self-contained, while renderer and provider domains are
-separate scheduled services communicating through bounded versioned state.
+therefore remain self-contained, while renderer and provider domains use
+bounded versioned state. MotionBGS crosses a process boundary instead: its Luau
+entry only probes and invokes the separately installed one-shot program over
+bounded schema-1 files.
 
 ## Stored state and upgrades
 
@@ -283,10 +320,11 @@ in Diagnostics.
 ## Current testing boundary
 
 Offline and VM gates cover schema migration, root gating, provider bounds,
-incremental parsing, route validation, exact renderer ownership, capture, item
-profiles, playlist snapshots, and schedules. A real disposable Wayland session
-is still required to judge compositor layer ordering, GPU rendering, audio, and
-visual theme propagation.
+MotionBGS probe/RPC isolation, external parser and route validation, exact
+renderer ownership, capture, item profiles, playlist snapshots, and schedules.
+A real disposable Wayland session is still required to judge compositor layer
+ordering, GPU rendering, audio, and visual theme propagation; mpvpaper is not
+installed on the current host, so live internal video playback is not claimed.
 
 ```bash
 noctalia plugins lint wall-in-one

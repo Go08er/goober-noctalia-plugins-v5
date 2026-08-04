@@ -1,6 +1,6 @@
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "0.6.0"
+version = "0.7.0"
 plugin_api = 17
 author = "goober"
 license = "MIT"
@@ -32,6 +32,15 @@ type = "bool"
 label_key = "settings.use_motionbgs.label"
 description_key = "settings.use_motionbgs.description"
 default = true
+
+[[setting]]
+key = "motionbgs_binary_path"
+type = "file"
+label_key = "settings.motionbgs_binary_path.label"
+description_key = "settings.motionbgs_binary_path.description"
+default = ""
+visible_when = { key = "use_motionbgs", values = ["true"] }
+advanced = true
 
 [[setting]]
 key = "capture_directory"

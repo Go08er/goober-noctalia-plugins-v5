@@ -63,6 +63,7 @@ local WALLHAVEN_COMMAND_KEY = "wall_in_one_wallhaven_command_v1"
 local WALLHAVEN_STATUS_KEY = "wall_in_one_wallhaven_status_v1"
 local WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"
 local MOTIONBGS_URL = "https://motionbgs.com/"
+local MOTIONBGS_HELPER_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/motionbgs-helper"
 local WALLHAVEN_URL = "https://wallhaven.cc/"
 
 local OPEN_TARGETS = {
@@ -888,6 +889,7 @@ function wallInOne.settingsSnapshot()
         motionbgs_cache_minutes = wallInOne.settingInt("motionbgs_cache_minutes", 30, 5, 1440),
         motionbgs_max_download_mb = wallInOne.settingInt("motionbgs_max_download_mb", 256, 16, 512),
         motionbgs_quality = if wallInOne.settingString("motionbgs_quality", "hd") == "4k" then "4k" else "hd",
+        motionbgs_binary_path = wallInOne.settingString("motionbgs_binary_path", ""),
         image_directory = wallInOne.captureDirectory(),
         wallhaven_managed_directory = wallInOne.wallhavenManagedDirectory(),
         automatic_stills_directory = wallInOne.automaticStillDirectory(),
@@ -2703,6 +2705,12 @@ function wallInOne.currentProviderSignature()
         tostring(providers.motionbgs.available),
         tostring(providers.motionbgs.browser_available),
         tostring(providers.motionbgs.integration_available),
+        tostring(providers.motionbgs.binary_available),
+        tostring(providers.motionbgs.binary_compatible),
+        tostring(providers.motionbgs.binary_path),
+        tostring(providers.motionbgs.binary_version),
+        tostring(providers.motionbgs.probe_state),
+        tostring(providers.motionbgs.availability_reason),
         tostring(colors.source),
         tostring(colors.scheme),
     }, "|")
@@ -2796,8 +2804,25 @@ function wallInOne.refreshBackendPolicy()
     providers.motionbgs.integration_available = providers.motionbgs.allowed
         and type(motionBgsStatus) == "table"
         and motionBgsStatus.available == true
-    -- The direct website remains available independently from the bundled
-    -- scraper service.
+    providers.motionbgs.binary_available = type(motionBgsStatus) == "table"
+        and motionBgsStatus.binary_available == true
+    providers.motionbgs.binary_compatible = type(motionBgsStatus) == "table"
+        and motionBgsStatus.binary_compatible == true
+    providers.motionbgs.binary_path = if type(motionBgsStatus) == "table"
+        then tostring(motionBgsStatus.binary_path or "")
+        else ""
+    providers.motionbgs.binary_version = if type(motionBgsStatus) == "table"
+        then tostring(motionBgsStatus.binary_version or "")
+        else ""
+    providers.motionbgs.probe_state = if type(motionBgsStatus) == "table"
+        then tostring(motionBgsStatus.probe_state or "")
+        else ""
+    providers.motionbgs.availability_reason = if type(motionBgsStatus) == "table"
+        then tostring(motionBgsStatus.availability_reason or "")
+        else ""
+    providers.motionbgs.install_url = MOTIONBGS_HELPER_URL
+    -- The direct website remains available independently from the optional
+    -- external provider program.
     providers.motionbgs.available = providers.motionbgs.browser_available
     providers.motionbgs.url = MOTIONBGS_URL
     local nextWEngine = table.concat({
@@ -7871,6 +7896,20 @@ function wallInOne.openMotionBgs()
     end
 end
 
+function wallInOne.openMotionBgsHelper()
+    local started = noctalia.runAsync("xdg-open " .. wallInOne.shellQuote(MOTIONBGS_HELPER_URL), function(result)
+        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
+            wallInOne.setActionError(
+                noctalia.tr("errors.motionbgs_helper_open", { detail = wallInOne.commandFailureDetail(result) }),
+                "motionbgs-helper"
+            )
+        end
+    end, 5000)
+    if not started then
+        wallInOne.setActionError(noctalia.tr("errors.motionbgs_helper_start"), "motionbgs-helper")
+    end
+end
+
 function wallInOne.openWallhavenSite()
     local started = noctalia.runAsync("xdg-open " .. wallInOne.shellQuote(WALLHAVEN_URL), function(result)
         if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
@@ -7950,7 +7989,9 @@ function wallInOne.sendMotionBgsCommand(request, action)
         wallInOne.setActionError(noctalia.tr("errors.storage_disabled"), "storage")
         return false
     end
-    if not wallInOne.settingBool("use_motionbgs", true) or providers.motionbgs.integration_available ~= true then
+    if not wallInOne.settingBool("use_motionbgs", true)
+        or (action ~= "probe" and providers.motionbgs.integration_available ~= true)
+    then
         wallInOne.setActionError(noctalia.tr("errors.motionbgs_unavailable"), "motionbgs")
         return false
     end
@@ -7976,7 +8017,7 @@ function wallInOne.sendMotionBgsCommand(request, action)
             then "4k"
             else "hd"
         command.force = request.force == true
-    elseif action ~= "clear" then
+    elseif action ~= "clear" and action ~= "probe" then
         wallInOne.setActionError(noctalia.tr("errors.motionbgs_action"), "motionbgs")
         return false
     end
@@ -8422,6 +8463,10 @@ function wallInOne.handleCommand(request)
         wallInOne.sendMotionBgsCommand(request, "download")
     elseif kind == "motionbgs_clear" then
         wallInOne.sendMotionBgsCommand(request, "clear")
+    elseif kind == "motionbgs_probe" then
+        wallInOne.sendMotionBgsCommand(request, "probe")
+    elseif kind == "motionbgs_helper_open" then
+        wallInOne.openMotionBgsHelper()
     elseif kind == "library_refresh" then
         wallInOne.refreshLibrary()
         wallInOne.publishStatus()
@@ -8430,6 +8475,9 @@ function wallInOne.handleCommand(request)
     elseif kind == "probe" then
         wallInOne.refreshAvailability()
         wallInOne.probeColorScheme()
+        if wallInOne.settingBool("use_motionbgs", true) then
+            wallInOne.sendMotionBgsCommand(request, "probe")
+        end
     end
 end
 

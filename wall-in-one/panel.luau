@@ -19,6 +19,9 @@ local PLAYLIST_ENTRY_CHUNK = 12
 local PAIRING_CARD_CHUNK = 12
 local BROWSER_GRID_COLUMNS = 4
 local PLAYLIST_LIBRARY_COLUMNS = 3
+local DRAG_RECONCILE_BATCH = 64
+local LIBRARY_PAGE_SIZE = 24
+local PLAYLIST_NAV_PAGE_SIZE = 16
 
 local status = nil
 local lifecycleStatus = nil
@@ -66,9 +69,9 @@ local entryAddedAtDraft = ""
 local playlistVisibleEntries = PLAYLIST_ENTRY_CHUNK
 local wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
 local motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
-local libraryVisibleStills = LIBRARY_ENTRY_CHUNK
-local libraryVisibleVideos = LIBRARY_ENTRY_CHUNK
-local libraryVisibleWorkshops = LIBRARY_ENTRY_CHUNK
+local libraryPageStills = 1
+local libraryPageVideos = 1
+local libraryPageWorkshops = 1
 
 local pairingEditorOpen = false
 local pairingEditorKind = "static"
@@ -76,7 +79,8 @@ local editingPairingId = ""
 local pairingEditorRevision = 0
 local pendingResetPairingId = ""
 local playlistLibraryFilter = "all"
-local playlistLibraryVisible = PAIRING_CARD_CHUNK
+local playlistLibraryPage = 1
+local playlistNavigationPage = 1
 local displayPlaylistVisible = PAIRING_CARD_CHUNK
 local adaptivePreviewSequence = 0
 local adaptivePreviewInstance = ""
@@ -90,12 +94,17 @@ local libraryPairingCache = { index = {}, instance = "", revision = -1, source =
 local dragTokenSequence = 0
 local dragPairingByToken = {}
 local dragPairingTokenById = {}
+local dragLibraryPairingByToken = {}
+local dragLibraryPairingTokenBySignature = {}
 local dragPlaylistByToken = {}
 local dragPlaylistTokenById = {}
 local dragEntryByToken = {}
 local dragEntryTokenByPlaylist = {}
 local dragTargetByToken = {}
 local dragTargetTokenByPlaylist = {}
+local dragTokensDirty = true
+local dragTokenGeneration = 0
+local dragReconcile = nil
 
 local editingScheduleId = ""
 local scheduleEditorOpen = false
@@ -152,6 +161,8 @@ local PREVIEW_MAX_FAILURES = 64
 local PREVIEW_RETRY_BASE_SECONDS = 15
 local PREVIEW_RETRY_MAX_SECONDS = 300
 local PREVIEW_RETRY_POLL_MS = 5000
+local PREVIEW_ACTIVE_POLL_MS = 16
+local PREVIEW_INIT_BATCH = 4
 local PREVIEW_PROTOCOL = "WIO-THUMB1"
 
 -- Provider thumbnails are presentation data, so the panel owns their cache.
@@ -170,6 +181,9 @@ local previewPaths = {}
 local previewQueue = {}
 local previewQueued = {}
 local previewPending = {}
+local previewCompletions = {}
+local previewRetiredPaths = {}
+local previewRetiredPathSet = {}
 local previewFailures = {}
 local previewActive = 0
 local previewSequence = 0
@@ -177,10 +191,30 @@ local previewFailureSequence = 0
 local previewGeneration = 0
 local previewInterest = 0
 local previewScope = ""
-local pumpPreviewQueue
+local previewInitializationRequested = false
+local previewInitialization = nil
+local previewManifestDirty = false
+local previewRenderPending = false
+local previewUpdateInterval = 0
+local previewClockSeconds = 0
+
+local function setPreviewUpdateInterval(interval)
+    if previewUpdateInterval ~= interval then
+        noctalia.setUpdateInterval(interval)
+        -- setUpdateInterval only throttles update events that the host already
+        -- supplies. Panels need an explicit frame source while bounded work is
+        -- active; otherwise a deferred render can remain pending indefinitely.
+        panel.setNeedsFrameTick(interval == PREVIEW_ACTIVE_POLL_MS)
+        previewUpdateInterval = interval
+    end
+end
+
+local function wakePreviewWork()
+    setPreviewUpdateInterval(PREVIEW_ACTIVE_POLL_MS)
+end
 
 local function previewNowSeconds()
-    return math.max(0, math.floor(tonumber(noctalia.formatTime("%s")) or 0))
+    return previewClockSeconds
 end
 
 local function previewRetryReady(url)
@@ -381,12 +415,27 @@ local function removePreviewEntry(key, removeFile)
     local entry = previewCache.entries[key]
     if type(entry) == "table" and removeFile == true then
         local path = previewEntryPath(entry)
-        if path ~= nil and noctalia.fileExists(path) then
+        if path ~= nil then
             noctalia.removeFile(path)
         end
     end
     previewCache.entries[key] = nil
     previewPaths[key] = nil
+end
+
+local function markPreviewManifestDirty()
+    previewManifestDirty = true
+    wakePreviewWork()
+end
+
+local function retirePreviewEntry(key, entry)
+    local path = previewEntryPath(entry)
+    removePreviewEntry(key, false)
+    if path ~= nil and previewRetiredPathSet[path] == nil then
+        previewRetiredPathSet[path] = true
+        table.insert(previewRetiredPaths, path)
+    end
+    markPreviewManifestDirty()
 end
 
 local function previewEntryValid(key, entry)
@@ -473,6 +522,7 @@ local function initializePreviewCache()
         return previewCacheReady
     end
     previewCacheInitialized = true
+    previewInitializationRequested = false
     local pluginDirectory = noctalia.pluginDir()
     local dataDirectory = noctalia.pluginDataDir()
     if not previewAbsolutePath(pluginDirectory) or not previewAbsolutePath(dataDirectory) then
@@ -499,8 +549,15 @@ local function initializePreviewCache()
         local decoded = type(raw) == "string" and #raw <= PREVIEW_MAX_MANIFEST_BYTES and noctalia.json.decode(raw) or nil
         if type(decoded) == "table" and tonumber(decoded.schema) == PREVIEW_CACHE_SCHEMA and type(decoded.entries) == "table" then
             previewCache = { schema = PREVIEW_CACHE_SCHEMA, entries = {} }
+            local retained = 0
             for key, entry in pairs(decoded.entries) do
-                previewCache.entries[key] = entry
+                if retained < PREVIEW_MAX_ENTRIES * 2 then
+                    previewCache.entries[key] = entry
+                    retained += 1
+                else
+                    changed = true
+                    break
+                end
             end
         else
             -- Schema mismatches and malformed JSON are discarded in place;
@@ -512,37 +569,117 @@ local function initializePreviewCache()
         changed = true
     end
 
-    for key, entry in pairs(previewCache.entries) do
-        if not previewEntryValid(key, entry) then
-            removePreviewEntry(key, true)
-            changed = true
-        end
+    local keys = {}
+    for key in pairs(previewCache.entries) do
+        table.insert(keys, key)
     end
-    changed = prunePreviewCache() or changed
+    previewInitialization = {
+        phase = "validate",
+        keys = keys,
+        index = 1,
+        changed = changed,
+    }
+    return true
+end
 
+local function preparePreviewPrune(initialization)
+    local ordered = {}
+    local totalBytes = 0
+    for key, entry in pairs(previewCache.entries) do
+        local bytes = math.max(0, math.floor(tonumber(type(entry) == "table" and entry.bytes or 0) or 0))
+        totalBytes += bytes
+        table.insert(ordered, {
+            key = key,
+            bytes = bytes,
+            last_used = math.max(0, math.floor(tonumber(type(entry) == "table" and entry.last_used or 0) or 0)),
+        })
+    end
+    table.sort(ordered, function(left, right)
+        if left.last_used == right.last_used then
+            return left.key < right.key
+        end
+        return left.last_used < right.last_used
+    end)
+    local victims = {}
+    local index = 1
+    while (#ordered - index + 1) > PREVIEW_MAX_ENTRIES or totalBytes > PREVIEW_MAX_CACHE_BYTES do
+        local victim = ordered[index]
+        if victim == nil then
+            break
+        end
+        table.insert(victims, victim.key)
+        totalBytes = math.max(0, totalBytes - victim.bytes)
+        index += 1
+    end
+    initialization.phase = "prune"
+    initialization.keys = victims
+    initialization.index = 1
+end
+
+local function preparePreviewCleanup(initialization)
     local referenced = { ["manifest.json"] = true }
     for _, entry in pairs(previewCache.entries) do
         referenced[tostring(entry.filename or "")] = true
     end
     local names = noctalia.listDir(previewCacheDirectory)
-    if type(names) == "table" then
-        for _, name in ipairs(names) do
+    initialization.phase = "cleanup"
+    initialization.names = type(names) == "table" and names or {}
+    initialization.referenced = referenced
+    initialization.index = 1
+end
+
+local function stepPreviewInitialization()
+    local initialization = previewInitialization
+    if type(initialization) ~= "table" then
+        return true
+    end
+    for _ = 1, PREVIEW_INIT_BATCH do
+        if initialization.phase == "validate" then
+            local key = initialization.keys[initialization.index]
+            if key == nil then
+                preparePreviewPrune(initialization)
+                continue
+            end
+            initialization.index += 1
+            local entry = previewCache.entries[key]
+            if not previewEntryValid(key, entry) then
+                removePreviewEntry(key, true)
+                initialization.changed = true
+            else
+                previewPaths[key] = previewEntryPath(entry)
+            end
+        elseif initialization.phase == "prune" then
+            local key = initialization.keys[initialization.index]
+            if key == nil then
+                preparePreviewCleanup(initialization)
+                continue
+            end
+            initialization.index += 1
+            removePreviewEntry(key, true)
+            initialization.changed = true
+        elseif initialization.phase == "cleanup" then
+            local name = initialization.names[initialization.index]
+            if name == nil then
+                if initialization.changed then
+                    markPreviewManifestDirty()
+                end
+                previewInitialization = nil
+                return true
+            end
+            initialization.index += 1
             if
                 type(name) == "string"
-                and not referenced[name]
+                and not initialization.referenced[name]
                 and (previewOwnedFilename(name)
                     or name:match("^%.wall%-in%-one%-preview%-%d+%-%d+%.stage$") ~= nil
                     or name == "manifest.json.tmp")
             then
                 noctalia.removeFile(previewCacheDirectory .. "/" .. name)
-                changed = true
+                initialization.changed = true
             end
         end
     end
-    if changed then
-        savePreviewManifest()
-    end
-    return true
+    return false
 end
 
 local function previewShellQuote(value)
@@ -582,10 +719,9 @@ local function previewExtension(contentType)
 end
 
 local function finishPreviewTask(task, result)
-    previewActive = math.max(0, previewActive - 1)
     previewPending[task.key] = nil
     if task.generation ~= previewGeneration then
-        if previewAbsolutePath(task.staging_path) and noctalia.fileExists(task.staging_path) then
+        if previewAbsolutePath(task.staging_path) then
             noctalia.removeFile(task.staging_path)
         end
         local failure = previewFailures[task.url]
@@ -593,13 +729,9 @@ local function finishPreviewTask(task, result)
             failure.retry_at = previewNowSeconds()
             failure.generation = task.generation
         end
-        if isOpen then
-            -- Rebuild only the current view so a current-generation request for
-            -- the same key can be queued after the stale flight releases it.
-            render()
-        end
-        pumpPreviewQueue()
-        return
+        -- Rebuild only the current view so a current-generation request for
+        -- the same key can be queued after the stale flight releases it.
+        return isOpen
     end
     local transport = previewHelperResult(result)
     local valid = transport ~= nil
@@ -642,101 +774,107 @@ local function finishPreviewTask(task, result)
             clearPreviewFailure(task.url)
             if type(previous) == "table" and previous.filename ~= filename then
                 local previousPath = previewEntryPath(previous)
-                if previousPath ~= nil and noctalia.fileExists(previousPath) then
+                if previousPath ~= nil then
                     noctalia.removeFile(previousPath)
                 end
             end
             prunePreviewCache()
-            savePreviewManifest()
+            markPreviewManifestDirty()
+            return isOpen
         else
             noctalia.removeFile(task.staging_path)
             recordPreviewFailure(task.url)
         end
     else
-        if previewAbsolutePath(task.staging_path) and noctalia.fileExists(task.staging_path) then
+        if previewAbsolutePath(task.staging_path) then
             noctalia.removeFile(task.staging_path)
         end
         recordPreviewFailure(task.url)
     end
-
-    if isOpen then
-        render()
-    end
-    pumpPreviewQueue()
+    return false
 end
 
-pumpPreviewQueue = function()
-    if not isOpen or not initializePreviewCache() then
-        return
+local function queuePreviewCompletion(task, result)
+    previewActive = math.max(0, previewActive - 1)
+    table.insert(previewCompletions, { task = task, result = result })
+    wakePreviewWork()
+end
+
+local function startOnePreviewTask()
+    if not isOpen
+        or not previewCacheReady
+        or previewInitialization ~= nil
+        or previewActive >= PREVIEW_MAX_CONCURRENT
+        or #previewQueue == 0
+    then
+        return false
     end
-    while previewActive < PREVIEW_MAX_CONCURRENT and #previewQueue > 0 do
-        local task = table.remove(previewQueue, 1)
-        previewQueued[task.key] = nil
-        local currentEntry = previewCache.entries[task.key]
-        if
-            task.generation == previewGeneration
-            and previewPending[task.key] == nil
-            and previewRetryReady(task.url)
-            and not (type(currentEntry) == "table" and currentEntry.url == task.url and previewEntryValid(task.key, currentEntry))
-        then
-            previewSequence += 1
-            local token = tostring(math.floor(noctalia.nowMs())) .. "-" .. tostring(previewSequence)
-            task.token = token
-            task.staging_path = previewCacheDirectory .. "/.wall-in-one-preview-" .. token .. ".stage"
-            previewPending[task.key] = task.url
-            previewActive += 1
-            local failure = previewFailures[task.url]
-            if type(failure) == "table" then
-                failure.retry_at = math.huge
-                failure.generation = task.generation
-            end
-            local command = "exec bash "
-                .. previewShellQuote(previewHelperPath)
-                .. " fetch "
-                .. previewShellQuote(task.provider)
-                .. " "
-                .. previewShellQuote(task.url)
-                .. " "
-                .. previewShellQuote(task.staging_path)
-            local started = noctalia.runAsync(command, function(result)
-                finishPreviewTask(task, result)
-            end, 40000)
-            if started ~= true then
-                previewActive = math.max(0, previewActive - 1)
-                previewPending[task.key] = nil
-                recordPreviewFailure(task.url)
-            end
+    local task = table.remove(previewQueue, 1)
+    previewQueued[task.key] = nil
+    local currentEntry = previewCache.entries[task.key]
+    if
+        task.generation == previewGeneration
+        and previewPending[task.key] == nil
+        and previewRetryReady(task.url)
+        and not (type(currentEntry) == "table" and currentEntry.url == task.url and previewPaths[task.key] ~= nil)
+    then
+        previewSequence += 1
+        local token = tostring(math.floor(noctalia.nowMs())) .. "-" .. tostring(previewSequence)
+        task.token = token
+        task.staging_path = previewCacheDirectory .. "/.wall-in-one-preview-" .. token .. ".stage"
+        previewPending[task.key] = task.url
+        previewActive += 1
+        local failure = previewFailures[task.url]
+        if type(failure) == "table" then
+            failure.retry_at = math.huge
+            failure.generation = task.generation
+        end
+        local command = "exec bash "
+            .. previewShellQuote(previewHelperPath)
+            .. " fetch "
+            .. previewShellQuote(task.provider)
+            .. " "
+            .. previewShellQuote(task.url)
+            .. " "
+            .. previewShellQuote(task.staging_path)
+        local started = noctalia.runAsync(command, function(result)
+            queuePreviewCompletion(task, result)
+        end, 40000)
+        if started ~= true then
+            previewActive = math.max(0, previewActive - 1)
+            previewPending[task.key] = nil
+            recordPreviewFailure(task.url)
         end
     end
+    return true
 end
 
 local function ensureProviderPreview(provider, identifier, url)
-    if not initializePreviewCache() then
-        return false
-    end
     local safeIdentifier = previewIdentifier(provider, identifier)
     local safeUrl = validPreviewUrl(provider, url)
     local key = previewKey(provider, safeIdentifier)
     if safeIdentifier == nil or safeUrl == nil or key == nil then
         return false
     end
+    if not previewCacheInitialized then
+        previewInitializationRequested = true
+        wakePreviewWork()
+    elseif not previewCacheReady or previewInitialization ~= nil then
+        return false
+    end
     local entry = previewCache.entries[key]
-    if type(entry) == "table" and entry.url == safeUrl and previewEntryValid(key, entry) then
+    local cachedPath = previewPaths[key]
+    if type(entry) == "table" and entry.url == safeUrl and previewAbsolutePath(cachedPath) then
         clearPreviewFailure(safeUrl)
-        local path = previewEntryPath(entry)
-        if path ~= nil then
-            previewPaths[key] = path
-            local now = previewNowSeconds()
-            if now - math.floor(tonumber(entry.last_used) or 0) >= 60 then
-                entry.last_used = now
-                savePreviewManifest()
-            end
+        local now = previewNowSeconds()
+        if now - math.floor(tonumber(entry.last_used) or 0) >= 60 then
+            entry.last_used = now
+            markPreviewManifestDirty()
         end
         return true
     end
     if type(entry) == "table" and entry.url ~= safeUrl then
-        removePreviewEntry(key, true)
-        savePreviewManifest()
+        retirePreviewEntry(key, entry)
     end
     local failure = previewFailures[safeUrl]
     if type(failure) == "table" then
@@ -759,7 +897,7 @@ local function ensureProviderPreview(provider, identifier, url)
             url = safeUrl,
             generation = previewGeneration,
         })
-        pumpPreviewQueue()
+        wakePreviewWork()
     end
     return previewPending[key] ~= nil or previewQueued[key] ~= nil or previewRetryReady(safeUrl)
 end
@@ -768,7 +906,7 @@ local function providerPreviewNode(provider, item, width, height, glyph)
     local identifier = if provider == "wallhaven" then tostring(item.id or "") else tostring(item.slug or "")
     local key = previewKey(provider, identifier)
     local path = key ~= nil and previewPaths[key] or nil
-    if previewAbsolutePath(path) and noctalia.fileExists(path) then
+    if previewAbsolutePath(path) then
         return ui.image({
             width = width,
             height = height,
@@ -791,23 +929,128 @@ local function providerPreviewNode(provider, item, width, height, glyph)
     })
 end
 
+local function previewHasDeferredWork()
+    return previewInitializationRequested
+        or previewInitialization ~= nil
+        or #previewCompletions > 0
+        or #previewRetiredPaths > 0
+        or previewManifestDirty
+        or (isOpen and previewCacheReady and previewActive < PREVIEW_MAX_CONCURRENT and #previewQueue > 0)
+end
+
+local function stepPreviewWork()
+    if previewInitializationRequested then
+        initializePreviewCache()
+        return true, false
+    end
+    if previewInitialization ~= nil then
+        local finished = stepPreviewInitialization()
+        return true, finished and isOpen
+    end
+    if #previewCompletions > 0 then
+        local completion = table.remove(previewCompletions, 1)
+        return true, finishPreviewTask(completion.task, completion.result)
+    end
+    if #previewRetiredPaths > 0 then
+        local path = table.remove(previewRetiredPaths, 1)
+        previewRetiredPathSet[path] = nil
+        noctalia.removeFile(path)
+        return true, false
+    end
+    if previewManifestDirty then
+        -- A failed best-effort flush is retried by the next cache touch rather
+        -- than spinning this panel callback at the active cadence.
+        previewManifestDirty = false
+        savePreviewManifest()
+        return true, false
+    end
+    if startOnePreviewTask() then
+        return true, false
+    end
+    return false, false
+end
+
 preview.ensure = ensureProviderPreview
 preview.node = providerPreviewNode
 preview.scope = setPreviewScope
 preview.retryDue = previewRetryDue
 preview.retryPollMs = PREVIEW_RETRY_POLL_MS
+preview.activePollMs = PREVIEW_ACTIVE_POLL_MS
+preview.wake = wakePreviewWork
+preview.step = stepPreviewWork
+preview.refreshClock = function()
+    previewClockSeconds = math.max(0, math.floor(tonumber(noctalia.formatTime("%s")) or 0))
+end
+preview.requestRender = function()
+    previewRenderPending = true
+    wakePreviewWork()
+end
+preview.takeRender = function()
+    if not previewRenderPending then
+        return false
+    end
+    previewRenderPending = false
+    return true
+end
+preview.settle = function()
+    if previewRenderPending or previewHasDeferredWork() then
+        wakePreviewWork()
+    else
+        setPreviewUpdateInterval(PREVIEW_RETRY_POLL_MS)
+    end
+end
+preview.debugSnapshot = function(key)
+    local entries = 0
+    local paths = 0
+    for _ in pairs(previewCache.entries) do
+        entries += 1
+    end
+    for _ in pairs(previewPaths) do
+        paths += 1
+    end
+    local entry = previewCache.entries[tostring(key or "")]
+    return {
+        initialized = previewCacheInitialized,
+        ready = previewCacheReady,
+        initialization_phase = if type(previewInitialization) == "table"
+            then tostring(previewInitialization.phase or "")
+            else "nil",
+        initialization_requested = previewInitializationRequested,
+        queue_depth = #previewQueue,
+        active = previewActive,
+        manifest_dirty = previewManifestDirty,
+        render_pending = previewRenderPending,
+        is_open = isOpen,
+        active_page = activePage,
+        active_subpage = activeSubpage,
+        entries = entries,
+        paths = paths,
+        key_last_used = if type(entry) == "table" then tonumber(entry.last_used) else nil,
+        clock = previewClockSeconds,
+        update_interval = previewUpdateInterval,
+        scope = previewScope,
+        drag_tokens_dirty = dragTokensDirty,
+    }
+end
+preview.initializeScheduler = function()
+    -- PluginPanel's periodic timer is opt-in and fixed at one second. The
+    -- runtime interval below then throttles those idle retry checks to 5 s.
+    panel.setWantsSecondTicks(true)
+    setPreviewUpdateInterval(PREVIEW_RETRY_POLL_MS)
+end
 preview.cancel = function()
     resetPreviewQueue(previewScope)
 end
 preview.close = function()
     resetPreviewQueue("")
+    setPreviewUpdateInterval(PREVIEW_RETRY_POLL_MS)
 end
 end
 
 local function resetLibraryVisibility()
-    libraryVisibleStills = LIBRARY_ENTRY_CHUNK
-    libraryVisibleVideos = LIBRARY_ENTRY_CHUNK
-    libraryVisibleWorkshops = LIBRARY_ENTRY_CHUNK
+    libraryPageStills = 1
+    libraryPageVideos = 1
+    libraryPageWorkshops = 1
 end
 
 local function resetPanelVisibility()
@@ -815,7 +1058,8 @@ local function resetPanelVisibility()
     wallhavenVisibleResults = PROVIDER_RESULT_CHUNK
     motionBgsVisibleResults = PROVIDER_RESULT_CHUNK
     resetLibraryVisibility()
-    playlistLibraryVisible = PAIRING_CARD_CHUNK
+    playlistLibraryPage = 1
+    playlistNavigationPage = 1
     displayPlaylistVisible = PAIRING_CARD_CHUNK
 end
 
@@ -1413,153 +1657,257 @@ local function nextDragToken(prefix)
     return prefix .. tostring(dragTokenSequence)
 end
 
--- Reconcile tokens outside render so retained drag sources keep stable,
--- compact payloads while the corresponding config objects still exist.
-local function reconcileDragTokens()
-    local nextPairingByToken = {}
-    local nextPairingTokenById = {}
-    for rawId, pairing in pairs(pairingMap()) do
-        if type(pairing) == "table" then
-            local id = tostring(rawId)
-            local token = dragPairingTokenById[id] or nextDragToken("p")
-            nextPairingByToken[token] = id
-            nextPairingTokenById[id] = token
+local function resetLibraryDragTokens()
+    dragLibraryPairingByToken = {}
+    dragLibraryPairingTokenBySignature = {}
+end
+
+-- A persisted configuration can hold thousands of playlist rows. Rebuild the
+-- opaque drag-token index incrementally and swap it only after a complete
+-- generation; neither a state callback nor one update tick walks the entire
+-- project, and an interrupted tick leaves the previous valid index intact.
+local function markDragTokensDirty()
+    dragTokenGeneration += 1
+    dragTokensDirty = true
+    dragReconcile = nil
+    resetLibraryDragTokens()
+    if isOpen then
+        preview.wake()
+    end
+end
+
+local function stepDragTokenReconciliation()
+    if not dragTokensDirty then
+        return true
+    end
+    if dragReconcile == nil then
+        local configuredOutputs = configSnapshot().outputs
+        local configurationState = type(configState) == "table" and configState or {}
+        local outputs = {}
+        for rawOutput, configuredOutput in pairs(type(configuredOutputs) == "table" and configuredOutputs or {}) do
+            outputs[tostring(rawOutput)] = configuredOutput
         end
+        for _, descriptor in ipairs(noctalia.outputs()) do
+            local output = type(descriptor) == "table" and tostring(descriptor.name or descriptor.connector or "") or ""
+            if output ~= "" and outputs[output] == nil then
+                outputs[output] = { schedules = {} }
+            end
+        end
+        dragReconcile = {
+            generation = dragTokenGeneration,
+            phase = "pairings",
+            cursor = nil,
+            pairings = pairingMap(),
+            playlists = playlistMap(),
+            outputs = outputs,
+            pairing_by_token = {},
+            pairing_token_by_id = {},
+            playlist_by_token = {},
+            playlist_token_by_id = {},
+            entry_by_token = {},
+            entry_token_by_playlist = {},
+            target_by_token = {},
+            target_token_by_playlist = {},
+            library_pairing_index = {},
+            config_instance = tostring(configurationState.instance_id or ""),
+            config_revision = math.floor(tonumber(configurationState.revision) or -1),
+        }
     end
 
-    local nextPlaylistByToken = {}
-    local nextPlaylistTokenById = {}
-    for rawId, playlist in pairs(playlistMap()) do
-        if type(playlist) == "table" and playlist.quick_choice ~= true then
-            local id = tostring(rawId)
-            local token = dragPlaylistTokenById[id] or nextDragToken("r")
-            nextPlaylistByToken[token] = id
-            nextPlaylistTokenById[id] = token
+    local state = dragReconcile
+    for _ = 1, DRAG_RECONCILE_BATCH do
+        if state.generation ~= dragTokenGeneration then
+            dragReconcile = nil
+            return false
         end
-    end
 
-    local nextEntryByToken = {}
-    local nextEntryTokenByPlaylist = {}
-    local nextTargetByToken = {}
-    local nextTargetTokenByPlaylist = {}
-    for rawPlaylistId, playlist in pairs(playlistMap()) do
-        if type(playlist) == "table" then
-            local playlistId = tostring(rawPlaylistId)
-            local entries = type(playlist.entries) == "table" and playlist.entries or {}
-            local previousEntryTokens = type(dragEntryTokenByPlaylist[playlistId]) == "table"
-                    and dragEntryTokenByPlaylist[playlistId]
-                or {}
-            local previousTargetTokens = type(dragTargetTokenByPlaylist[playlistId]) == "table"
-                    and dragTargetTokenByPlaylist[playlistId]
-                or {}
-            local entryTokens = {}
-            local targetTokens = {}
-            local previousEntryId = ""
-
-            for _, entry in ipairs(entries) do
-                local entryId = type(entry) == "table" and tostring(entry.id or "") or ""
-                if entryId ~= "" and entryTokens[entryId] == nil then
-                    local entryToken = previousEntryTokens[entryId] or nextDragToken("e")
-                    entryTokens[entryId] = entryToken
-                    nextEntryByToken[entryToken] = {
-                        playlist_id = playlistId,
-                        entry_id = entryId,
-                    }
-
-                    -- The visual gap is before this entry. For the first row
-                    -- that is a `before` placement; subsequent gaps are also
-                    -- expressible as `after` the previous row. Pairing drops
-                    -- retain the exact before-id independently.
-                    local targetToken = previousTargetTokens[entryId] or nextDragToken("d")
-                    targetTokens[entryId] = targetToken
-                    nextTargetByToken[targetToken] = {
-                        playlist_id = playlistId,
-                        pairing_before_id = entryId,
-                        entry_anchor_id = if previousEntryId == "" then entryId else previousEntryId,
-                        entry_placement = if previousEntryId == "" then "before" else "after",
-                    }
-                    previousEntryId = entryId
+        if state.phase == "pairings" then
+            local rawId, pairing = next(state.pairings, state.cursor)
+            state.cursor = rawId
+            if rawId == nil then
+                state.phase = "playlists"
+                state.cursor = nil
+            elseif type(pairing) == "table" then
+                local id = tostring(rawId)
+                local token = dragPairingTokenById[id] or nextDragToken("p")
+                state.pairing_by_token[token] = id
+                state.pairing_token_by_id[id] = token
+                local media = type(pairing.media) == "table" and pairing.media or nil
+                local still = type(pairing.still) == "table" and pairing.still or {}
+                local kind = if media == nil then "static" else tostring(media.kind or "")
+                local source = if media == nil then tostring(still.path or "") else tostring(media.source or "")
+                if (kind == "static" or kind == "video" or kind == "workshop") and source ~= "" then
+                    local key = kind .. "\0" .. source
+                    local existing = state.library_pairing_index[key]
+                    local replace = type(existing) ~= "table"
+                        or (pairing.customized == true and existing.customized ~= true)
+                        or ((pairing.customized == true) == (existing.customized == true)
+                            and tostring(pairing.id or "") < tostring(existing.id or ""))
+                    if replace then
+                        state.library_pairing_index[key] = pairing
+                    end
                 end
             end
-
-            local endToken = previousTargetTokens[""] or nextDragToken("d")
-            targetTokens[""] = endToken
-            nextTargetByToken[endToken] = {
-                playlist_id = playlistId,
-                pairing_before_id = "",
-                entry_anchor_id = "",
-                entry_placement = "end",
-            }
-            nextEntryTokenByPlaylist[playlistId] = entryTokens
-            nextTargetTokenByPlaylist[playlistId] = targetTokens
-        end
-    end
-
-    -- Schedule rows use the same opaque-token machinery as playlist rows.
-    -- The synthetic namespace cannot collide with a real playlist id and
-    -- keeps display names and persisted rule ids out of drag payloads.
-    local configuredOutputs = configSnapshot().outputs
-    for rawOutput, configuredOutput in pairs(type(configuredOutputs) == "table" and configuredOutputs or {}) do
-        local output = tostring(rawOutput)
-        local namespace = "@schedule:" .. output
-        local schedules = type(configuredOutput) == "table" and type(configuredOutput.schedules) == "table"
-                and configuredOutput.schedules
-            or {}
-        local previousEntryTokens = type(dragEntryTokenByPlaylist[namespace]) == "table"
-                and dragEntryTokenByPlaylist[namespace]
-            or {}
-        local previousTargetTokens = type(dragTargetTokenByPlaylist[namespace]) == "table"
-                and dragTargetTokenByPlaylist[namespace]
-            or {}
-        local entryTokens = {}
-        local targetTokens = {}
-        local previousScheduleId = ""
-        for _, schedule in ipairs(schedules) do
-            local scheduleId = type(schedule) == "table" and tostring(schedule.id or "") or ""
-            if scheduleId ~= "" and entryTokens[scheduleId] == nil then
-                local entryToken = previousEntryTokens[scheduleId] or nextDragToken("s")
-                entryTokens[scheduleId] = entryToken
-                nextEntryByToken[entryToken] = {
-                    schedule_output = output,
-                    schedule_id = scheduleId,
-                }
-                local targetToken = previousTargetTokens[scheduleId] or nextDragToken("q")
-                targetTokens[scheduleId] = targetToken
-                nextTargetByToken[targetToken] = {
-                    schedule_output = output,
-                    schedule_anchor_id = if previousScheduleId == "" then scheduleId else previousScheduleId,
-                    schedule_placement = if previousScheduleId == "" then "before" else "after",
-                    schedule_before_id = scheduleId,
-                }
-                previousScheduleId = scheduleId
+        elseif state.phase == "playlists" then
+            local rawId, playlist = next(state.playlists, state.cursor)
+            state.cursor = rawId
+            if rawId == nil then
+                state.phase = "entries"
+                state.cursor = nil
+            elseif type(playlist) == "table" and playlist.quick_choice ~= true then
+                local id = tostring(rawId)
+                local token = dragPlaylistTokenById[id] or nextDragToken("r")
+                state.playlist_by_token[token] = id
+                state.playlist_token_by_id[id] = token
             end
-        end
-        local endToken = previousTargetTokens[""] or nextDragToken("q")
-        targetTokens[""] = endToken
-        nextTargetByToken[endToken] = {
-            schedule_output = output,
-            schedule_anchor_id = "",
-            schedule_placement = "end",
-            schedule_before_id = "",
-        }
-        local defaultToken = previousTargetTokens["@default"] or nextDragToken("f")
-        targetTokens["@default"] = defaultToken
-        nextTargetByToken[defaultToken] = {
-            display_output = output,
-            display_role = "default",
-        }
-        nextEntryTokenByPlaylist[namespace] = entryTokens
-        nextTargetTokenByPlaylist[namespace] = targetTokens
-    end
+        elseif state.phase == "entries" then
+            if state.active_id == nil then
+                local rawId, playlist = next(state.playlists, state.cursor)
+                state.cursor = rawId
+                if rawId == nil then
+                    state.phase = "schedules"
+                    state.cursor = nil
+                    continue
+                elseif type(playlist) ~= "table" then
+                    continue
+                end
+                local playlistId = tostring(rawId)
+                state.active_id = playlistId
+                state.active_entries = type(playlist.entries) == "table" and playlist.entries or {}
+                state.active_index = 1
+                state.active_previous_id = ""
+                state.active_entry_tokens = {}
+                state.active_target_tokens = {}
+                state.previous_entry_tokens = type(dragEntryTokenByPlaylist[playlistId]) == "table"
+                        and dragEntryTokenByPlaylist[playlistId]
+                    or {}
+                state.previous_target_tokens = type(dragTargetTokenByPlaylist[playlistId]) == "table"
+                        and dragTargetTokenByPlaylist[playlistId]
+                    or {}
+            end
 
-    dragPairingByToken = nextPairingByToken
-    dragPairingTokenById = nextPairingTokenById
-    dragPlaylistByToken = nextPlaylistByToken
-    dragPlaylistTokenById = nextPlaylistTokenById
-    dragEntryByToken = nextEntryByToken
-    dragEntryTokenByPlaylist = nextEntryTokenByPlaylist
-    dragTargetByToken = nextTargetByToken
-    dragTargetTokenByPlaylist = nextTargetTokenByPlaylist
+            local entry = state.active_entries[state.active_index]
+            if entry ~= nil then
+                state.active_index += 1
+                local entryId = type(entry) == "table" and tostring(entry.id or "") or ""
+                if entryId ~= "" and state.active_entry_tokens[entryId] == nil then
+                    local entryToken = state.previous_entry_tokens[entryId] or nextDragToken("e")
+                    state.active_entry_tokens[entryId] = entryToken
+                    state.entry_by_token[entryToken] = {
+                        playlist_id = state.active_id,
+                        entry_id = entryId,
+                    }
+                    local targetToken = state.previous_target_tokens[entryId] or nextDragToken("d")
+                    state.active_target_tokens[entryId] = targetToken
+                    state.target_by_token[targetToken] = {
+                        playlist_id = state.active_id,
+                        pairing_before_id = entryId,
+                        entry_anchor_id = if state.active_previous_id == "" then entryId else state.active_previous_id,
+                        entry_placement = if state.active_previous_id == "" then "before" else "after",
+                    }
+                    state.active_previous_id = entryId
+                end
+            else
+                local endToken = state.previous_target_tokens[""] or nextDragToken("d")
+                state.active_target_tokens[""] = endToken
+                state.target_by_token[endToken] = {
+                    playlist_id = state.active_id,
+                    pairing_before_id = "",
+                    entry_anchor_id = "",
+                    entry_placement = "end",
+                }
+                state.entry_token_by_playlist[state.active_id] = state.active_entry_tokens
+                state.target_token_by_playlist[state.active_id] = state.active_target_tokens
+                state.active_id = nil
+            end
+        elseif state.phase == "schedules" then
+            if state.active_output == nil then
+                local rawOutput, configuredOutput = next(state.outputs, state.cursor)
+                state.cursor = rawOutput
+                if rawOutput == nil then
+                    state.phase = "commit"
+                    continue
+                end
+                local output = tostring(rawOutput)
+                local namespace = "@schedule:" .. output
+                state.active_output = output
+                state.active_id = namespace
+                state.active_entries = type(configuredOutput) == "table"
+                        and type(configuredOutput.schedules) == "table"
+                        and configuredOutput.schedules
+                    or {}
+                state.active_index = 1
+                state.active_previous_id = ""
+                state.active_entry_tokens = {}
+                state.active_target_tokens = {}
+                state.previous_entry_tokens = type(dragEntryTokenByPlaylist[namespace]) == "table"
+                        and dragEntryTokenByPlaylist[namespace]
+                    or {}
+                state.previous_target_tokens = type(dragTargetTokenByPlaylist[namespace]) == "table"
+                        and dragTargetTokenByPlaylist[namespace]
+                    or {}
+            end
+
+            local schedule = state.active_entries[state.active_index]
+            if schedule ~= nil then
+                state.active_index += 1
+                local scheduleId = type(schedule) == "table" and tostring(schedule.id or "") or ""
+                if scheduleId ~= "" and state.active_entry_tokens[scheduleId] == nil then
+                    local entryToken = state.previous_entry_tokens[scheduleId] or nextDragToken("s")
+                    state.active_entry_tokens[scheduleId] = entryToken
+                    state.entry_by_token[entryToken] = {
+                        schedule_output = state.active_output,
+                        schedule_id = scheduleId,
+                    }
+                    local targetToken = state.previous_target_tokens[scheduleId] or nextDragToken("q")
+                    state.active_target_tokens[scheduleId] = targetToken
+                    state.target_by_token[targetToken] = {
+                        schedule_output = state.active_output,
+                        schedule_anchor_id = if state.active_previous_id == "" then scheduleId else state.active_previous_id,
+                        schedule_placement = if state.active_previous_id == "" then "before" else "after",
+                        schedule_before_id = scheduleId,
+                    }
+                    state.active_previous_id = scheduleId
+                end
+            else
+                local endToken = state.previous_target_tokens[""] or nextDragToken("q")
+                state.active_target_tokens[""] = endToken
+                state.target_by_token[endToken] = {
+                    schedule_output = state.active_output,
+                    schedule_anchor_id = "",
+                    schedule_placement = "end",
+                    schedule_before_id = "",
+                }
+                local defaultToken = state.previous_target_tokens["@default"] or nextDragToken("f")
+                state.active_target_tokens["@default"] = defaultToken
+                state.target_by_token[defaultToken] = {
+                    display_output = state.active_output,
+                    display_role = "default",
+                }
+                state.entry_token_by_playlist[state.active_id] = state.active_entry_tokens
+                state.target_token_by_playlist[state.active_id] = state.active_target_tokens
+                state.active_output = nil
+                state.active_id = nil
+            end
+        elseif state.phase == "commit" then
+            dragPairingByToken = state.pairing_by_token
+            dragPairingTokenById = state.pairing_token_by_id
+            dragPlaylistByToken = state.playlist_by_token
+            dragPlaylistTokenById = state.playlist_token_by_id
+            dragEntryByToken = state.entry_by_token
+            dragEntryTokenByPlaylist = state.entry_token_by_playlist
+            dragTargetByToken = state.target_by_token
+            dragTargetTokenByPlaylist = state.target_token_by_playlist
+            libraryPairingCache.index = state.library_pairing_index
+            libraryPairingCache.instance = state.config_instance
+            libraryPairingCache.revision = state.config_revision
+            libraryPairingCache.source = state.pairings
+            dragTokensDirty = false
+            dragReconcile = nil
+            return true
+        end
+    end
+    return false
 end
 
 -- Every insertion zone shares one callback. It validates the panel-local
@@ -1579,6 +1927,9 @@ function onPlaylistDrop(payload, value)
     end
 
     local pairingId = dragPairingByToken[payloadToken]
+    if pairingId == nil then
+        pairingId = dragLibraryPairingByToken[payloadToken]
+    end
     if type(pairingId) == "table" and type(pairingId.library_bundle) == "table" then
         if tostring(pairingId.pairing_id or "") ~= "" then
             send({
@@ -1893,6 +2244,8 @@ local function matchingPairingForLibraryEntry(entry)
     return if key ~= nil then indexedLibraryPairings()[key] else nil
 end
 
+local panelUi = {}
+
 local function openLibraryEntryPairing(entry, libraryItem)
     local kind = tostring(type(entry) == "table" and entry.kind or "")
     kind = if kind == "video" or kind == "workshop" then kind else "static"
@@ -2002,8 +2355,6 @@ local function runAction(action, requestedOutput)
 end
 
 -- Shared presentation helpers.
-local panelUi = {}
-
 function panelUi.boolText(value)
     return if value == true then noctalia.tr("common.on") else noctalia.tr("common.off")
 end
@@ -2015,6 +2366,17 @@ end
 function panelUi.valueOr(value, fallbackKey)
     local text = tostring(value or "")
     return if text == "" then noctalia.tr(fallbackKey) else text
+end
+
+function panelUi.providerItems(value)
+    local source = type(value) == "table" and value or {}
+    local items = {}
+    for index = 1, math.min(#source, 48) do
+        if type(source[index]) == "table" then
+            table.insert(items, source[index])
+        end
+    end
+    return items
 end
 
 function panelUi.configuredRoot(key)
@@ -2124,6 +2486,49 @@ function panelUi.appendVisibilityControls(children, total, visible, chunkSize, s
             })
         )
     end
+end
+
+function panelUi.appendPageControls(children, total, page, pageSize, setPage)
+    local count = math.max(0, math.floor(tonumber(total) or 0))
+    local size = math.max(1, math.floor(tonumber(pageSize) or 1))
+    local pages = math.max(1, math.ceil(count / size))
+    local current = math.min(pages, math.max(1, math.floor(tonumber(page) or 1)))
+    if pages <= 1 then
+        return current
+    end
+    table.insert(children, ui.row({ gap = 5, align = "center" }, {
+        ui.button({
+            text = noctalia.tr("panel.browse.previous"),
+            glyph = "chevron-left",
+            variant = "ghost",
+            controlSize = "sm",
+            enabled = current > 1,
+            onClick = function()
+                setPage(math.max(1, current - 1))
+                render()
+            end,
+        }),
+        ui.label({
+            text = noctalia.tr("panel.browse.page", { page = tostring(current), pages = tostring(pages) }),
+            fontSize = 9,
+            color = "on_surface_variant",
+            align = "center",
+            flexGrow = 1,
+            maxLines = 1,
+        }),
+        ui.button({
+            text = noctalia.tr("panel.browse.next"),
+            glyph = "chevron-right",
+            variant = "ghost",
+            controlSize = "sm",
+            enabled = current < pages,
+            onClick = function()
+                setPage(math.min(pages, current + 1))
+                render()
+            end,
+        }),
+    }))
+    return current
 end
 
 function panelUi.appendExplicitGrid(children, items, visible, columns, cardBuilder)
@@ -2370,7 +2775,7 @@ end
 
 local function wallhavenSection()
     local providerStatus, results = wallhavenData()
-    local items = type(results.items) == "table" and results.items or {}
+    local items = panelUi.providerItems(results.items)
     local selected = type(results.selected) == "table" and results.selected or {}
     local meta = type(results.meta) == "table" and results.meta or {}
     local activeFilters = type(results.filters) == "table" and results.filters or {}
@@ -2871,10 +3276,14 @@ end
 local function motionBgsSection()
     local provider = type(providers().motionbgs) == "table" and providers().motionbgs or {}
     local motionStatus, results = motionBgsData()
-    local items = type(results.items) == "table" and results.items or {}
+    local items = panelUi.providerItems(results.items)
     local selected = type(results.selected) == "table" and results.selected or {}
     local meta = type(results.meta) == "table" and results.meta or {}
-    local integrationReady = provider.integration_available == true and storageValid()
+    local integrationReady = provider.integration_available == true
+        and motionStatus.available == true
+        and storageValid()
+    local motionEnabled = settings().use_motionbgs ~= false
+    local helperReady = motionStatus.binary_compatible == true
     local busy = motionStatus.busy == true
     local quality = tostring(settings().motionbgs_quality or "hd")
     preview.scope("motionbgs:" .. tostring(results.sequence or 0) .. ":" .. (if integrationReady then "ready" else "disabled"))
@@ -3112,6 +3521,41 @@ local function motionBgsSection()
                 maxLines = 3,
             }),
             panelUi.actionButton("motionbgs_open", "external-link", "ghost", false),
+        }),
+        ui.row({ gap = 6, align = "center" }, {
+            ui.label({
+                text = if not motionEnabled
+                    then noctalia.tr("panel.motionbgs.helper_disabled")
+                    elseif helperReady
+                    then noctalia.tr("panel.motionbgs.helper_ready", {
+                        version = tostring(motionStatus.binary_version or ""),
+                        path = tostring(motionStatus.binary_path or "wall-in-one-motionbgs"),
+                    })
+                    else noctalia.tr("panel.motionbgs.helper_missing"),
+                color = if helperReady then "on_surface_variant" else "tertiary",
+                fontSize = 9,
+                flexGrow = 1,
+                maxLines = 4,
+            }),
+            ui.button({
+                text = noctalia.tr("panel.motionbgs.get_helper"),
+                glyph = "download",
+                variant = "ghost",
+                controlSize = "sm",
+                onClick = function()
+                    send({ kind = "motionbgs_helper_open" })
+                end,
+            }),
+            ui.button({
+                glyph = "refresh",
+                tooltip = noctalia.tr("panel.motionbgs.retry_helper"),
+                variant = "ghost",
+                controlSize = "sm",
+                enabled = motionEnabled and not busy,
+                onClick = function()
+                    send({ kind = "motionbgs_probe" })
+                end,
+            }),
         }),
         ui.label({
             text = noctalia.tr("panel.motionbgs.fallback"),
@@ -3609,13 +4053,17 @@ function panelUi.libraryCard(item)
     }, children)
 end
 
-function panelUi.libraryItems(kind)
+function panelUi.libraryItems(kind, offset, limit)
     local currentLibrary = type(status) == "table" and type(status.library) == "table" and status.library or {}
     local sourceItems = if kind == "static"
         then currentLibrary.stills
         elseif kind == "video" then currentLibrary.videos
         else currentLibrary.workshops
     sourceItems = type(sourceItems) == "table" and sourceItems or {}
+    local total = #sourceItems
+    local first = math.max(1, math.floor(tonumber(offset) or 0) + 1)
+    local maximum = math.max(0, math.floor(tonumber(limit) or total))
+    local last = math.min(total, first + maximum - 1)
     local items = {}
     local signatures = {}
     local function add(entry, metadata, pairing)
@@ -3630,7 +4078,8 @@ function panelUi.libraryItems(kind)
         signatures[signature] = #items + 1
         table.insert(items, { entry = entry, metadata = metadata, pairing = pairing })
     end
-    for _, sourceItem in ipairs(sourceItems) do
+    for index = first, last do
+        local sourceItem = sourceItems[index]
         if type(sourceItem) == "table" then
             if kind == "workshop" then
                 local entry = {
@@ -3651,7 +4100,7 @@ function panelUi.libraryItems(kind)
             end
         end
     end
-    return items, currentLibrary
+    return items, currentLibrary, total
 end
 
 function panelUi.libraryDragSignature(entry)
@@ -3687,10 +4136,21 @@ function panelUi.mediumSettingsSection(kind)
         end
         addPath("movie", noctalia.tr("panel.storage.video_root"), videoRoot, videoReady)
         addPath("folder", noctalia.tr("panel.medium_settings.motionbgs_library"), managed, videoReady)
+        local motionStatus = motionBgsData()
+        local helperPath = tostring(type(motionStatus) == "table" and motionStatus.binary_path or "")
+        if helperPath == "" then
+            helperPath = tostring(configuration.motionbgs_binary_path or "")
+        end
+        addPath(
+            "terminal-2",
+            noctalia.tr("panel.medium_settings.motionbgs_helper"),
+            helperPath,
+            type(motionStatus) == "table" and motionStatus.binary_compatible == true
+        )
         addPath(
             "database",
             noctalia.tr("panel.storage.motion_cache"),
-            if dataDirectory ~= "" then dataDirectory .. "/motionbgs/cache-v2.json" else "",
+            if dataDirectory ~= "" then dataDirectory .. "/motionbgs-bridge-v1/cache/cache-v1.json" else "",
             dataDirectory ~= ""
         )
         addPath(
@@ -3806,16 +4266,29 @@ end
 
 local function librarySection(mediaFilter, editorNode)
     local kind = if mediaFilter == "videos" then "video" elseif mediaFilter == "workshops" then "workshop" else "static"
-    local items, currentLibrary = panelUi.libraryItems(kind)
     local configuration = settings()
-    local visible = if kind == "video"
-        then libraryVisibleVideos
-        elseif kind == "workshop" then libraryVisibleWorkshops
-        else libraryVisibleStills
+    local page = if kind == "video"
+        then libraryPageVideos
+        elseif kind == "workshop" then libraryPageWorkshops
+        else libraryPageStills
+    local items, currentLibrary, total = panelUi.libraryItems(
+        kind,
+        (page - 1) * LIBRARY_PAGE_SIZE,
+        LIBRARY_PAGE_SIZE
+    )
+    local pages = math.max(1, math.ceil(total / LIBRARY_PAGE_SIZE))
+    if page > pages then
+        page = pages
+        items, currentLibrary, total = panelUi.libraryItems(
+            kind,
+            (page - 1) * LIBRARY_PAGE_SIZE,
+            LIBRARY_PAGE_SIZE
+        )
+    end
     local countLabel = if kind == "video"
-        then noctalia.tr("panel.library.videos", { count = tostring(#items) })
-        elseif kind == "workshop" then noctalia.tr("panel.library.workshops", { count = tostring(#items) })
-        else noctalia.tr("panel.library.stills", { count = tostring(#items) })
+        then noctalia.tr("panel.library.videos", { count = tostring(total) })
+        elseif kind == "workshop" then noctalia.tr("panel.library.workshops", { count = tostring(total) })
+        else noctalia.tr("panel.library.stills", { count = tostring(total) })
     local children = {
         panelUi.sectionHeader(
             if kind == "static" then "photo" elseif kind == "video" then "movie" else "steam",
@@ -3846,7 +4319,7 @@ local function librarySection(mediaFilter, editorNode)
     if editorNode ~= nil then
         table.insert(children, editorNode)
     end
-    if #items == 0 then
+    if total == 0 then
         local emptyText = if kind == "video"
             then noctalia.tr("panel.library.no_videos", {
                 path = panelUi.valueOr(configuration.video_directory, "common.unset"),
@@ -3857,14 +4330,14 @@ local function librarySection(mediaFilter, editorNode)
             })
         table.insert(children, ui.label({ text = emptyText, fontSize = 10, color = "on_surface_variant", maxLines = 3 }))
     else
-        panelUi.appendLibraryGrid(children, items, visible)
-        panelUi.appendVisibilityControls(children, #items, visible, LIBRARY_ENTRY_CHUNK, function(value)
+        panelUi.appendLibraryGrid(children, items, #items)
+        panelUi.appendPageControls(children, total, page, LIBRARY_PAGE_SIZE, function(value)
             if kind == "video" then
-                libraryVisibleVideos = value
+                libraryPageVideos = value
             elseif kind == "workshop" then
-                libraryVisibleWorkshops = value
+                libraryPageWorkshops = value
             else
-                libraryVisibleStills = value
+                libraryPageStills = value
             end
         end)
     end
@@ -4398,14 +4871,28 @@ end
 -- that the user has to populate or clean up.
 function panelUi.playlistPairingLibrary(playlistId, output)
     local items = {}
+    local total = 0
+    local offset = (playlistLibraryPage - 1) * LIBRARY_PAGE_SIZE
+    local remaining = LIBRARY_PAGE_SIZE
     for _, kind in ipairs({ "static", "video", "workshop" }) do
         if playlistLibraryFilter == "all" or playlistLibraryFilter == kind then
-            local kindItems = panelUi.libraryItems(kind)
+            local _, _, kindTotal = panelUi.libraryItems(kind, 0, 0)
+            local kindOffset = math.min(kindTotal, offset)
+            local take = math.min(remaining, math.max(0, kindTotal - kindOffset))
+            local kindItems = panelUi.libraryItems(kind, kindOffset, take)
             for _, item in ipairs(kindItems) do
                 item.kind = kind
                 table.insert(items, item)
             end
+            total += kindTotal
+            offset = math.max(0, offset - kindTotal)
+            remaining = math.max(0, LIBRARY_PAGE_SIZE - #items)
         end
+    end
+    local pages = math.max(1, math.ceil(total / LIBRARY_PAGE_SIZE))
+    if playlistLibraryPage > pages then
+        playlistLibraryPage = pages
+        return panelUi.playlistPairingLibrary(playlistId, output)
     end
     local children = {
         ui.row({ gap = 5, align = "center" }, {
@@ -4421,7 +4908,7 @@ function panelUi.playlistPairingLibrary(playlistId, output)
                 variant = "ghost",
                 controlSize = "sm",
                 onClick = function()
-                    playlistLibraryVisible = PAIRING_CARD_CHUNK
+                    playlistLibraryPage = 1
                     send({ kind = "library_refresh" })
                 end,
             }),
@@ -4448,20 +4935,20 @@ function panelUi.playlistPairingLibrary(playlistId, output)
             flexGrow = 1,
             onClick = function()
                 playlistLibraryFilter = filterId
-                playlistLibraryVisible = PAIRING_CARD_CHUNK
+                playlistLibraryPage = 1
                 render()
             end,
         }))
     end
     table.insert(children, ui.row({ gap = 5, align = "center" }, filterButtons))
-    if #items == 0 then
+    if total == 0 then
         table.insert(children, ui.label({
             text = noctalia.tr("panel.pairings.library_empty"),
             fontSize = 9,
             color = "on_surface_variant",
         }))
     else
-        panelUi.appendExplicitGrid(children, items, playlistLibraryVisible, PLAYLIST_LIBRARY_COLUMNS, function(item)
+        panelUi.appendExplicitGrid(children, items, #items, PLAYLIST_LIBRARY_COLUMNS, function(item)
             local kind = tostring(type(item) == "table" and item.kind or "static")
             local entry = type(item) == "table" and item.entry or {}
             local metadata = type(item) == "table" and item.metadata or {}
@@ -4471,12 +4958,12 @@ function panelUi.playlistPairingLibrary(playlistId, output)
             local pairingId = if customized then tostring(existing.id or "") else ""
             local source = tostring(entry.source or "")
             local signature = panelUi.libraryDragSignature(entry)
-            local dragToken = dragPairingTokenById[signature]
+            local dragToken = dragLibraryPairingTokenBySignature[signature]
             if dragToken == nil then
                 dragToken = nextDragToken("l")
-                dragPairingTokenById[signature] = dragToken
+                dragLibraryPairingTokenBySignature[signature] = dragToken
             end
-            dragPairingByToken[dragToken] = {
+            dragLibraryPairingByToken[dragToken] = {
                 library_entry = entry,
                 library_bundle = bundle,
                 pairing_id = pairingId,
@@ -4563,13 +5050,13 @@ function panelUi.playlistPairingLibrary(playlistId, output)
                 }),
             })
         end)
-        panelUi.appendVisibilityControls(
+        panelUi.appendPageControls(
             children,
-            #items,
-            playlistLibraryVisible,
-            PAIRING_CARD_CHUNK,
+            total,
+            playlistLibraryPage,
+            LIBRARY_PAGE_SIZE,
             function(value)
-                playlistLibraryVisible = value
+                playlistLibraryPage = value
             end
         )
     end
@@ -6021,6 +6508,9 @@ function panelPages.selectShopPage(subpage)
     if not panelPages.validShopSubpages[subpage] then
         return
     end
+    if activePage == "shops" and activeSubpage == subpage then
+        return
+    end
     preview.cancel()
     activePage = "shops"
     activeSubpage = subpage
@@ -6152,7 +6642,13 @@ function panelPages.navigationColumn()
         ))
     end
     table.insert(children, panelPages.navigationButton("playlists", "panel.nav.playlists", "playlist"))
-    for _, playlistId in ipairs(sortedPlaylistIds(false)) do
+    local playlistIds = sortedPlaylistIds(false)
+    local playlistPages = math.max(1, math.ceil(#playlistIds / PLAYLIST_NAV_PAGE_SIZE))
+    playlistNavigationPage = math.min(playlistPages, math.max(1, playlistNavigationPage))
+    local firstPlaylist = (playlistNavigationPage - 1) * PLAYLIST_NAV_PAGE_SIZE + 1
+    local lastPlaylist = math.min(#playlistIds, firstPlaylist + PLAYLIST_NAV_PAGE_SIZE - 1)
+    for index = firstPlaylist, lastPlaylist do
+        local playlistId = playlistIds[index]
         local id = playlistId
         local playlist = playlistMap()[id]
         table.insert(
@@ -6166,6 +6662,39 @@ function panelPages.navigationColumn()
                 end
             )
         )
+    end
+    if playlistPages > 1 then
+        table.insert(children, ui.row({ key = "playlist-nav-pages", gap = 3, align = "center" }, {
+            ui.button({
+                glyph = "chevron-left",
+                tooltip = noctalia.tr("panel.browse.previous"),
+                variant = "ghost",
+                controlSize = "sm",
+                enabled = playlistNavigationPage > 1,
+                onClick = function()
+                    playlistNavigationPage = math.max(1, playlistNavigationPage - 1)
+                    render()
+                end,
+            }),
+            ui.label({
+                text = tostring(playlistNavigationPage) .. "/" .. tostring(playlistPages),
+                fontSize = 8,
+                color = "on_surface_variant",
+                align = "center",
+                flexGrow = 1,
+            }),
+            ui.button({
+                glyph = "chevron-right",
+                tooltip = noctalia.tr("panel.browse.next"),
+                variant = "ghost",
+                controlSize = "sm",
+                enabled = playlistNavigationPage < playlistPages,
+                onClick = function()
+                    playlistNavigationPage = math.min(playlistPages, playlistNavigationPage + 1)
+                    render()
+                end,
+            }),
+        }))
     end
     table.insert(children, panelPages.navigationButton("diagnostics", "panel.nav.diagnostics", "stethoscope"))
     return ui.scroll({ key = "wall-in-one-nav", width = 154, gap = 3, align = "stretch" }, children)
@@ -6839,7 +7368,7 @@ function panelPages.activePageSections()
     return { panelPages.homeSection() }
 end
 
-render = function()
+function panelPages.renderNow()
     if not isOpen then
         return
     end
@@ -6876,6 +7405,12 @@ render = function()
             }, panelPages.activePageSections()),
         }),
     }))
+end
+
+render = function()
+    if isOpen then
+        preview.requestRender()
+    end
 end
 
 function onOpen(_context)
@@ -6918,9 +7453,41 @@ function onSettings()
 end
 
 function update()
+    preview.refreshClock()
+    if isOpen and dragTokensDirty then
+        local completed = stepDragTokenReconciliation()
+        if completed then
+            render()
+        end
+        preview.settle()
+        if not completed then
+            preview.wake()
+        end
+        return
+    end
+    if preview.takeRender() then
+        panelPages.renderNow()
+        preview.settle()
+        return
+    end
+    local stepped, redraw = preview.step()
+    if stepped then
+        if redraw then
+            render()
+        end
+        preview.settle()
+        return
+    end
     if isOpen and preview.retryDue() then
         render()
     end
+    preview.settle()
+end
+
+function onFrameTick(_deltaMs)
+    -- Frame callbacks are coalesced by Noctalia. Each invocation still performs
+    -- only one bounded scheduler step through update().
+    update()
 end
 
 function onIpc(event, payload)
@@ -6995,7 +7562,6 @@ end
 refreshPanelState = function()
     status = composeStatus()
     resolveSelectedPlaylist(if selectedScreen ~= "" then selectedScreen else nil)
-    reconcileDragTokens()
     if isOpen then
         render()
     end
@@ -7014,15 +7580,19 @@ reloadSharedState = function()
     wallhavenResultsState = noctalia.state.get(WALLHAVEN_RESULTS_KEY)
     status = composeStatus()
     resolveSelectedPlaylist(if selectedScreen ~= "" then selectedScreen else nil)
-    reconcileDragTokens()
+    markDragTokensDirty()
 end
 
-noctalia.setUpdateInterval(preview.retryPollMs)
+preview.initializeScheduler()
 noctalia.state.watch(STATUS_KEY, function(nextStatus)
     if adoptLifecycle(nextStatus) then
         -- A service instance change can race the domain callbacks. Re-read the
         -- persistent slots; composeStatus accepts only the matching instance.
+        local previousConfigRevision = type(configState) == "table" and tonumber(configState.revision) or -1
         configState = noctalia.state.get(CONFIG_STATE_KEY)
+        if type(configState) == "table" and tonumber(configState.revision) ~= previousConfigRevision then
+            markDragTokensDirty()
+        end
         runtimeState = noctalia.state.get(RUNTIME_STATE_KEY)
         libraryState = noctalia.state.get(LIBRARY_STATE_KEY)
         refreshPanelState()
@@ -7033,13 +7603,21 @@ end)
 -- changes into one panel rebuild. Its callback also re-reads all three slots,
 -- so a delayed domain callback cannot leave the rendered view behind.
 noctalia.state.watch(CONFIG_STATE_KEY, function(nextState)
-    configState = adoptDomain(configState, nextState)
+    local adopted, changed = adoptDomain(configState, nextState)
+    configState = adopted
+    if changed then
+        markDragTokensDirty()
+    end
 end)
 noctalia.state.watch(RUNTIME_STATE_KEY, function(nextState)
     runtimeState = adoptDomain(runtimeState, nextState)
 end)
 noctalia.state.watch(LIBRARY_STATE_KEY, function(nextState)
-    libraryState = adoptDomain(libraryState, nextState)
+    local adopted, changed = adoptDomain(libraryState, nextState)
+    libraryState = adopted
+    if changed then
+        resetLibraryDragTokens()
+    end
 end)
 noctalia.state.watch(RENDERER_STATUS_KEY, function(nextState)
     rendererState = nextState

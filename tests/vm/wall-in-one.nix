@@ -112,82 +112,24 @@ let
       > "$out/431960001/project.json"
   '';
 
-  motionGenreCards = lib.concatMapStrings (index: ''
-    <a href="/nature-${toString index}" title="Nature ${toString index} Live Wallpaper">
-      <span class="ttl">Nature ${toString index}</span>
-      <span class="frm">4K</span>
-      <img src=/i/c/364x205/media/${toString index}/nature-${toString index}.3840x2160.jpg>
-    </a>
-  '') (lib.range 1 36);
-
-  # MotionBGS listing pages contain hundreds of unrelated navigation, tag, and
-  # footer anchors. Keep this fixture close to the real failure shape: roughly
-  # 100 KiB and 391 total anchors once the 36 wallpaper cards are included.
-  motionGenreNoiseAnchors = lib.concatMapStrings (index: ''
-    <a href="/navigation-${toString index}" class="navigation-link fixture-padding-for-realistic-motionbgs-listing" aria-label="Unrelated MotionBGS navigation fixture ${toString index} xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">Navigation fixture ${toString index}</a>
-  '') (lib.range 1 355);
-
-  motionSearchHtml = pkgs.writeText "motionbgs-search.html" ''
-    <!doctype html><html><body>
-      <a href="/night-city" title="Night City Live Wallpaper">
-        <span class="ttl">Night City</span>
-        <span class="frm">4K</span>
-        <picture>
-          <source srcset=/i/c/364x205/media/4242/night-city.3840x2160.jpg.webp type=image/webp>
-          <img src=/i/c/364x205/media/4242/night-city.3840x2160.jpg>
-        </picture>
-      </a>
-      <a href="https://evil.example/not-a-card" title="Ignore Live Wallpaper">
-        <span class="ttl">Cross origin</span>
-      </a>
-    </body></html>
-  '';
-  motionGenrePageOneHtml = pkgs.writeText "motionbgs-genre-page-1.html" ''
-    <!doctype html><html><head>
-      <title>610+ Nature Live Wallpapers 4K &amp; HD</title>
-      <link rel="next" href="https://motionbgs.com/tag:nature/2/">
-    </head><body>
-      ${motionGenreNoiseAnchors}
-      ${motionGenreCards}
-    </body></html>
-  '';
-  motionGenrePageTwoHtml = pkgs.writeText "motionbgs-genre-page-2.html" ''
-    <!doctype html><html><head>
-      <title>600+ Nature Live Wallpapers 4K &amp; HD (Page 2)</title>
-      <link rel="prev" href="https://motionbgs.com/tag:nature/">
-    </head><body>
-      <a href="/nature-page-two" title="Nature Page Two Live Wallpaper">
-        <span class="ttl">Nature Page Two</span>
-        <span class="frm">HD</span>
-        <img src=/i/c/364x205/media/9999/nature-page-two.1920x1080.jpg>
-      </a>
-    </body></html>
-  '';
-  motionDetailHtml = pkgs.writeText "motionbgs-detail.html" ''
-    <!doctype html><html><head>
-      <meta property="og:title" content="Night City Live Wallpaper">
-      <meta property="og:image" content="/media/4242/poster.jpg">
-      <meta property="og:video" content="/media/4242/preview.mp4">
-    </head><body>
-      <a href="/dl/hd/4242/">1920x1080 (3.5 MB)</a>
-      <a href="/dl/4k/4242/">3840x2160 (9.0 MB)</a>
-    </body></html>
-  '';
-  motionChallengeHtml = pkgs.writeText "motionbgs-challenge.html" ''
-    <!doctype html><html><head><title>Just a moment...</title></head>
-    <body><p>Checking your browser</p></body></html>
-  '';
-  motionMarkupHtml = pkgs.writeText "motionbgs-markup.html" ''
-    <!doctype html><html><body><main>Fixture layout changed</main></body></html>
-  '';
-
   rawPluginSource = lib.fileset.toSource {
     root = pluginRoot;
-    fileset = pluginRoot + "/wall-in-one";
+    fileset = lib.fileset.unions [
+      (pluginRoot + "/wall-in-one")
+      # Separately installed, but the guest still needs it on disk.
+      (pluginRoot + "/motionbgs-helper")
+      # The offline contract asserts repository-root documentation parity.
+      (pluginRoot + "/README.md")
+      (pluginRoot + "/CHANGELOG.md")
+    ];
   };
   stagedSource = pkgs.runCommand "noctalia-wall-in-one-vm-source" { } ''
-    mkdir -p "$out/wall-in-one"
+    mkdir -p "$out/wall-in-one" "$out/motionbgs-helper"
     cp -R ${rawPluginSource}/wall-in-one/. "$out/wall-in-one/"
+    # The MotionBGS program is installed separately from the plugin, but the
+    # contract test and the RPC fixture both invoke it from the guest tree.
+    cp -R ${rawPluginSource}/motionbgs-helper/. "$out/motionbgs-helper/"
+    cp ${rawPluginSource}/README.md ${rawPluginSource}/CHANGELOG.md "$out/"
     cp ${catalog} "$out/catalog.toml"
   '';
 
@@ -251,92 +193,433 @@ let
     '';
   };
 
-  fakeMotionBgsHelper = pkgs.writeText "wall-in-one-motionbgs-provider-fixture" ''
-    #!/usr/bin/env bash
-    set -uo pipefail
+  # The plugin keeps its production launcher. This separately configured fake
+  # executable implements the public schema-1 process boundary and returns
+  # pinned normalized records, keeping the VM offline without moving provider
+  # parsing or cache work back into Noctalia's Luau runtime.
+  fakeMotionBgsProgram = pkgs.writeShellApplication {
+    name = "wall-in-one-motionbgs";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.jq
+    ];
+    text = ''
+      umask 077
 
-    {
-      printf '%q' "$1"
-      for argument in "''${@:2}"; do
-        printf '\t%q' "$argument"
-      done
-      printf '\n'
-    } >> /tmp/wall-in-one-vm-motion-calls.log
+      readonly calls=/tmp/wall-in-one-vm-motion-calls.log
+      readonly transports=/tmp/wall-in-one-vm-motion-transports.log
+      readonly guard_wire=WIO-MBGS-GUARD1
+      response=""
+      request_id=""
+      action=""
+      cache_directory=""
+      cache_file=""
+      guard=""
 
-    mode=$(cat /tmp/wall-in-one-vm-motion-mode 2>/dev/null || printf good)
-    case ''${1:-} in
-      self-test)
-        [[ $# -eq 1 ]] || exit 64
-        printf 'WIO-MBG1\tok\tself-test\n'
-        ;;
-      fetch-html)
-        [[ $# -eq 3 ]] || exit 64
-        url=$2
-        destination=$3
-        case $mode in
-          good)
-            case $url in
-              https://motionbgs.com/night-city) source=${motionDetailHtml} ;;
-              https://motionbgs.com/tag:nature/) source=${motionGenrePageOneHtml} ;;
-              https://motionbgs.com/tag:nature/2/) source=${motionGenrePageTwoHtml} ;;
-              *) source=${motionSearchHtml} ;;
-            esac
-            effective=$url
-            ;;
-          challenge)
-            source=${motionChallengeHtml}
-            effective=$url
-            ;;
-          markup)
-            source=${motionMarkupHtml}
-            effective=$url
-            ;;
-          cross-origin)
-            source=${motionSearchHtml}
-            effective=https://evil.example/search
-            ;;
-          deny)
-            printf 'WIO-MBG1\terror\tfixture-deny\tcache miss unexpectedly reached helper\n'
-            exit 69
-            ;;
-          *) exit 64 ;;
-        esac
-        temporary="$destination.part"
-        cp -- "$source" "$temporary"
-        mv -f -- "$temporary" "$destination"
-        bytes=$(stat -c %s -- "$destination")
-        printf 'WIO-MBG1\tok\t200\t%s\ttext/html\t%s\t%s\n' \
-          "$effective" "$bytes" "$destination"
-        ;;
-      download)
-        [[ $# -eq 8 ]] || exit 64
-        slug=$3
-        quality=$4
-        directory=$5
-        destination="$directory/$slug.$quality.mp4"
-        temporary="$destination.part"
-        cp -- ${fixtureVideo} "$temporary"
-        mv -f -- "$temporary" "$destination"
-        bytes=$(stat -c %s -- "$destination")
-        effective="https://motionbgs.com/dl/$quality/4242/"
-        printf \
-          '{"schema":1,"plugin":"goober/wall-in-one","provider":"MotionBGS","path":"%s","title":"Night City","source_page":"https://motionbgs.com/night-city","download_url":"%s","quality":"%s","bytes":%s}\n' \
-          "$destination" "$effective" "$quality" "$bytes" \
-          > "$destination.motionbgs.json.part"
-        mv -f -- "$destination.motionbgs.json.part" "$destination.motionbgs.json"
-        printf 'WIO-MBG1\tok\t200\t%s\tvideo/mp4\t%s\t%s\n' \
-          "$effective" "$bytes" "$destination"
-        ;;
-      *)
-        printf 'WIO-MBG1\terror\tusage\tfixture expected fetch-html, download, or self-test\n'
-        exit 64
-        ;;
-    esac
-  '';
+      guard_ready() {
+        local value owner size
+        [[ -f $guard && ! -L $guard ]] || return 1
+        owner=$(stat -c %u -- "$guard") || return 1
+        size=$(stat -c %s -- "$guard") || return 1
+        [[ $owner == "$(id -u)" && $size == 16 ]] || return 1
+        IFS= read -r value < "$guard" || return 1
+        [[ $value == "$guard_wire" ]]
+      }
 
-  # The production helper is self-tested before this replacement is installed.
-  # Panel coverage then stays fully offline while retaining the helper's exact
-  # success protocol and recording every attempted cache miss.
+      protocol_error() {
+        local wire=$1
+        local kind=$2
+        local detail=$3
+        local code=''${4:-70}
+        printf '%s\terror\t%s\t%s\n' "$wire" "$kind" "$detail"
+        exit "$code"
+      }
+
+      install_response() {
+        local payload=$1
+        local temporary bytes
+        guard_ready || protocol_error WIO-MBGS-RPC1 cancelled 'fixture cancellation guard is absent' 75
+        [[ ! -e $response && ! -L $response ]] || \
+          protocol_error WIO-MBGS-RPC1 conflict 'fixture response path already exists' 73
+        temporary=$(mktemp -- "$response.fixture.XXXXXX") || \
+          protocol_error WIO-MBGS-RPC1 local-io 'fixture could not stage its response' 73
+        printf '%s\n' "$payload" > "$temporary"
+        bytes=$(stat -c %s -- "$temporary")
+        if (( bytes < 2 || bytes > 131072 )); then
+          rm -f -- "$temporary"
+          protocol_error WIO-MBGS-RPC1 response-size 'fixture response exceeded its bound'
+        fi
+        if ! ln -- "$temporary" "$response"; then
+          rm -f -- "$temporary"
+          protocol_error WIO-MBGS-RPC1 conflict 'fixture response install was not no-replace' 73
+        fi
+        rm -f -- "$temporary"
+        guard_ready || {
+          rm -f -- "$response"
+          protocol_error WIO-MBGS-RPC1 cancelled 'fixture cancellation guard changed before completion' 75
+        }
+        printf 'WIO-MBGS-RPC1\tok\t%s\t%s\t%s\n' \
+          "$request_id" "$response" "$bytes"
+      }
+
+      failure_response() {
+        local kind=$1
+        local message=$2
+        local payload
+        payload=$(jq -cn \
+          --arg action "$action" \
+          --arg request_id "$request_id" \
+          --arg kind "$kind" \
+          --arg message "$message" \
+          '{schema:1,ok:false,action:$action,request_id:$request_id,error:{kind:$kind,message:$message}}')
+        install_response "$payload"
+        exit 0
+      }
+
+      detail_record() {
+        jq -cn '{
+          slug:"night-city",
+          id:"4242",
+          title:"Night City",
+          source_url:"https://motionbgs.com/night-city",
+          preview_url:"https://motionbgs.com/media/4242/preview.mp4",
+          poster_url:"https://motionbgs.com/media/4242/poster.jpg",
+          duration:"00:30",
+          fetched_at:1767225600,
+          downloads:{
+            hd:{id:"4242",quality:"hd",resolution:"1920x1080",advertised_size_mb:3.5,url:"https://motionbgs.com/dl/hd/4242/"},
+            "4k":{id:"4242",quality:"4k",resolution:"3840x2160",advertised_size_mb:9,url:"https://motionbgs.com/dl/4k/4242/"}
+          }
+        }'
+      }
+
+      valid_cache_file() {
+        [[ -f $cache_file && ! -L $cache_file ]] \
+          && jq -e '.schema == 1 and (.searches | type == "object") and (.details | type == "object")' \
+            "$cache_file" >/dev/null
+      }
+
+      search_is_cached() {
+        local key=$1
+        valid_cache_file \
+          && jq -e --arg key "$key" '.searches[$key] == true' "$cache_file" >/dev/null
+      }
+
+      detail_is_cached() {
+        local slug=$1
+        valid_cache_file \
+          && jq -e --arg slug "$slug" '.details[$slug] == true' "$cache_file" >/dev/null
+      }
+
+      record_search_cache() {
+        local key=$1
+        local temporary
+        temporary=$(mktemp -- "$cache_directory/.cache-v1.fixture.XXXXXX")
+        if valid_cache_file; then
+          jq -c --arg key "$key" \
+            '.searches[$key] = true | .search_order = (((.search_order // []) + [$key]) | unique)' \
+            "$cache_file" > "$temporary"
+        else
+          jq -cn --arg key "$key" \
+            '{schema:1,searches:{($key):true},details:{},search_order:[$key],detail_order:[]}' \
+            > "$temporary"
+        fi
+        mv -f -- "$temporary" "$cache_file"
+      }
+
+      record_detail_cache() {
+        local slug=$1
+        local temporary
+        temporary=$(mktemp -- "$cache_directory/.cache-v1.fixture.XXXXXX")
+        if valid_cache_file; then
+          jq -c --arg slug "$slug" \
+            '.details[$slug] = true | .detail_order = (((.detail_order // []) + [$slug]) | unique)' \
+            "$cache_file" > "$temporary"
+        else
+          jq -cn --arg slug "$slug" \
+            '{schema:1,searches:{},details:{($slug):true},search_order:[],detail_order:[$slug]}' \
+            > "$temporary"
+        fi
+        mv -f -- "$temporary" "$cache_file"
+      }
+
+      mode=$(cat /tmp/wall-in-one-vm-motion-mode 2>/dev/null || printf good)
+      case ''${1:-} in
+        probe)
+          if (( $# != 3 )) || [[ $2 != --protocol || $3 != 1 ]]; then
+            protocol_error WIO-MBGS-PROBE1 usage 'fixture probe expects --protocol 1' 64
+          fi
+          printf 'probe\t1\n' >> "$calls"
+          printf 'WIO-MBGS-PROBE1\tok\t1\t1.0.0-fixture\tsearch,details,download,clear\n'
+          ;;
+        rpc)
+          if (( $# != 9 )) \
+            || [[ $2 != --protocol || $3 != 1 || $4 != --request || $6 != --response || $8 != --guard ]]; then
+            protocol_error WIO-MBGS-RPC1 usage \
+              'fixture rpc expects --protocol 1 --request ABS --response ABS --guard ABS' 64
+          fi
+          request=$5
+          response=$7
+          guard=$9
+          [[ -f $request && ! -L $request ]] || \
+            protocol_error WIO-MBGS-RPC1 invalid-request 'fixture request is not a regular file' 64
+          request_bytes=$(stat -c %s -- "$request")
+          (( request_bytes >= 2 && request_bytes <= 8192 )) || \
+            protocol_error WIO-MBGS-RPC1 invalid-request 'fixture request exceeded 8 KiB' 64
+          if ! request_id=$(jq -er '.request_id | select(type == "string")' "$request") \
+            || ! action=$(jq -er '.action | select(type == "string")' "$request") \
+            || ! cache_directory=$(jq -er '.cache_directory | select(type == "string" and startswith("/"))' "$request") \
+            || ! request_guard=$(jq -er '.guard_path | select(type == "string" and startswith("/"))' "$request") \
+            || ! operation_timeout_ms=$(jq -er '.operation_timeout_ms | select(type == "number")' "$request") \
+            || ! jq -e '.schema == 1 and (.cache_ttl_seconds | type == "number")' "$request" >/dev/null; then
+            protocol_error WIO-MBGS-RPC1 invalid-request 'fixture request envelope was invalid' 64
+          fi
+          [[ $request_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || \
+            protocol_error WIO-MBGS-RPC1 invalid-request 'fixture request id was invalid' 64
+          [[ -d $cache_directory && ! -L $cache_directory ]] || \
+            protocol_error WIO-MBGS-RPC1 invalid-request 'fixture cache directory was invalid' 64
+          [[ $request_guard == "$guard" && ''${guard%/*} == "''${response%/*}" ]] || \
+            protocol_error WIO-MBGS-RPC1 invalid-path 'fixture cancellation guard did not match the envelope' 64
+          if [[ $action == download ]]; then
+            [[ $operation_timeout_ms == 75000 ]] || \
+              protocol_error WIO-MBGS-RPC1 invalid-request 'fixture download deadline was invalid' 64
+          else
+            [[ $operation_timeout_ms == 30000 ]] || \
+              protocol_error WIO-MBGS-RPC1 invalid-request 'fixture RPC deadline was invalid' 64
+          fi
+          guard_ready || protocol_error WIO-MBGS-RPC1 cancelled 'fixture cancellation guard is absent' 75
+          cache_file="$cache_directory/cache-v1.json"
+          printf 'rpc\t%s\t%s\t%s\t%s\t%s\n' \
+            "$request_id" "$action" "$request" "$response" "$guard" >> "$calls"
+
+          case $action in
+            search)
+              if ! browse_mode=$(jq -er '.mode | select(type == "string")' "$request") \
+                || ! query=$(jq -er '.query | select(type == "string")' "$request") \
+                || ! genre=$(jq -er '.genre | select(type == "string")' "$request") \
+                || ! page=$(jq -er '.page | select(type == "number" and . >= 1 and . == floor)' "$request") \
+                || ! limit=$(jq -er '.limit | select(type == "number" and . >= 1 and . <= 48 and . == floor)' "$request") \
+                || ! force=$(jq -er '.force | select(type == "boolean") | tostring' "$request"); then
+                failure_response protocol 'fixture search request omitted or malformed a required bridge field'
+              fi
+              cache_key=$(printf '%s\t%s\t%s\t%s\t%s' "$browse_mode" "$query" "$genre" "$page" "$limit" \
+                | sha256sum | cut -d' ' -f1)
+              cached=false
+              if [[ $force != true ]] && search_is_cached "$cache_key"; then
+                cached=true
+              else
+                printf 'search\t%s\t%s\n' "$cache_key" "$mode" >> "$transports"
+                case $mode in
+                  good) ;;
+                  challenge) failure_response challenge 'pinned provider challenge fixture' ;;
+                  markup) failure_response site-markup 'pinned changed-markup fixture' ;;
+                  cross-origin) failure_response protocol 'pinned cross-origin fixture' ;;
+                  deny) failure_response fixture-deny 'cache miss unexpectedly reached provider transport' ;;
+                  *) failure_response fixture-mode 'unknown MotionBGS fixture mode' ;;
+                esac
+                record_search_cache "$cache_key"
+              fi
+
+              previous=false
+              next=false
+              pageable=false
+              total_hint=0
+              case $browse_mode in
+                search)
+                  source_url=https://motionbgs.com/tag:night-city
+                  items=$(jq -cn '[{
+                    slug:"night-city",id:"4242",title:"Night City",quality:"4K",
+                    source_url:"https://motionbgs.com/night-city",
+                    thumbnail_url:"https://motionbgs.com/i/c/364x205/media/4242/night-city.3840x2160.jpg"
+                  }]')
+                  total_hint=1
+                  ;;
+                genre)
+                  pageable=true
+                  if (( page == 1 )); then
+                    source_url=https://motionbgs.com/tag:nature/
+                    next=true
+                    total_hint=610
+                    items=$(jq -cn '[range(1; 37) as $index | {
+                      slug:("nature-" + ($index | tostring)),
+                      id:($index | tostring),
+                      title:("Nature " + ($index | tostring)),
+                      quality:"4K",
+                      source_url:("https://motionbgs.com/nature-" + ($index | tostring)),
+                      thumbnail_url:("https://motionbgs.com/i/c/364x205/media/" + ($index | tostring) + "/nature-" + ($index | tostring) + ".3840x2160.jpg")
+                    }]')
+                  else
+                    source_url="https://motionbgs.com/tag:nature/$page/"
+                    previous=true
+                    total_hint=600
+                    items=$(jq -cn '[{
+                      slug:"nature-page-two",id:"9999",title:"Nature Page Two",quality:"HD",
+                      source_url:"https://motionbgs.com/nature-page-two",
+                      thumbnail_url:"https://motionbgs.com/i/c/364x205/media/9999/nature-page-two.1920x1080.jpg"
+                    }]')
+                  fi
+                  ;;
+                latest)
+                  pageable=true
+                  source_url=https://motionbgs.com/
+                  items='[]'
+                  ;;
+                4k)
+                  pageable=true
+                  source_url=https://motionbgs.com/4k
+                  items='[]'
+                  ;;
+                hd)
+                  source_url=https://motionbgs.com/hd
+                  items='[]'
+                  ;;
+                *) failure_response protocol 'fixture received an unsupported browse mode' ;;
+              esac
+              payload=$(jq -cn \
+                --arg action "$action" \
+                --arg request_id "$request_id" \
+                --arg mode "$browse_mode" \
+                --arg query "$query" \
+                --arg genre "$genre" \
+                --arg source_url "$source_url" \
+                --argjson cached "$cached" \
+                --argjson fetched_at 1767225600 \
+                --argjson items "$items" \
+                --argjson page "$page" \
+                --argjson previous "$previous" \
+                --argjson next "$next" \
+                --argjson pageable "$pageable" \
+                --argjson total_hint "$total_hint" \
+                '{schema:1,ok:true,action:$action,request_id:$request_id,
+                  mode:$mode,query:$query,genre:$genre,page:$page,cached:$cached,
+                  source_url:$source_url,fetched_at:$fetched_at,items:$items,
+                  meta:{current_page:$page,has_previous:$previous,has_next:$next,
+                    pageable:$pageable,total_hint:$total_hint}}')
+              install_response "$payload"
+              ;;
+            details)
+              if ! slug=$(jq -er '.slug | select(type == "string")' "$request") \
+                || ! force=$(jq -er '.force | select(type == "boolean") | tostring' "$request"); then
+                failure_response protocol 'fixture details request omitted or malformed a required bridge field'
+              fi
+              [[ $slug == night-city ]] || failure_response site-markup 'fixture detail slug was not pinned'
+              cached=false
+              if [[ $force != true ]] && detail_is_cached "$slug"; then
+                cached=true
+              else
+                printf 'details\t%s\t%s\n' "$slug" "$mode" >> "$transports"
+                [[ $mode == good ]] || failure_response fixture-deny 'detail transport was denied by fixture mode'
+                record_detail_cache "$slug"
+              fi
+              selected=$(detail_record)
+              payload=$(jq -cn \
+                --arg action "$action" \
+                --arg request_id "$request_id" \
+                --argjson cached "$cached" \
+                --argjson selected "$selected" \
+                '{schema:1,ok:true,action:$action,request_id:$request_id,cached:$cached,
+                  source_url:$selected.source_url,fetched_at:$selected.fetched_at,selected:$selected}')
+              install_response "$payload"
+              ;;
+            download)
+              if ! slug=$(jq -er '.slug | select(type == "string")' "$request") \
+                || ! quality=$(jq -er '.quality | select(. == "hd" or . == "4k")' "$request") \
+                || ! download_directory=$(jq -er '.download_directory | select(type == "string" and startswith("/"))' "$request") \
+                || ! managed_marker=$(jq -er '.managed_marker_path | select(type == "string" and startswith("/"))' "$request") \
+                || ! max_download_bytes=$(jq -er '.max_download_bytes | select(type == "number" and . >= 1 and . == floor)' "$request") \
+                || ! jq -e '.download_timeout_seconds | type == "number" and . == 50' "$request" >/dev/null \
+                || ! jq -e '.force | type == "boolean"' "$request" >/dev/null; then
+                failure_response protocol 'fixture download request omitted or malformed a required bridge field'
+              fi
+              [[ $slug == night-city && -d $download_directory && -f $managed_marker ]] || \
+                failure_response configuration 'fixture download request was not pinned or managed'
+              printf 'download\t%s\t%s\t%s\n' "$slug" "$quality" "$mode" >> "$transports"
+              [[ $mode == good ]] || failure_response fixture-deny 'download transport was denied by fixture mode'
+              destination="$download_directory/$slug.$quality.mp4"
+              sidecar="$destination.motionbgs.json"
+              [[ ! -e $destination && ! -L $destination && ! -e $sidecar && ! -L $sidecar ]] || \
+                failure_response conflict 'fixture download destination already exists'
+              media_temporary=$(mktemp -- "$download_directory/.fixture-media.XXXXXX")
+              sidecar_temporary=$(mktemp -- "$download_directory/.fixture-sidecar.XXXXXX")
+              cp -- "${fixtureVideo}" "$media_temporary"
+              bytes=$(stat -c %s -- "$media_temporary")
+              digest=$(sha256sum -- "$media_temporary" | cut -d' ' -f1)
+              if (( bytes < 1 || bytes > max_download_bytes )); then
+                rm -f -- "$media_temporary" "$sidecar_temporary"
+                failure_response download-size 'fixture video exceeded the configured download bound'
+              fi
+              download_url="https://motionbgs.com/dl/$quality/4242/"
+              sidecar_payload=$(jq -cn \
+                --arg path "$destination" \
+                --arg quality "$quality" \
+                --arg download_url "$download_url" \
+                --arg digest "$digest" \
+                --argjson bytes "$bytes" \
+                '{schema:1,plugin:"goober/wall-in-one",provider:"MotionBGS",path:$path,
+                  title:"Night City",source_page:"https://motionbgs.com/night-city",
+                  download_url:$download_url,quality:$quality,content_type:"video/mp4",
+                  bytes:$bytes,sha256:$digest,downloaded_at:"2026-01-01T00:00:00Z"}')
+              printf '%s\n' "$sidecar_payload" > "$sidecar_temporary"
+              if ! ln -- "$media_temporary" "$destination"; then
+                rm -f -- "$media_temporary" "$sidecar_temporary"
+                failure_response conflict 'fixture media install was not no-replace'
+              fi
+              if ! ln -- "$sidecar_temporary" "$sidecar"; then
+                rm -f -- "$destination" "$media_temporary" "$sidecar_temporary"
+                failure_response conflict 'fixture sidecar install was not no-replace'
+              fi
+              rm -f -- "$media_temporary" "$sidecar_temporary"
+              record_detail_cache "$slug"
+              selected=$(detail_record)
+              download=$(jq -cn \
+                --arg path "$destination" \
+                --arg sidecar "$sidecar" \
+                --arg slug "$slug" \
+                --arg quality "$quality" \
+                --arg download_url "$download_url" \
+                --arg digest "$digest" \
+                --argjson bytes "$bytes" \
+                '{path:$path,sidecar:$sidecar,slug:$slug,title:"Night City",quality:$quality,
+                  bytes:$bytes,source_url:"https://motionbgs.com/night-city",
+                  download_url:$download_url,content_type:"video/mp4",sha256:$digest,
+                  downloaded_at:"2026-01-01T00:00:00Z"}')
+              payload=$(jq -cn \
+                --arg action "$action" \
+                --arg request_id "$request_id" \
+                --argjson selected "$selected" \
+                --argjson download "$download" \
+                '{schema:1,ok:true,action:$action,request_id:$request_id,cached:false,
+                  source_url:$selected.source_url,fetched_at:$selected.fetched_at,
+                  selected:$selected,download:$download}')
+              install_response "$payload"
+              ;;
+            clear)
+              cache_temporary=$(mktemp -- "$cache_directory/.cache-v1.fixture.XXXXXX")
+              jq -cn '{schema:1,searches:{},details:{},search_order:[],detail_order:[]}' \
+                > "$cache_temporary"
+              guard_ready || {
+                rm -f -- "$cache_temporary"
+                protocol_error WIO-MBGS-RPC1 cancelled 'fixture cancellation guard changed before clear' 75
+              }
+              mv -f -- "$cache_temporary" "$cache_file"
+              guard_ready || protocol_error WIO-MBGS-RPC1 cancelled \
+                'fixture cancellation guard changed after clear' 75
+              payload=$(jq -cn \
+                --arg action "$action" \
+                --arg request_id "$request_id" \
+                '{schema:1,ok:true,action:$action,request_id:$request_id,cleared:true}')
+              install_response "$payload"
+              ;;
+            *) failure_response unsupported-action 'fixture received an unsupported action' ;;
+          esac
+          ;;
+        *)
+          protocol_error WIO-MBGS-RPC1 usage 'fixture expected probe or rpc' 64
+          ;;
+      esac
+    '';
+  };
+
   fakeProviderThumbnailHelper = pkgs.writeText "wall-in-one-provider-thumbnail-fixture" ''
     #!/usr/bin/env bash
     set -uo pipefail
@@ -1251,6 +1534,8 @@ let
                     .. " busy=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.busy == true)
                     .. " action=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.last_action or "")
                     .. " error_kind=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.last_error_kind or "")
+                    .. " binary_source=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.binary_source or "")
+                    .. " binary_version=" .. tostring(type(motionBgsStatus) == "table" and motionBgsStatus.binary_version or "")
                     .. " cached=" .. tostring(type(motionBgsResults) == "table" and motionBgsResults.cached == true)
                     .. " mode=" .. tostring(type(motionBgsResults) == "table" and motionBgsResults.mode or "")
                     .. " page=" .. tostring(type(meta) == "table" and meta.current_page or 0)
@@ -1276,12 +1561,13 @@ let
         local vmPreview = {
             provider = "",
             render = render,
+            renderNow = panelPages.renderNow,
             onIpc = onIpc,
         }
 
-        render = function()
+        panelPages.renderNow = function()
             if vmPreview.provider == "" then
-                vmPreview.render()
+                vmPreview.renderNow()
                 return
             end
             if not isOpen then
@@ -1307,7 +1593,103 @@ let
         end
 
         onIpc = function(event, payload)
-            if event == "vm-provider-preview" then
+            if event == "vm-library-default-edit" then
+                local source = "999999999"
+                local entry = {
+                    kind = "workshop",
+                    source = source,
+                    label = "VM Fresh Workshop",
+                }
+                local existing = matchingPairingForLibraryEntry(entry)
+                openLibraryEntryPairing(entry, {
+                    id = "vm-fresh-workshop",
+                    preview = "",
+                    ownership = "steam",
+                })
+                noctalia.log(
+                    "WALL_IN_ONE_VM_LIBRARY_DEFAULT_EDIT "
+                        .. tostring(payload or "")
+                        .. " existing=" .. tostring(type(existing) == "table")
+                        .. " open=" .. tostring(pairingEditorOpen == true)
+                        .. " editor_kind=" .. tostring(pairingEditorKind)
+                        .. " media_kind=" .. tostring(entryMediaKindDraft)
+                        .. " source=" .. tostring(entryMediaSourceDraft)
+                        .. " still=" .. tostring(entryStillModeDraft)
+                        .. " id_empty=" .. tostring(editingPairingId == "")
+                )
+                closePairingEditor()
+                activePage = "main"
+                activeSubpage = ""
+                return
+            elseif event == "vm-wallhaven-route-cache" then
+                local items = {}
+                for index = 0, 11 do
+                    local identifier = string.format("aa%04d", index)
+                    table.insert(items, {
+                        id = identifier,
+                        url = "https://wallhaven.cc/w/" .. identifier,
+                        short_url = "https://whvn.cc/" .. identifier,
+                        resolution = "320x180",
+                        ratio = "16:9",
+                        purity = "sfw",
+                        category = "general",
+                        file_size = 12345,
+                        views = index,
+                        favorites = index,
+                        thumbs = {
+                            large = "https://th.wallhaven.cc/lg/aa/" .. identifier .. ".jpg",
+                        },
+                    })
+                end
+                wallhavenResultsState = {
+                    schema = 1,
+                    kind = "search",
+                    sequence = 903,
+                    items = items,
+                    selected = items[1],
+                    meta = { current_page = 1, last_page = 1, total = #items },
+                }
+                wallhavenState = { available = true, busy = false }
+                vmPreview.provider = ""
+                status = composeStatus()
+                status.storage_valid = true
+                activePage = "main"
+                activeSubpage = ""
+                panelPages.selectShopPage("wallhaven")
+                noctalia.log(
+                    "WALL_IN_ONE_VM_WALLHAVEN_ROUTE_CACHE "
+                        .. tostring(payload or "")
+                        .. " items=" .. tostring(#items)
+                        .. " page=" .. tostring(activePage)
+                        .. " subpage=" .. tostring(activeSubpage)
+                )
+                return
+            elseif event == "vm-preview-cache-diagnostic" then
+                local snapshot = preview.debugSnapshot("wallhaven:aa0000")
+                noctalia.log(
+                    "WALL_IN_ONE_VM_PREVIEW_CACHE "
+                        .. tostring(payload or "")
+                        .. " initialized=" .. tostring(snapshot.initialized)
+                        .. " ready=" .. tostring(snapshot.ready)
+                        .. " initialization_phase=" .. tostring(snapshot.initialization_phase)
+                        .. " initialization_requested=" .. tostring(snapshot.initialization_requested)
+                        .. " queue=" .. tostring(snapshot.queue_depth)
+                        .. " active=" .. tostring(snapshot.active)
+                        .. " dirty=" .. tostring(snapshot.manifest_dirty)
+                        .. " render_pending=" .. tostring(snapshot.render_pending)
+                        .. " open=" .. tostring(snapshot.is_open)
+                        .. " page=" .. tostring(snapshot.active_page)
+                        .. " subpage=" .. tostring(snapshot.active_subpage)
+                        .. " entries=" .. tostring(snapshot.entries)
+                        .. " paths=" .. tostring(snapshot.paths)
+                        .. " last_used=" .. tostring(snapshot.key_last_used)
+                        .. " clock=" .. tostring(snapshot.clock)
+                        .. " interval=" .. tostring(snapshot.update_interval)
+                        .. " scope=" .. tostring(snapshot.scope)
+                        .. " drag_dirty=" .. tostring(snapshot.drag_tokens_dirty)
+                )
+                return
+            elseif event == "vm-provider-preview" then
                 local provider, token = tostring(payload or ""):match("^([a-z]+):([a-z0-9-]+)$")
                 if provider == "wallhaven" then
                     local item = {
@@ -1441,6 +1823,7 @@ let
     [plugin_settings."${pluginId}"]
     use_wallhaven = true
     use_motionbgs = true
+    motionbgs_binary_path = "${lib.getExe fakeMotionBgsProgram}"
     capture_directory = "${captureRoot}"
     video_directory = "${videoRoot}"
     motionbgs_quality = "hd"
@@ -1523,6 +1906,7 @@ let
       : > /tmp/wall-in-one-vm-mpvpaper-invocations.log
       : > /tmp/wall-in-one-vm-mpv-invocations.log
       : > /tmp/wall-in-one-vm-motion-calls.log
+      : > /tmp/wall-in-one-vm-motion-transports.log
       printf '%s\n' success > /tmp/wall-in-one-vm-engine-capture-mode
       printf '%s\n' hold > /tmp/wall-in-one-vm-mpvpaper-mode
       printf '%s\n' good > /tmp/wall-in-one-vm-motion-mode
@@ -1672,6 +2056,16 @@ pkgs.testers.runNixOSTest (
           command = "printf '%s\\n' " + shlex.quote(mode) + " > /tmp/wall-in-one-vm-motion-mode"
           machine.succeed("runuser -u ${testUser} -- sh -c " + shlex.quote(command))
 
+      def motion_calls():
+          return machine.succeed(
+              "cat /tmp/wall-in-one-vm-motion-calls.log"
+          ).splitlines()
+
+      def motion_transports():
+          return machine.succeed(
+              "cat /tmp/wall-in-one-vm-motion-transports.log"
+          ).splitlines()
+
       probe_number = [0]
       def wait_direct(**expected):
           probe_number[0] += 1
@@ -1781,6 +2175,8 @@ pkgs.testers.runNixOSTest (
                   )[1]
                   + "\nMotionBGS fixture calls:\n"
                   + machine.execute("tail -n 80 /tmp/wall-in-one-vm-motion-calls.log")[1]
+                  + "\nMotionBGS fixture transports:\n"
+                  + machine.execute("tail -n 80 /tmp/wall-in-one-vm-motion-transports.log")[1]
               )
               raise
 
@@ -2021,13 +2417,27 @@ pkgs.testers.runNixOSTest (
           "| grep -Fx $'WIO-MBG1\\tok\\tself-test'"
       )
       machine.succeed(
+          "runuser -u ${testUser} -- python3 "
+          "${pluginRoot}/motionbgs-helper/wall-in-one-motionbgs self-test "
+          "| grep -Fx $'WIO-MBGS-SELFTEST1\\tok\\t1.0.0'"
+      )
+      machine.succeed(
+          "runuser -u ${testUser} -- ${lib.getExe fakeMotionBgsProgram} "
+          "probe --protocol 1 "
+          "| grep -Fx $'WIO-MBGS-PROBE1\\tok\\t1\\t1.0.0-fixture\\tsearch,details,download,clear'"
+      )
+      machine.succeed(
+          "runuser -u ${testUser} -- bash "
+          "${materializedRoot}/scripts/motionbgs-provider probe "
+          "${lib.getExe fakeMotionBgsProgram} "
+          "| grep -Fx $'WIO-MBGS-PROBE1\\tok\\t1\\t1.0.0-fixture\\tsearch,details,download,clear'"
+      )
+      machine.succeed(
           "runuser -u ${testUser} -- bash "
           "${materializedRoot}/scripts/provider-thumbnail self-test "
           "| grep -Fx $'WIO-THUMB1\\tok\\tself-test'"
       )
       machine.succeed(
-          "cp ${fakeMotionBgsHelper} ${materializedRoot}/scripts/motionbgs-provider; "
-          "chmod 0755 ${materializedRoot}/scripts/motionbgs-provider; "
           "cp ${fakeProviderThumbnailHelper} ${materializedRoot}/scripts/provider-thumbnail; "
           "chmod 0755 ${materializedRoot}/scripts/provider-thumbnail"
       )
@@ -2752,10 +3162,37 @@ pkgs.testers.runNixOSTest (
           "and .runs[\"HEADLESS-1\"][$p].current_entry == .runs[\"HEADLESS-1\"][$p].history[-1])' "
           "${pluginDataRoot}/runtime.json",
       )
-      machine.wait_until_succeeds(
-          "test -s /tmp/wall-in-one-vm-mpvpaper-current.pid; "
-          "test \"$(cat /tmp/wall-in-one-vm-mpvpaper-current.pid)\" != " + mpv_pid
-      )
+      try:
+          machine.wait_until_succeeds(
+              "test -s /tmp/wall-in-one-vm-mpvpaper-current.pid; "
+              "test \"$(cat /tmp/wall-in-one-vm-mpvpaper-current.pid)\" != " + mpv_pid,
+              timeout=30,
+          )
+      except Exception as renderer_advance_error:
+          # Capture the shared command slot and the renderer's independently
+          # published nonce/event snapshot before the VM is torn down. Without
+          # this, the outer 15-minute action timeout hides whether the command
+          # was absent, rejected, queued at the FIFO, or acknowledged without a
+          # replacement child.
+          token = "renderer-playlist-advance-timeout"
+          noctalia_msg(f"plugin ${serviceId} all vm-probe {token}")
+          machine.sleep(1)
+          renderer_diagnostic = machine.wait_until_succeeds(
+              journal
+              + " | grep -F -- "
+              + shlex.quote(f"WALL_IN_ONE_VM_PROBE {token}")
+              + " | tail -n 1",
+              timeout=10,
+          ).strip()
+          renderer_invocations = machine.succeed(
+              "cat /tmp/wall-in-one-vm-mpvpaper-invocations.log 2>/dev/null || true"
+          ).strip()
+          raise AssertionError(
+              "playlist advanced without replacing its mpvpaper child:\n"
+              + renderer_diagnostic
+              + "\nmpvpaper fixture invocations:\n"
+              + renderer_invocations
+          ) from renderer_advance_error
       cycle_mpv_pid = machine.succeed("cat /tmp/wall-in-one-vm-mpvpaper-current.pid").strip()
       machine.succeed(f"kill -0 {cycle_mpv_pid}")
       machine.wait_until_succeeds(
@@ -2983,33 +3420,59 @@ pkgs.testers.runNixOSTest (
           "systemctl show -p MainPID --value wall-in-one-renderer-sentinel.service"
       ).strip() == sentinel_pid
 
-      # MotionBGS runs entirely against pinned local HTML/MP4 fixtures. The
-      # shipped helper's self-test ran before replacement above.
-      wait_motion(available=True, busy=False)
+      # MotionBGS runs through the real bundled launcher and a separately
+      # configured external protocol fixture. The fixture emits pinned
+      # normalized listing/detail data and installs the pinned MP4, while the
+      # Luau service only performs bounded request/response validation.
+      motion_cache = "${pluginDataRoot}/motionbgs-bridge-v1/cache/cache-v1.json"
+      motion_rpc = "${pluginDataRoot}/motionbgs-bridge-v1/cache/rpc/"
+      wait_motion(
+          available=True,
+          busy=False,
+          binary_source="configured",
+          binary_version="1.0.0-fixture",
+      )
       set_motion_mode("good")
       noctalia_msg("plugin ${serviceId} all vm-motion-search 'night city'")
       wait_motion(
           action="search", cached=False, busy=False,
           items=1, first="night-city",
       )
-      motion_calls_after_search = len(
-          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      motion_calls_after_search = len(motion_calls())
+      motion_transports_after_search = len(motion_transports())
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          + shlex.quote('.schema == 1 and (.searches | length) == 1')
+          + " "
+          + shlex.quote(motion_cache)
       )
+      machine.fail("test -e ${pluginDataRoot}/motionbgs/cache-v2.json")
 
-      # A fresh cache hit must not invoke even a deliberately failing helper.
+      # Cache ownership moved across the process boundary. A hit still invokes
+      # one RPC process, but must not attempt the deliberately denied provider
+      # transport and must report the cached bit through the bridge.
       set_motion_mode("deny")
       noctalia_msg("plugin ${serviceId} all vm-motion-search 'night city'")
       wait_motion(
           action="search", cached=True, busy=False,
           items=1, first="night-city",
       )
-      assert len(
-          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
-      ) == motion_calls_after_search
+      assert len(motion_calls()) == motion_calls_after_search + 1
+      cache_hit_call = motion_calls()[-1].split("\t")
+      assert cache_hit_call[0:3:2] == ["rpc", "search"]
+      assert cache_hit_call[3].startswith(motion_rpc + "request-")
+      assert cache_hit_call[4].startswith(motion_rpc + "response-")
+      assert cache_hit_call[5].startswith(motion_rpc + ".wall-in-one-motionbgs-guard-")
+      machine.fail(
+          "find " + shlex.quote(motion_rpc) + " -maxdepth 1 -type f "
+          "-name '.wall-in-one-motionbgs-guard-*' | grep -q ."
+      )
+      assert len(motion_transports()) == motion_transports_after_search
 
-      # Genre browsing uses the site's real page family, retains every one of
-      # the 36 fixture cards, and caches each page independently. Search mode
-      # remains deliberately unpaged.
+      # The pinned normalized genre response retains all 36 cards from the
+      # former realistic provider-page fixture. This still exercises bounded
+      # service validation and large-list publication/rendering without doing
+      # HTML parsing on a Noctalia callback.
       set_motion_mode("good")
       noctalia_msg("plugin ${serviceId} all vm-motion-browse-genre 1")
       wait_motion(
@@ -3017,8 +3480,13 @@ pkgs.testers.runNixOSTest (
           previous=False, next=True, items=36, first="nature-1",
       )
       machine.fail(f"{journal} | grep -F -- 'exceeded its CPU budget'")
-      motion_calls_after_genre = len(
-          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      motion_calls_after_genre = len(motion_calls())
+      motion_transports_after_genre = len(motion_transports())
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          + shlex.quote('.schema == 1 and (.searches | length) == 2')
+          + " "
+          + shlex.quote(motion_cache)
       )
       set_motion_mode("deny")
       noctalia_msg("plugin ${serviceId} all vm-motion-browse-genre 1")
@@ -3026,9 +3494,9 @@ pkgs.testers.runNixOSTest (
           action="search", cached=True, busy=False, mode="genre", page=1,
           previous=False, next=True, items=36, first="nature-1",
       )
-      assert len(
-          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
-      ) == motion_calls_after_genre
+      assert len(motion_calls()) == motion_calls_after_genre + 1
+      assert motion_calls()[-1].split("\t")[0:3:2] == ["rpc", "search"]
+      assert len(motion_transports()) == motion_transports_after_genre
 
       set_motion_mode("good")
       noctalia_msg("plugin ${serviceId} all vm-motion-browse-genre 2")
@@ -3036,14 +3504,18 @@ pkgs.testers.runNixOSTest (
           action="search", cached=False, busy=False, mode="genre", page=2,
           previous=True, next=False, items=1, first="nature-page-two",
       )
-      motion_calls_after_page_two = len(
-          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
+      motion_calls_after_page_two = len(motion_calls())
+      motion_transports_after_page_two = len(motion_transports())
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          + shlex.quote('.schema == 1 and (.searches | length) == 3')
+          + " "
+          + shlex.quote(motion_cache)
       )
       noctalia_msg("plugin ${serviceId} all vm-motion-hd-page-two")
       wait_motion(action="search", error_kind="invalid-browse", busy=False)
-      assert len(
-          machine.succeed("cat /tmp/wall-in-one-vm-motion-calls.log").splitlines()
-      ) == motion_calls_after_page_two
+      assert len(motion_calls()) == motion_calls_after_page_two
+      assert len(motion_transports()) == motion_transports_after_page_two
 
       set_motion_mode("good")
       noctalia_msg("plugin ${serviceId} all vm-motion-details night-city")
@@ -3119,6 +3591,16 @@ pkgs.testers.runNixOSTest (
 
       noctalia_msg("plugin ${serviceId} all vm-motion-clear")
       wait_motion(action="clear", items=0, selected="")
+      machine.succeed(
+          "${lib.getExe pkgs.jq} -e "
+          + shlex.quote(
+              '.schema == 1 and (.searches | length) == 0 '
+              'and (.details | length) == 0 and (.search_order | length) == 0 '
+              'and (.detail_order | length) == 0'
+          )
+          + " "
+          + shlex.quote(motion_cache)
+      )
 
       # Native switching uses only Noctalia's fixed IPC verbs and an optional
       # validated output name.
@@ -3389,12 +3871,132 @@ pkgs.testers.runNixOSTest (
       machine.fail(f"{journal} | grep -F -- \"call to 'onOpen' failed\"")
       machine.copy_from_machine(screenshot)
 
+      # Invoke the production edit callback with a Workshop identity that has
+      # no saved pairing. This is the common synthesized-default path and must
+      # reach the editor without resolving panelUi as an undeclared global.
+      assert noctalia_msg(
+          "plugin ${pluginId}:hub all vm-library-default-edit fresh-workshop"
+      ).strip() == "ok: dispatched 1"
+      wait_log(
+          "WALL_IN_ONE_VM_LIBRARY_DEFAULT_EDIT fresh-workshop "
+          "existing=false open=true editor_kind=workshop media_kind=workshop "
+          "source=999999999 still=automatic id_empty=true"
+      )
+
+      # Reproduce the live Wallhaven navigation shape: a full 64-entry stale
+      # preview manifest and 12 visible cache hits. The production route
+      # callback must only schedule its render; cache validation, LRU touches,
+      # and the single manifest rewrite run on bounded update callbacks.
+      preview_cache = "${pluginDataRoot}/provider-previews/v1"
+      preview_manifest = preview_cache + "/manifest.json"
+      preview_bytes = int(machine.succeed(
+          "stat -c %s ${fixtureWallhavenThumbnail}"
+      ).strip())
+      route_entries = {}
+      route_keys = []
+      for index in range(64):
+          identifier = f"aa{index:04d}"
+          key = f"wallhaven:{identifier}"
+          filename = f"wallhaven-{identifier}-1-{index + 1}.png"
+          route_entries[key] = {
+              "provider": "wallhaven",
+              "id": identifier,
+              "url": f"https://th.wallhaven.cc/lg/aa/{identifier}.jpg",
+              "filename": filename,
+              "bytes": preview_bytes,
+              "last_used": 1,
+          }
+          if index < 12:
+              route_keys.append(key)
+      route_manifest = json.dumps({"schema": 1, "entries": route_entries})
+      machine.succeed(
+          "runuser -u ${testUser} -- install -d "
+          + shlex.quote(preview_cache)
+      )
+      seed_cache = (
+          "set -eu; i=0; while [ \"$i\" -lt 64 ]; do "
+          "identifier=$(printf 'aa%04d' \"$i\"); "
+          "sequence=$((i + 1)); "
+          "cp ${fixtureWallhavenThumbnail} "
+          + shlex.quote(preview_cache)
+          + "/wallhaven-$identifier-1-$sequence.png; "
+          "i=$((i + 1)); done"
+      )
+      machine.succeed(
+          "runuser -u ${testUser} -- bash -c " + shlex.quote(seed_cache)
+      )
+      machine.succeed(
+          "runuser -u ${testUser} -- bash -c "
+          + shlex.quote(
+              "printf '%s\\n' "
+              + shlex.quote(route_manifest)
+              + " > "
+              + shlex.quote(preview_manifest)
+          )
+      )
+      assert noctalia_msg(
+          "plugin ${pluginId}:hub all vm-wallhaven-route-cache stale-64"
+      ).strip() == "ok: dispatched 1"
+      wait_log(
+          "WALL_IN_ONE_VM_WALLHAVEN_ROUTE_CACHE stale-64 "
+          "items=12 page=shops subpage=wallhaven"
+      )
+      route_touch_predicate = (
+          ".schema == 1 and (.entries | length) == 64 and (["
+          + ",".join(
+              f'.entries[{json.dumps(key)}].last_used > 1'
+              for key in route_keys
+          )
+          + "] | all)"
+      )
+      try:
+          machine.wait_until_succeeds(
+              "${lib.getExe pkgs.jq} -e "
+              + shlex.quote(route_touch_predicate)
+              + " "
+              + shlex.quote(preview_manifest),
+              timeout=30,
+          )
+      except Exception as preview_cache_error:
+          token = "stale-64-timeout"
+          assert noctalia_msg(
+              f"plugin ${pluginId}:hub all vm-preview-cache-diagnostic {token}"
+          ).strip() == "ok: dispatched 1"
+          preview_diagnostic = machine.wait_until_succeeds(
+              journal
+              + " | grep -F -- "
+              + shlex.quote(f"WALL_IN_ONE_VM_PREVIEW_CACHE {token}")
+              + " | tail -n 1",
+              timeout=10,
+          ).strip()
+          manifest_diagnostic = machine.succeed(
+              "${lib.getExe pkgs.jq} -c "
+              + shlex.quote(
+                  '{schema, entries: (.entries | length), '
+                  'target: .entries["wallhaven:aa0000"]}'
+              )
+              + " "
+              + shlex.quote(preview_manifest)
+              + " 2>/dev/null || { cat "
+              + shlex.quote(preview_manifest)
+              + " 2>/dev/null || true; }"
+          ).strip()
+          thumbnail_invocations = machine.succeed(
+              "cat /tmp/wall-in-one-vm-thumbnail-calls.log 2>/dev/null || true"
+          ).strip()
+          raise AssertionError(
+              "Wallhaven stale-cache entries were not touched within 30 seconds:\n"
+              + preview_diagnostic
+              + "\npreview manifest:\n"
+              + manifest_diagnostic
+              + "\nthumbnail helper invocations:\n"
+              + thumbnail_invocations
+          ) from preview_cache_error
+
       # Exercise both real provider panes against a deterministic offline
       # thumbnail transport. A cache entry alone is insufficient: the captured
       # pane must contain the fixture's unique color, proving that ui.image
       # replaced the glyph fallback after async completion.
-      preview_cache = "${pluginDataRoot}/provider-previews/v1"
-      preview_manifest = preview_cache + "/manifest.json"
       thumbnail_log = "/tmp/wall-in-one-vm-thumbnail-calls.log"
       thumbnail_mode = "/tmp/wall-in-one-vm-thumbnail-mode"
       preview_probe_number = [0]
@@ -3494,7 +4096,7 @@ pkgs.testers.runNixOSTest (
       )
       machine.succeed(
           "${lib.getExe pkgs.jq} -e "
-          + shlex.quote('.schema == 1 and (.entries | length) == 2')
+          + shlex.quote('.schema == 1 and (.entries | length) == 64')
           + " "
           + shlex.quote(preview_manifest)
       )
@@ -3661,6 +4263,7 @@ pkgs.testers.runNixOSTest (
           "undeclared setting",
           "hot reload: failed",
           "call to 'async command callback' failed",
+          "script callback 'update' exceeded its CPU budget",
           "exceeded its CPU budget",
       ):
           assert forbidden not in logs, f"unexpected log marker: {forbidden}"

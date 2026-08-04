@@ -1,43 +1,41 @@
 --!nonstrict
--- Wall-in-One MotionBGS public-page provider.
+-- Wall-in-One bridge for the separately installed MotionBGS helper.
 --
--- MotionBGS does not publish a stable API. This service therefore treats its
--- public HTML as a best-effort data source. It does not execute page markup,
--- bypass Cloudflare, crawl in bulk, or follow cross-origin links. All network
--- work is serialized through scripts/motionbgs-provider, which adds hard
--- response size/time limits and atomic downloads.
+-- Noctalia loads this entry in an isolated ScriptRuntime. Network access,
+-- HTML parsing, provider caching, and media installation therefore live in
+-- the one-shot wall-in-one-motionbgs program. This bridge only validates
+-- settings, serializes bounded requests, validates bounded normalized results,
+-- and preserves the plugin's versioned state protocol.
 
 local SCHEMA = 1
-local CACHE_SCHEMA = 2
+local RPC_SCHEMA = 1
 local COMMAND_KEY = "wall_in_one_motionbgs_command_v1"
 local COMMAND_ACK_KEY = "wall_in_one_motionbgs_command_ack_v1"
 local STATUS_KEY = "wall_in_one_motionbgs_status_v1"
 local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"
 local BASE_URL = "https://motionbgs.com"
+local INSTALL_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/motionbgs-helper"
+local BINARY_NAME = "wall-in-one-motionbgs"
+local PROBE_PROTOCOL = "WIO-MBGS-PROBE1"
+local RPC_PROTOCOL = "WIO-MBGS-RPC1"
 local MAX_NONCE = 9007199254740991
 local MAX_RESULTS = 48
 local MAX_QUERY_BYTES = 80
-local MAX_CACHE_KEY_BYTES = 240
 local MAX_PAGE = 10000
--- Noctalia gives every update callback a deliberately small CPU budget.  A
--- listing card involves several bounded markup scans, so advance one anchor at
--- a time and let the regular update cadence amortize a full provider page.
-local SEARCH_ANCHORS_PER_TICK = 1
--- Pagination metadata lives in the document head.  Keep this scan bounded so
--- a large listing cannot spend the ScriptRuntime's whole callback budget on
--- two full-document link passes after the card parser has already run.
-local LISTING_META_PREFIX_BYTES = 16384
-local LISTING_META_LINK_LIMIT = 32
-local SEARCH_PARSE_INTERVAL_MS = 16
-local IDLE_UPDATE_INTERVAL_MS = 250
 local MAX_QUEUE = 8
-local MAX_CACHE_SEARCHES = 8
-local MAX_CACHE_DETAILS = 48
-local MAX_CACHE_BYTES = 2 * 1024 * 1024
-local MAX_HTML_RESPONSE_BYTES = 1024 * 1024
+local MAX_REQUEST_BYTES = 8 * 1024
+local MAX_RESPONSE_BYTES = 128 * 1024
 local MAX_PROVIDER_SIDECAR_BYTES = 64 * 1024
-local REQUEST_DELAY_MS = 1000
-local DOWNLOAD_TIMEOUT_SECONDS = 45
+-- The helper gets a slightly shorter end-to-end budget than the host process.
+-- That leaves the launcher/callback five seconds to report and clean up after
+-- a bounded 20-second detail request plus request spacing and a 50-second
+-- media transfer.
+local DOWNLOAD_OPERATION_BUDGET_MS = 75000
+local DOWNLOAD_TIMEOUT_MS = 80000
+local RPC_OPERATION_BUDGET_MS = 30000
+local RPC_TIMEOUT_MS = 40000
+local PROBE_TIMEOUT_MS = 5000
+local OPERATION_GUARD_CONTENT = "WIO-MBGS-GUARD1\n"
 local MANAGED_DOWNLOAD_SUFFIX = "/Wall-in-One/MotionBGS"
 local MANAGED_DIRECTORY_MARKER = ".wall-in-one-motionbgs-managed.json"
 local MANAGED_DIRECTORY_MARKER_CONTENT =
@@ -47,30 +45,22 @@ local MAX_MANAGED_MARKER_BYTES = #MANAGED_DIRECTORY_MARKER_CONTENT
 local sequence = 0
 local operationSequence = 0
 local operationGeneration = 0
-local networkBusy = false
+local probeGeneration = 0
+local probeBusy = false
+local probeNonce = 0
+local runtimeToken = tostring(math.floor(noctalia.nowMs()))
 local activeOperation = nil
 local pendingOperations = {}
-local lastNetworkStartMs = 0
 local dataDirectory = ""
+local rpcDirectory = ""
 local cacheDirectory = ""
-local cachePath = ""
-local helperPath = ""
-local currentUpdateIntervalMs = 0
-
-local cache = {
-    schema = CACHE_SCHEMA,
-    searches = {},
-    search_order = {},
-    details = {},
-    detail_order = {},
-}
+local launcherPath = ""
+local binaryCommand = ""
 
 local status = {
     schema = SCHEMA,
     sequence = 0,
     available = false,
-    curl_available = noctalia.commandExists("curl"),
-    helper_available = false,
     busy = false,
     active_action = "",
     queue_depth = 0,
@@ -85,6 +75,16 @@ local status = {
     last_download = {},
     download_directory = "",
     updated_at = "",
+    launcher_available = false,
+    binary_available = false,
+    binary_compatible = false,
+    binary_path = "",
+    binary_source = "",
+    binary_version = "",
+    binary_protocol = 0,
+    probe_state = "idle",
+    availability_reason = "initializing",
+    install_url = INSTALL_URL,
 }
 
 local results = {
@@ -109,14 +109,6 @@ local results = {
     selected = {},
 }
 
-local function setUpdateCadence(intervalMs)
-    if currentUpdateIntervalMs == intervalMs then
-        return
-    end
-    noctalia.setUpdateInterval(intervalMs)
-    currentUpdateIntervalMs = intervalMs
-end
-
 local previousStatus = noctalia.state.get(STATUS_KEY)
 if type(previousStatus) == "table" then
     local previousNonce = tonumber(previousStatus.last_nonce)
@@ -138,16 +130,9 @@ local function shellQuote(value)
     return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
 end
 
-local function nowSeconds()
-    return tonumber(noctalia.formatTime("%s")) or 0
-end
-
 local function settingString(key, fallback)
     local value = noctalia.getConfig(key)
-    if type(value) ~= "string" then
-        return fallback
-    end
-    return noctalia.string.trim(value)
+    return if type(value) == "string" then noctalia.string.trim(value) else fallback
 end
 
 local function settingInt(key, fallback, minimum, maximum)
@@ -162,12 +147,14 @@ end
 
 local function validAbsolutePath(value)
     return type(value) == "string"
+        and #value > 1
+        and #value <= 4096
         and value:sub(1, 1) == "/"
-        and value ~= "/"
-        and value:find("[%c]") == nil
-        and not value:find("/%./")
+        and value:find("[%c\\]") == nil
+        and not value:find("//", 1, true)
+        and not value:find("/./", 1, true)
         and not value:match("/%.$")
-        and not value:find("/%.%./")
+        and not value:find("/../", 1, true)
         and not value:match("/%.%.$")
 end
 
@@ -194,29 +181,29 @@ local function configuredDirectory(key)
         return ""
     end
     local directory = noctalia.expandPath(configured)
-    if not validAbsolutePath(directory) or directory == "/" then
+    if not validAbsolutePath(directory) then
         return ""
     end
     return directory:gsub("/+$", "")
 end
 
-local function configuredDownloadDirectory()
-    local videoRoot = configuredDirectory("video_directory")
-    return if videoRoot == "" then "" else videoRoot .. MANAGED_DOWNLOAD_SUFFIX
-end
-
 local function configuredVideoRootExists()
-    local videoRoot = configuredDirectory("video_directory")
-    local rootInfo = videoRoot ~= "" and noctalia.fileInfo(videoRoot) or nil
-    return type(rootInfo) == "table" and rootInfo.isDir == true
+    local root = configuredDirectory("video_directory")
+    local info = root ~= "" and noctalia.fileInfo(root) or nil
+    return type(info) == "table" and info.isDir == true
 end
 
-local function cacheTtlSeconds()
-    return settingInt("motionbgs_cache_minutes", 30, 5, 1440) * 60
+local function configuredDownloadDirectory()
+    local root = configuredDirectory("video_directory")
+    return if root == "" then "" else root .. MANAGED_DOWNLOAD_SUFFIX
 end
 
 local function configuredResultLimit()
     return settingInt("motionbgs_result_limit", MAX_RESULTS, 1, MAX_RESULTS)
+end
+
+local function configuredCacheSeconds()
+    return settingInt("motionbgs_cache_minutes", 30, 5, 1440) * 60
 end
 
 local function configuredDownloadLimit()
@@ -224,72 +211,180 @@ local function configuredDownloadLimit()
 end
 
 local function configuredQuality()
-    local quality = settingString("motionbgs_quality", "hd"):lower()
-    return if quality == "4k" then "4k" else "hd"
+    return if settingString("motionbgs_quality", "hd"):lower() == "4k" then "4k" else "hd"
+end
+
+local function nonceValue(value)
+    local nonce = tonumber(value)
+    if nonce == nil or nonce ~= math.floor(nonce) or nonce <= 0 or nonce > MAX_NONCE then
+        return nil
+    end
+    return nonce
+end
+
+local function validSlug(value)
+    if type(value) ~= "string" or #value < 1 or #value > 120 then
+        return nil
+    end
+    local slug = value:lower()
+    return if slug:match("^[a-z0-9][a-z0-9-]*$") ~= nil then slug else nil
+end
+
+local function normalizedQuery(value)
+    if type(value) ~= "string" or value:find("[%c]") ~= nil then
+        return nil
+    end
+    local query = noctalia.string.trim(value):gsub("%s+", " ")
+    return if query ~= "" and #query <= MAX_QUERY_BYTES then query else nil
+end
+
+local function normalizedBrowseRequest(candidate)
+    local mode = tostring(type(candidate) == "table" and candidate.mode or "search"):lower()
+    if mode ~= "search" and mode ~= "latest" and mode ~= "genre" and mode ~= "4k" and mode ~= "hd" then
+        return nil, "Browse mode must be search, latest, genre, 4k, or hd"
+    end
+    local page = tonumber(type(candidate) == "table" and candidate.page or 1)
+    if page == nil or page ~= math.floor(page) or page < 1 or page > MAX_PAGE then
+        return nil, "Page must be an integer from 1 through " .. tostring(MAX_PAGE)
+    end
+    local query = ""
+    local genre = ""
+    if mode == "search" then
+        query = normalizedQuery(candidate.query)
+        if query == nil then
+            return nil, "Search query must be 1-80 bytes and contain no controls"
+        elseif page ~= 1 then
+            return nil, "MotionBGS text search does not expose pagination"
+        end
+    elseif mode == "genre" then
+        genre = validSlug(candidate.genre)
+        if genre == nil then
+            return nil, "Genre/tag must be a lowercase MotionBGS slug such as nature or anime"
+        end
+    elseif mode == "hd" and page ~= 1 then
+        return nil, "MotionBGS HD browsing is limited to the first page"
+    end
+    return { mode = mode, query = query, genre = genre, page = page }, nil
+end
+
+local function normalizeSiteUrl(value)
+    if type(value) ~= "string" or #value < #BASE_URL or #value > 2048 or value:find("[%c\\#]") ~= nil then
+        return nil
+    end
+    if value ~= BASE_URL and value:sub(1, #BASE_URL + 1) ~= BASE_URL .. "/" then
+        return nil
+    end
+    local path = value:sub(#BASE_URL + 1)
+    if path:find("/../", 1, true) or path:match("/%.%.$") then
+        return nil
+    end
+    return value
+end
+
+local function sitePath(value)
+    local normalized = normalizeSiteUrl(value)
+    if normalized == nil then
+        return nil
+    end
+    local suffix = normalized:sub(#BASE_URL + 1)
+    local path = suffix:match("^([^?]*)") or ""
+    path = path:gsub("/+$", "")
+    return if path == "" then "/" else path
+end
+
+local function canonicalSearchSlug(value)
+    local query = normalizedQuery(value)
+    return if query ~= nil then validSlug(query:lower():gsub("%s+", "-")) else nil
+end
+
+local function queryEncode(value)
+    local encoded = {}
+    local hex = "0123456789ABCDEF"
+    local text = tostring(value or "")
+    for index = 1, #text do
+        local byte = string.byte(text, index)
+        local unreserved = (byte >= 65 and byte <= 90)
+            or (byte >= 97 and byte <= 122)
+            or (byte >= 48 and byte <= 57)
+            or byte == 45
+            or byte == 46
+            or byte == 95
+            or byte == 126
+        if byte == 32 then
+            table.insert(encoded, "+")
+        elseif unreserved then
+            table.insert(encoded, string.char(byte))
+        else
+            local high = math.floor(byte / 16) + 1
+            local low = (byte % 16) + 1
+            table.insert(encoded, "%" .. hex:sub(high, high) .. hex:sub(low, low))
+        end
+    end
+    return table.concat(encoded)
+end
+
+local function listingRouteMatches(request, value)
+    local actual = sitePath(value)
+    if actual == nil then
+        return false
+    end
+    if request.mode == "search" then
+        local canonical = canonicalSearchSlug(request.query)
+        local expected = BASE_URL .. "/search?q=" .. queryEncode(request.query)
+        return value == expected
+            or (value:find("?", 1, true) == nil and canonical ~= nil and actual == "/tag:" .. canonical)
+    elseif request.mode == "latest" then
+        return value:find("?", 1, true) == nil
+            and actual == (if request.page == 1 then "/" else "/" .. tostring(request.page))
+    elseif request.mode == "genre" then
+        return value:find("?", 1, true) == nil
+            and actual == "/tag:" .. request.genre .. (if request.page == 1 then "" else "/" .. tostring(request.page))
+    elseif request.mode == "4k" then
+        return value:find("?", 1, true) == nil
+            and actual == "/4k" .. (if request.page == 1 then "" else "/" .. tostring(request.page))
+    end
+    return value:find("?", 1, true) == nil and actual == "/hd"
+end
+
+local function normalizeStillImageUrl(value)
+    local normalized = normalizeSiteUrl(value)
+    if normalized == nil then
+        return nil
+    end
+    local mediaId, filename = normalized:match(
+        "^https://motionbgs%.com/media/([0-9]+)/([A-Za-z0-9][A-Za-z0-9._-]*)$"
+    )
+    if mediaId == nil then
+        local width, height
+        width, height, mediaId, filename = normalized:match(
+            "^https://motionbgs%.com/i/c/([1-9][0-9]*)x([1-9][0-9]*)/media/([0-9]+)/([A-Za-z0-9][A-Za-z0-9._-]*)$"
+        )
+        if width == nil or tonumber(width) > 4096 or height == nil or tonumber(height) > 4096 then
+            return nil
+        end
+    end
+    if mediaId == nil or #mediaId > 12 or filename == nil or #filename > 240 then
+        return nil
+    end
+    local lower = filename:lower()
+    return if lower:match("%.jpe?g$") or lower:match("%.png$") or lower:match("%.webp$") then normalized else nil
 end
 
 local function providerAvailable()
     return settingBool("use_motionbgs", true)
-        and status.curl_available
-        and status.helper_available
         and configuredVideoRootExists()
+        and dataDirectory ~= ""
         and cacheDirectory ~= ""
-end
-
-local function writeManagedDirectoryMarker(directory)
-    local marker = directory .. "/" .. MANAGED_DIRECTORY_MARKER
-    if noctalia.fileExists(marker) then
-        local current = readBoundedRegularFile(marker, MAX_MANAGED_MARKER_BYTES)
-        if current ~= MANAGED_DIRECTORY_MARKER_CONTENT then
-            return false, "the managed MotionBGS directory marker is invalid"
-        end
-        return true, nil
-    end
-
-    local temporary = marker .. ".tmp"
-    local wrote, writeError = noctalia.writeFile(temporary, MANAGED_DIRECTORY_MARKER_CONTENT)
-    if wrote ~= true then
-        noctalia.removeFile(temporary)
-        return false, tostring(writeError or "could not write the managed MotionBGS directory marker")
-    end
-    local installed, installError = noctalia.renameFile(temporary, marker)
-    if installed ~= true then
-        noctalia.removeFile(temporary)
-        return false, tostring(installError or "could not install the managed MotionBGS directory marker")
-    end
-    return true, nil
-end
-
-local function prepareDownloadDirectory()
-    local directory = configuredDownloadDirectory()
-    if directory == "" then
-        return "", "Select an existing Wall-in-One video directory first"
-    end
-
-    local videoRoot = configuredDirectory("video_directory")
-    local rootInfo = videoRoot ~= "" and noctalia.fileInfo(videoRoot) or nil
-    if type(rootInfo) ~= "table" or rootInfo.isDir ~= true then
-        return "", "The selected Wall-in-One video directory does not exist"
-    end
-    if not providerAvailable() then
-        return "", "MotionBGS integration is disabled or its local scraper requirements are unavailable"
-    end
-    local made, makeError = noctalia.mkdirAll(directory)
-    if made ~= true then
-        return "", tostring(makeError or "could not create the managed MotionBGS download directory")
-    end
-    local marked, markerError = writeManagedDirectoryMarker(directory)
-    if marked ~= true then
-        return "", markerError
-    end
-    return directory, nil
+        and status.launcher_available == true
+        and status.binary_compatible == true
+        and probeBusy ~= true
 end
 
 local function publishStatus()
     sequence += 1
     status.sequence = sequence
-    status.busy = networkBusy
-    status.active_action = if type(activeOperation) == "table" then tostring(activeOperation.kind or "") else ""
+    status.busy = probeBusy or type(activeOperation) == "table"
+    status.active_action = if probeBusy then "probe" elseif type(activeOperation) == "table" then tostring(activeOperation.kind or "") else ""
     status.queue_depth = #pendingOperations
     status.download_directory = configuredDownloadDirectory()
     status.available = providerAvailable()
@@ -330,849 +425,456 @@ local function failNonce(nonce, action, kind, message)
     status.last_error = bounded(message, 400)
     status.site_changed = kind == "site-markup" or kind == "challenge"
     publishAck(nonce, "error", status.last_error)
-    noctalia.log("wall-in-one MotionBGS: " .. status.last_error_kind .. ": " .. status.last_error)
+    noctalia.log("wall-in-one MotionBGS bridge: " .. status.last_error_kind .. ": " .. status.last_error)
     publishStatus()
 end
 
-local function cleanupOperationResponse(operation)
+local function writeManagedDirectoryMarker(directory)
+    local marker = directory .. "/" .. MANAGED_DIRECTORY_MARKER
+    if noctalia.fileExists(marker) then
+        local current = readBoundedRegularFile(marker, MAX_MANAGED_MARKER_BYTES)
+        if current ~= MANAGED_DIRECTORY_MARKER_CONTENT then
+            return false, "the managed MotionBGS directory marker is invalid"
+        end
+        return true, nil
+    end
+    local temporary = marker .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, MANAGED_DIRECTORY_MARKER_CONTENT)
+    if wrote ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(writeError or "could not write the managed MotionBGS directory marker")
+    end
+    local installed, installError = noctalia.renameFile(temporary, marker)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or "could not install the managed MotionBGS directory marker")
+    end
+    return true, nil
+end
+
+local function prepareDownloadDirectory()
+    local directory = configuredDownloadDirectory()
+    if directory == "" or not configuredVideoRootExists() then
+        return "", "Select an existing Wall-in-One video directory first"
+    end
+    local made, makeError = noctalia.mkdirAll(directory)
+    if made ~= true then
+        return "", tostring(makeError or "could not create the managed MotionBGS directory")
+    end
+    local marked, markerError = writeManagedDirectoryMarker(directory)
+    if marked ~= true then
+        return "", markerError
+    end
+    return directory, nil
+end
+
+local function initializeStorage()
+    dataDirectory = ""
+    rpcDirectory = ""
+    cacheDirectory = ""
+    launcherPath = ""
+    status.launcher_available = false
+    local pluginDirectory = noctalia.pluginDir()
+    local pluginDataDirectory = noctalia.pluginDataDir()
+    if validAbsolutePath(pluginDirectory) then
+        launcherPath = pluginDirectory:gsub("/+$", "") .. "/scripts/motionbgs-provider"
+    end
+    status.launcher_available = validAbsolutePath(launcherPath) and noctalia.fileExists(launcherPath)
+    if not validAbsolutePath(pluginDataDirectory) then
+        status.availability_reason = "storage-unavailable"
+        return false
+    end
+    if not settingBool("use_motionbgs", true) or not configuredVideoRootExists() then
+        status.availability_reason = if settingBool("use_motionbgs", true) then "video-root-missing" else "disabled"
+        return true
+    end
+    dataDirectory = pluginDataDirectory:gsub("/+$", "") .. "/motionbgs-bridge-v1"
+    cacheDirectory = dataDirectory .. "/cache"
+    rpcDirectory = cacheDirectory .. "/rpc"
+    if noctalia.mkdirAll(cacheDirectory) ~= true or noctalia.mkdirAll(rpcDirectory) ~= true then
+        dataDirectory = ""
+        rpcDirectory = ""
+        cacheDirectory = ""
+        status.availability_reason = "storage-unavailable"
+        return false
+    end
+    -- Successful calls remove both files. A killed shell can strand a tiny
+    -- request/response pair, so clear only our strictly named transient files
+    -- when this service runtime starts; the helper cache is separate.
+    local rpcNames = noctalia.listDir(rpcDirectory)
+    if type(rpcNames) == "table" then
+        for _, name in ipairs(rpcNames) do
+            if type(name) == "string"
+                and #name <= 160
+                and (name:match("^request%-%d+%-%d+%-%d+%.json%.tmp$")
+                    or name:match("^request%-%d+%-%d+%-%d+%.json$")
+                    or name:match("^response%-%d+%-%d+%-%d+%.json%.tmp$")
+                    or name:match("^response%-%d+%-%d+%-%d+%.json$")
+                    or name:match("^%.wall%-in%-one%-motionbgs%-guard%-%d+%-%d+%-%d+%.tmp$")
+                    or name:match("^%.wall%-in%-one%-motionbgs%-guard%-%d+%-%d+%-%d+$"))
+            then
+                noctalia.removeFile(rpcDirectory .. "/" .. name)
+            end
+        end
+    end
+    -- cache-v2 held HTML-era plugin cache. The external helper owns its new
+    -- schema and never reads the retired file.
+    local legacy = pluginDataDirectory:gsub("/+$", "") .. "/motionbgs/cache-v2.json"
+    if noctalia.fileExists(legacy) then
+        noctalia.removeFile(legacy)
+    end
+    return true
+end
+
+local function configuredBinary()
+    local configured = settingString("motionbgs_binary_path", "")
+    if configured ~= "" then
+        local expanded = noctalia.expandPath(configured)
+        local info = validAbsolutePath(expanded) and noctalia.fileInfo(expanded) or nil
+        if type(info) == "table" and info.isDir ~= true and (tonumber(info.size) or 0) > 0 then
+            return expanded, "configured", ""
+        end
+        return "", "configured", "Configured MotionBGS helper path is not a readable regular file"
+    end
+    if noctalia.commandExists(BINARY_NAME) then
+        return BINARY_NAME, "path", ""
+    end
+    return "", "path", "Install wall-in-one-motionbgs or select its absolute path"
+end
+
+local function cleanupOperationFiles(operation)
     if type(operation) ~= "table" then
         return
     end
-    local path = operation.response_path
-    if validAbsolutePath(path) and noctalia.fileExists(path) then
-        noctalia.removeFile(path)
+    -- Removing the guard first is the process-boundary cancellation signal.
+    -- The request and response are transport artifacts and can follow it.
+    for _, path in ipairs({ operation.guard_path, operation.request_path, operation.response_path }) do
+        if validAbsolutePath(path) and noctalia.fileExists(path) then
+            noctalia.removeFile(path)
+        end
     end
 end
 
-local function acknowledgeCancellation(operation, message)
-    if type(operation) ~= "table" or operation.cancelled == true then
-        return
-    end
-    operation.cancelled = true
-    local nonce = tonumber(operation.nonce)
-    if nonce ~= nil and nonce == math.floor(nonce) and nonce > 0 and nonce <= MAX_NONCE then
-        status.last_completed_nonce = math.max(status.last_completed_nonce, nonce)
-        publishAck(nonce, "error", message)
-    end
-end
-
-local function invalidateOperations(message, forceBarrier)
-    local active = type(activeOperation) == "table" and activeOperation or nil
-    local hasCurrent = #pendingOperations > 0 or (active ~= nil and active.cancelled ~= true)
-    if not hasCurrent and forceBarrier ~= true then
-        return false
-    end
-
+local function invalidateOperations(message)
     operationGeneration += 1
-    setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
     local detail = bounded(message, 400)
     for _, operation in ipairs(pendingOperations) do
-        cleanupOperationResponse(operation)
-        acknowledgeCancellation(operation, detail)
+        cleanupOperationFiles(operation)
+        if nonceValue(operation.nonce) ~= nil then
+            publishAck(operation.nonce, "error", detail)
+        end
     end
     pendingOperations = {}
-    if active ~= nil then
-        cleanupOperationResponse(active)
-        acknowledgeCancellation(active, detail)
+    if type(activeOperation) == "table" then
+        cleanupOperationFiles(activeOperation)
+        if nonceValue(activeOperation.nonce) ~= nil then
+            publishAck(activeOperation.nonce, "error", detail)
+        end
+        activeOperation.cancelled = true
     end
-
-    if hasCurrent then
-        status.last_action = "cancel"
-        status.last_error_kind = "cancelled"
-        status.last_error = detail
-        status.site_changed = false
-    end
+    activeOperation = nil
     publishStatus()
-    return hasCurrent
 end
 
-local function nonceValue(value)
-    local nonce = tonumber(value)
-    if nonce == nil or nonce ~= math.floor(nonce) or nonce <= 0 or nonce > MAX_NONCE then
-        return nil
+local function processFailureDetail(result, fallback)
+    if type(result) ~= "table" then
+        return fallback
     end
-    return nonce
+    local detail = bounded(result.stderr, 400)
+    if detail == "" then
+        detail = bounded(result.stdout, 400)
+    end
+    return if detail ~= "" then detail else fallback
 end
 
-local function validSlug(value)
-    if type(value) ~= "string" or #value == 0 or #value > 120 then
-        return nil
+local function probeResult(result)
+    if type(result) ~= "table" then
+        return nil, "probe-failed", "MotionBGS helper returned no probe result"
     end
-    local slug = value:lower()
-    return if slug:match("^[a-z0-9][a-z0-9-]*$") ~= nil then slug else nil
-end
-
-local function normalizeSiteUrl(value)
-    if type(value) ~= "string" or value == "" or value:find("[%c]") or value:find("\\", 1, true) then
-        return nil
+    if result.timedOut == true then
+        return nil, "probe-failed", "MotionBGS helper probe timed out"
     end
-    if value:sub(1, 1) == "/" and value:sub(1, 2) ~= "//" then
-        value = BASE_URL .. value
+    local line = tostring(result.stdout or ""):match("([^\r\n]+)%s*$") or ""
+    local errorProtocol, errorOutcome, errorKind, errorDetail = line:match("^([^\t]+)\t([^\t]+)\t([^\t]*)\t(.*)$")
+    if errorProtocol == PROBE_PROTOCOL and errorOutcome == "error" then
+        return nil, bounded(errorKind, 80), bounded(errorDetail, 400)
     end
-    if value ~= BASE_URL and value:sub(1, #BASE_URL + 1) ~= BASE_URL .. "/" then
-        return nil
+    if tonumber(result.exitCode) ~= 0 then
+        return nil, "probe-failed", processFailureDetail(result, "MotionBGS helper probe failed")
     end
-    if value:find("#", 1, true) then
-        return nil
-    end
-    local path = value:sub(#BASE_URL + 1)
-    if path:find("/%.%./") or path:match("/%.%.$") then
-        return nil
-    end
-    return value
-end
-
-local function normalizedQuery(value)
-    if type(value) ~= "string" or value:find("[%c]") then
-        return nil
-    end
-    local query = noctalia.string.trim(value):gsub("%s+", " ")
-    if query == "" or #query > MAX_QUERY_BYTES then
-        return nil
-    end
-    return query
-end
-
-local function canonicalSearchSlug(value)
-    local query = normalizedQuery(value)
-    if query == nil then
-        return nil
-    end
-    -- MotionBGS canonicalizes an exact tag search by lowercasing its query and
-    -- replacing normalized spaces with hyphens. Keep this deliberately narrow:
-    -- punctuation and other non-slug queries must remain on /search.
-    return validSlug(query:lower():gsub("%s+", "-"))
-end
-
-local function normalizedBrowseRequest(candidate)
-    local mode = tostring(candidate.mode or "search"):lower()
-    if mode ~= "search" and mode ~= "latest" and mode ~= "genre" and mode ~= "4k" and mode ~= "hd" then
-        return nil, "Browse mode must be search, latest, genre, 4k, or hd"
-    end
-
-    local page = tonumber(candidate.page or 1)
-    if page == nil or page ~= math.floor(page) or page < 1 or page > MAX_PAGE then
-        return nil, "Page must be an integer from 1 through " .. tostring(MAX_PAGE)
-    end
-
-    local query = ""
-    local genre = ""
-    if mode == "search" then
-        query = normalizedQuery(candidate.query)
-        if query == nil then
-            return nil, "Search query must be 1-80 bytes and contain no controls"
-        end
-        if page ~= 1 then
-            return nil, "MotionBGS text search does not expose pagination"
-        end
-    elseif mode == "genre" then
-        genre = validSlug(candidate.genre)
-        if genre == nil then
-            return nil, "Genre/tag must be a lowercase MotionBGS slug such as nature or anime"
-        end
-    elseif mode == "hd" and page ~= 1 then
-        return nil, "MotionBGS currently redirects HD pages after page 1 into the unfiltered catalog"
-    end
-
-    return {
-        mode = mode,
-        query = query,
-        genre = genre,
-        page = page,
-    },
-        nil
-end
-
-local function browseUrl(request)
-    if request.mode == "search" then
-        return BASE_URL .. "/search?q=" .. noctalia.string.urlEncode(request.query)
-    elseif request.mode == "latest" then
-        return BASE_URL .. "/" .. (if request.page == 1 then "" else tostring(request.page) .. "/")
-    elseif request.mode == "genre" then
-        local suffix = if request.page == 1 then "/" else "/" .. tostring(request.page) .. "/"
-        return BASE_URL .. "/tag:" .. request.genre .. suffix
-    elseif request.mode == "4k" then
-        return BASE_URL .. "/4k/" .. (if request.page == 1 then "" else tostring(request.page) .. "/")
-    end
-    return BASE_URL .. "/hd/"
-end
-
-local function sitePath(value)
-    local normalized = normalizeSiteUrl(value)
-    if normalized == nil then
-        return nil
-    end
-    local suffix = normalized:sub(#BASE_URL + 1)
-    local path = suffix:match("^([^?]*)") or ""
-    path = path:gsub("/+$", "")
-    return if path == "" then "/" else path
-end
-
-local function listingRouteMatches(request, value)
-    local actual = sitePath(value)
-    if actual == nil then
-        return false
-    end
-    if request.mode == "search" then
-        if actual == "/search" then
-            return true
-        end
-        local canonicalSlug = canonicalSearchSlug(request.query)
-        return canonicalSlug ~= nil and actual == "/tag:" .. canonicalSlug
-    end
-    return actual == sitePath(browseUrl(request))
-end
-
-local function normalizeStillImageUrl(value)
-    local normalized = normalizeSiteUrl(value)
-    if normalized == nil then
-        return nil
-    end
-    local mediaId, filename = normalized:match(
-        "^https://motionbgs%.com/media/([0-9]+)/([A-Za-z0-9][A-Za-z0-9._-]*)$"
+    local protocol, outcome, versionProtocol, version, capabilities = line:match(
+        "^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$"
     )
-    if mediaId == nil then
-        local width, height
-        width, height, mediaId, filename = normalized:match(
-            "^https://motionbgs%.com/i/c/([1-9][0-9]*)x([1-9][0-9]*)/media/([0-9]+)/([A-Za-z0-9][A-Za-z0-9._-]*)$"
-        )
-        if
-            width == nil
-            or tonumber(width) > 4096
-            or height == nil
-            or tonumber(height) > 4096
-        then
+    if protocol ~= PROBE_PROTOCOL or outcome ~= "ok" or tonumber(versionProtocol) ~= RPC_SCHEMA then
+        return nil, "binary-incompatible", "MotionBGS helper uses an incompatible protocol"
+    end
+    if #version > 80 or version:find("[%c]") ~= nil or #capabilities > 200 then
+        return nil, "binary-incompatible", "MotionBGS helper probe fields exceed protocol bounds"
+    end
+    local found = {}
+    for capability in capabilities:gmatch("[^,]+") do
+        found[capability] = true
+    end
+    for _, required in ipairs({ "search", "details", "download", "clear" }) do
+        if not found[required] then
+            return nil, "binary-incompatible", "MotionBGS helper is missing capability: " .. required
+        end
+    end
+    return { version = version, protocol = RPC_SCHEMA }, nil, nil
+end
+
+local pumpQueue
+
+local function publishProbeFailure(commandNonce, state, message)
+    status.binary_compatible = false
+    status.probe_state = state
+    status.availability_reason = state
+    if commandNonce > 0 then
+        probeNonce = 0
+        failNonce(commandNonce, "probe", state, message)
+    else
+        local expectedConfigurationGap = state == "disabled" or state == "video-root-missing"
+        status.last_error_kind = if expectedConfigurationGap then "" else state
+        status.last_error = if expectedConfigurationGap then "" else bounded(message, 400)
+        publishStatus()
+    end
+end
+
+local function startProbe(_force, commandNonce)
+    local requestedNonce = nonceValue(commandNonce) or 0
+    if probeNonce > 0 and probeNonce ~= requestedNonce then
+        publishAck(probeNonce, "error", "MotionBGS helper probe was superseded")
+    end
+    probeNonce = requestedNonce
+    probeGeneration += 1
+    local generation = probeGeneration
+    probeBusy = false
+    status.binary_available = false
+    status.binary_compatible = false
+    status.binary_version = ""
+    status.binary_protocol = 0
+    status.binary_path = ""
+    status.binary_source = ""
+    if not settingBool("use_motionbgs", true) then
+        publishProbeFailure(requestedNonce, "disabled", "MotionBGS integration is disabled")
+        return
+    end
+    if not configuredVideoRootExists() then
+        publishProbeFailure(requestedNonce, "video-root-missing", "Select an existing video directory first")
+        return
+    end
+    if not status.launcher_available then
+        publishProbeFailure(requestedNonce, "launcher-missing", "The bundled MotionBGS launcher is missing")
+        return
+    end
+    local selected, source, selectionError = configuredBinary()
+    status.binary_source = source
+    if selected == "" then
+        publishProbeFailure(requestedNonce, "binary-missing", selectionError)
+        return
+    end
+    binaryCommand = selected
+    status.binary_available = true
+    status.binary_path = selected
+    status.probe_state = "probing"
+    status.availability_reason = "probing"
+    probeBusy = true
+    publishStatus()
+    local command = "exec bash "
+        .. shellQuote(launcherPath)
+        .. " probe "
+        .. shellQuote(binaryCommand)
+    local started = noctalia.runAsync(command, function(result)
+        if generation ~= probeGeneration then
+            return
+        end
+        probeBusy = false
+        local probe, kind, message = probeResult(result)
+        if probe == nil then
+            publishProbeFailure(requestedNonce, kind, message)
+            return
+        end
+        status.binary_compatible = true
+        status.binary_version = probe.version
+        status.binary_protocol = probe.protocol
+        status.probe_state = "ready"
+        status.availability_reason = "ready"
+        status.last_error_kind = ""
+        status.last_error = ""
+        prepareDownloadDirectory()
+        if requestedNonce > 0 then
+            probeNonce = 0
+            completeNonce(requestedNonce, "probe")
+        else
+            publishStatus()
+        end
+        pumpQueue()
+    end, PROBE_TIMEOUT_MS)
+    if started ~= true then
+        probeBusy = false
+        publishProbeFailure(requestedNonce, "probe-failed", "Noctalia refused the MotionBGS helper probe")
+    end
+end
+
+local function normalizeSearchItem(item)
+    if type(item) ~= "table" then
+        return nil
+    end
+    local slug = validSlug(item.slug)
+    local sourceUrl = normalizeSiteUrl(item.source_url)
+    local thumbnail = tostring(item.thumbnail_url or "")
+    if slug == nil or sourceUrl ~= BASE_URL .. "/" .. slug then
+        return nil
+    end
+    if thumbnail ~= "" then
+        thumbnail = normalizeStillImageUrl(thumbnail)
+        if thumbnail == nil then
             return nil
         end
     end
-    if mediaId == nil or #mediaId > 12 or filename == nil or #filename > 240 then
+    local identifier = tostring(item.id or "")
+    if identifier ~= "" and (identifier:match("^%d+$") == nil or #identifier > 12) then
         return nil
     end
-    local lower = filename:lower()
-    return if lower:match("%.jpe?g$") or lower:match("%.png$") or lower:match("%.webp$") then normalized else nil
-end
-
-local function htmlDecode(value)
-    local text = tostring(value or "")
-    if text:find("&", 1, true) == nil then
-        return text
-    end
-    text = text:gsub("&amp;", "&")
-    text = text:gsub("&quot;", '"')
-    text = text:gsub("&#0*39;", "'")
-    text = text:gsub("&apos;", "'")
-    text = text:gsub("&lt;", "<")
-    text = text:gsub("&gt;", ">")
-    text = text:gsub("&nbsp;", " ")
-    return text
-end
-
-local function stripMarkup(value)
-    local text = tostring(value or ""):gsub("<[^>]*>", " ")
-    return bounded(htmlDecode(text):gsub("%s+", " "), 240)
-end
-
-local function attributeValue(attributes, key)
-    -- All callers use fixed ASCII attribute names, so rebuilding an escaped
-    -- pattern for every lookup only burns callback budget.
-    local prefix = "^" .. key
-    local spaced = "%s" .. key
-    local value = attributes:match(prefix .. '%s*=%s*"([^"]*)"') or attributes:match(spaced .. '%s*=%s*"([^"]*)"')
-    if value == nil then
-        value = attributes:match(prefix .. "%s*=%s*'([^']*)'") or attributes:match(spaced .. "%s*=%s*'([^']*)'")
-    end
-    if value == nil then
-        value = attributes:match(prefix .. "%s*=%s*([^%s>]+)") or attributes:match(spaced .. "%s*=%s*([^%s>]+)")
-    end
-    return if value ~= nil then htmlDecode(value) else nil
-end
-
-local function hasClass(attributes, wanted)
-    local classes = attributeValue(attributes, "class")
-    if classes == nil then
-        return false
-    end
-    for className in classes:gmatch("[^%s]+") do
-        if className == wanted then
-            return true
-        end
-    end
-    return false
-end
-
-local function spanText(body, className)
-    for attributes, inner in body:gmatch("<[sS][pP][aA][nN]%s+([^>]-)>(.-)</[sS][pP][aA][nN]>") do
-        if hasClass(attributes, className) then
-            return stripMarkup(inner)
-        end
-    end
-    return ""
-end
-
-local function firstImage(body)
-    for attributes in body:gmatch("<[iI][mM][gG]%s+([^>]-)>") do
-        -- Lazy cards commonly keep a placeholder in src. Test each lazy still
-        -- independently so a present-but-unusable src cannot mask data-src.
-        for _, attribute in ipairs({ "data-src", "data-lazy-src", "data-original", "src" }) do
-            local normalized = normalizeStillImageUrl(attributeValue(attributes, attribute))
-            if normalized ~= nil then
-                return normalized
-            end
-        end
-    end
-    for attributes in body:gmatch("<[sS][oO][uU][rR][cC][eE]%s+([^>]-)>") do
-        for _, attribute in ipairs({ "data-srcset", "srcset", "data-src", "src" }) do
-            local candidates = attributeValue(attributes, attribute)
-            if candidates ~= nil then
-                for candidate in candidates:gmatch("[^,]+") do
-                    local source = candidate:match("^%s*([^%s]+)") or ""
-                    local normalized = normalizeStillImageUrl(source)
-                    if normalized ~= nil then
-                        return normalized
-                    end
-                end
-            end
-        end
-    end
-    return ""
-end
-
-local function challengePage(html)
-    -- Cloudflare's challenge markers live in the document head.  Never lower
-    -- or scan a whole (up to 1 MiB) listing inside one ScriptRuntime callback.
-    local lower = tostring(html or ""):sub(1, LISTING_META_PREFIX_BYTES):lower()
-    return lower:find("<title>just a moment", 1, true) ~= nil
-        or lower:find("id=challenge-error-text", 1, true) ~= nil
-        or lower:find('id="challenge-error-text"', 1, true) ~= nil
-        or lower:find("checking your browser", 1, true) ~= nil
-end
-
-local function beginSearchParse(html, limit)
-    if challengePage(html) then
-        return nil, "challenge", "MotionBGS returned an anti-bot challenge; no bypass was attempted"
-    end
-
     return {
-        html = html,
-        limit = limit,
-        cursor = 1,
-        found = {},
-        seen = {},
-    },
-        nil,
-        nil
-end
-
-local function appendSearchCard(parser, attributes, body)
-    local href = attributeValue(attributes, "href")
-    local titleAttribute = attributeValue(attributes, "title") or ""
-    local title = spanText(body, "ttl")
-    local candidate = title ~= "" or titleAttribute:lower():find("live wallpaper", 1, true) ~= nil
-    if not candidate or href == nil then
-        return
-    end
-    local path = href
-    if path:sub(1, #BASE_URL) == BASE_URL then
-        path = path:sub(#BASE_URL + 1)
-    end
-    local slug = path:match("^/([a-z0-9][a-z0-9-]*)/?$")
-    if slug == nil or parser.seen[slug] then
-        return
-    end
-    if title == "" then
-        title = bounded(titleAttribute:gsub("[Ll]ive%s+[Ww]allpaper", ""), 240)
-    end
-    local sourceUrl = normalizeSiteUrl("/" .. slug)
-    local thumbnail = firstImage(body)
-    local quality = spanText(body, "frm")
-    if quality == "" then
-        quality = titleAttribute:match("([4][Kk])") or titleAttribute:match("([Hh][Dd])") or ""
-    end
-    local id = thumbnail:match("/media/(%d+)/") or ""
-    table.insert(parser.found, {
         slug = slug,
-        id = id,
-        title = title ~= "" and title or slug,
-        quality = bounded(quality, 20):upper(),
+        id = identifier,
+        title = bounded(item.title ~= "" and item.title or slug, 240),
+        quality = bounded(item.quality, 20):upper(),
         source_url = sourceUrl,
         thumbnail_url = thumbnail,
         provider = "MotionBGS",
-    })
-    parser.seen[slug] = true
+    }
 end
 
-local function advanceSearchParse(parser)
-    local processed = 0
-    while processed < SEARCH_ANCHORS_PER_TICK and #parser.found < parser.limit do
-        local _, finish, attributes, body = parser.html:find(
-            "<[aA]%s+([^>]-)>(.-)</[aA]>",
-            parser.cursor
-        )
-        if finish == nil then
-            parser.finished = true
-            break
-        end
-        parser.cursor = finish + 1
-        processed += 1
-        appendSearchCard(parser, attributes, body)
+local function normalizeMeta(candidate, request, itemCount)
+    if type(candidate) ~= "table" then
+        return nil
     end
-    if #parser.found >= parser.limit then
-        parser.finished = true
+    local page = request.page
+    local currentPage = tonumber(candidate.current_page)
+    local totalHint = tonumber(candidate.total_hint)
+    if currentPage ~= page or totalHint == nil or totalHint < 0 or totalHint > MAX_NONCE then
+        return nil
     end
-    if parser.finished ~= true then
-        return false, nil, nil
+    if type(candidate.has_previous) ~= "boolean"
+        or type(candidate.has_next) ~= "boolean"
+        or type(candidate.pageable) ~= "boolean"
+    then
+        return nil
     end
-
-    if #parser.found == 0 then
-        -- MotionBGS renders its empty-state message near the start of the
-        -- response.  Keep the probe bounded for the same reason as the
-        -- challenge and pagination scans above.
-        local lower = tostring(parser.html or ""):sub(1, LISTING_META_PREFIX_BYTES):lower()
-        local explicitEmpty = lower:find("no wallpapers", 1, true) ~= nil
-            or lower:find("nothing found", 1, true) ~= nil
-            or lower:find("no results", 1, true) ~= nil
-        if not explicitEmpty then
-            return true,
-                "site-markup",
-                "MotionBGS returned no recognizable wallpaper cards; its public markup may have changed"
-        end
-    end
-    return true, nil, nil
-end
-
-local function relationToken(attributes, relation)
-    local rel = tostring(attributeValue(attributes, "rel") or ""):lower()
-    for token in rel:gmatch("[^%s]+") do
-        if token == relation then
-            return true
-        end
-    end
-    return false
-end
-
-local function listingTotalHint(html)
-    local title = html:match("<[tT][iI][tT][lL][eE]>(.-)</[tT][iI][tT][lL][eE]>") or ""
-    local digits = stripMarkup(title):match("^([%d,]+)%+")
-    if digits == nil then
-        return 0
-    end
-    -- gsub returns both the replaced string and a replacement count. Bind the
-    -- string first so Luau cannot pass that count to tonumber as its base.
-    local normalizedDigits = digits:gsub(",", "")
-    return math.max(0, math.min(MAX_NONCE, tonumber(normalizedDigits) or 0))
-end
-
-local function parseListingMeta(html, request, itemCount)
-    local pageable = request.mode == "latest" or request.mode == "genre" or request.mode == "4k"
-    local metadataHtml = html:sub(1, LISTING_META_PREFIX_BYTES)
-    local metadataLower = metadataHtml:lower()
-    -- Body markup can start with hundreds of anchors.  Restrict metadata work
-    -- to the actual head instead of merely a byte prefix, then walk link tags
-    -- with plain native searches.  Luau's non-greedy gmatch over even 16 KiB
-    -- can exceed Noctalia's 25 ms callback budget.
-    local headClose = metadataLower:find("</head", 1, true)
-    if headClose ~= nil then
-        local headEnd = metadataLower:find(">", headClose, true)
-        if headEnd ~= nil then
-            metadataHtml = metadataHtml:sub(1, headEnd)
-            metadataLower = metadataLower:sub(1, headEnd)
-        end
-    end
-    local previousUrl = ""
-    local nextUrl = ""
-    if pageable then
-        local linksSeen = 0
-        local cursor = 1
-        while linksSeen < LISTING_META_LINK_LIMIT do
-            local startAt = metadataLower:find("<link", cursor, true)
-            if startAt == nil then
-                break
-            end
-            local afterName = metadataLower:sub(startAt + 5, startAt + 5)
-            local finishAt = metadataLower:find(">", startAt + 5, true)
-            if finishAt == nil then
-                break
-            end
-            cursor = finishAt + 1
-            if afterName:match("%s") == nil then
-                continue
-            end
-            linksSeen += 1
-            local attributes = metadataHtml:sub(startAt + 5, finishAt - 1)
-            local href = normalizeSiteUrl(attributeValue(attributes, "href"))
-            if href ~= nil then
-                if previousUrl == "" and request.page > 1 and relationToken(attributes, "prev") then
-                    local previousRequest = {
-                        mode = request.mode,
-                        query = request.query,
-                        genre = request.genre,
-                        page = request.page - 1,
-                    }
-                    if listingRouteMatches(previousRequest, href) then
-                        previousUrl = href
-                    end
-                end
-                if nextUrl == "" and request.page < MAX_PAGE and relationToken(attributes, "next") then
-                    local nextRequest = {
-                        mode = request.mode,
-                        query = request.query,
-                        genre = request.genre,
-                        page = request.page + 1,
-                    }
-                    if listingRouteMatches(nextRequest, href) then
-                        nextUrl = href
-                    end
-                end
-            end
-        end
+    local expectedPageable = request.mode == "latest" or request.mode == "genre" or request.mode == "4k"
+    if candidate.pageable ~= expectedPageable
+        or (not expectedPageable and (candidate.has_previous or candidate.has_next))
+        or (page == 1 and candidate.has_previous)
+    then
+        return nil
     end
     return {
-        current_page = request.page,
-        has_previous = previousUrl ~= "",
-        has_next = nextUrl ~= "",
-        pageable = pageable,
-        total_hint = listingTotalHint(metadataHtml),
+        current_page = page,
+        has_previous = candidate.has_previous,
+        has_next = candidate.has_next,
+        pageable = candidate.pageable,
+        total_hint = math.floor(totalHint),
         count = itemCount,
     }
 end
 
-local function metaContent(html, propertyName)
-    for attributes in html:gmatch("<[mM][eE][tT][aA]%s+([^>]-)>") do
-        local name = attributeValue(attributes, "property") or attributeValue(attributes, "name")
-        if type(name) == "string" and name:lower() == propertyName:lower() then
-            return attributeValue(attributes, "content") or ""
-        end
-    end
-    return ""
-end
-
-local function parseDetailsHtml(html, slug)
-    if challengePage(html) then
-        return nil, "challenge", "MotionBGS returned an anti-bot challenge; no bypass was attempted"
-    end
-
-    local title = metaContent(html, "og:title")
-    if title == "" then
-        title = html:match("<[tT][iI][tT][lL][eE]>(.-)</[tT][iI][tT][lL][eE]>") or ""
-    end
-    title = stripMarkup(title):gsub("%s+[Ll]ive%s+[Ww]allpaper%s*$", "")
-
-    local preview = normalizeSiteUrl(metaContent(html, "og:video")) or ""
-    local poster = normalizeStillImageUrl(metaContent(html, "og:image")) or ""
-    if preview == "" then
-        for attributes in html:gmatch("<[sS][oO][uU][rR][cC][eE]%s+([^>]-)>") do
-            local mediaType = (attributeValue(attributes, "type") or ""):lower()
-            local source = normalizeSiteUrl(attributeValue(attributes, "src"))
-            if source ~= nil and (mediaType == "video/mp4" or source:match("%.mp4$")) then
-                preview = source
-                break
-            end
-        end
-    end
-
-    local downloads = {}
-    local wallpaperId = ""
-    for attributes, body in html:gmatch("<[aA]%s+([^>]-)>(.-)</[aA]>") do
-        local href = attributeValue(attributes, "href")
-        if href ~= nil then
-            local path = href
-            if path:sub(1, #BASE_URL) == BASE_URL then
-                path = path:sub(#BASE_URL + 1)
-            end
-            local quality, id = path:match("^/dl/([%w]+)/(%d+)/?$")
-            quality = type(quality) == "string" and quality:lower() or nil
-            if (quality == "hd" or quality == "4k") and id ~= nil then
-                local normalized = normalizeSiteUrl("/dl/" .. quality .. "/" .. id .. "/")
-                local bodyText = stripMarkup(body)
-                local width, height = bodyText:match("(%d+)%s*[xX]%s*(%d+)")
-                local size = bodyText:match("%(([%d%.]+)%s*[Mm][Bb]%)") or ""
-                downloads[quality] = {
-                    id = id,
-                    quality = quality,
-                    label = quality:upper(),
-                    resolution = if width ~= nil then width .. "x" .. height else "",
-                    advertised_size_mb = tonumber(size) or 0,
-                    url = normalized,
-                }
-                wallpaperId = wallpaperId ~= "" and wallpaperId or id
-            end
-        end
-    end
-
-    if next(downloads) == nil or wallpaperId == "" then
-        return nil,
-            "site-markup",
-            "MotionBGS did not expose recognizable HD/4K download links; its public markup may have changed"
-    end
-
-    local duration = html:match('"duration"%s*:%s*"(PT[^"]+)"') or ""
-    return {
-        slug = slug,
-        id = wallpaperId,
-        title = title ~= "" and title or slug,
-        source_url = BASE_URL .. "/" .. slug,
-        preview_url = preview,
-        poster_url = poster,
-        duration = bounded(duration, 40),
-        downloads = downloads,
-        fetched_at = nowSeconds(),
-        provider = "MotionBGS",
-    },
-        nil,
-        nil
-end
-
-local function trimOrder(order, values, maximum)
-    while #order > maximum do
-        local removed = table.remove(order, 1)
-        values[removed] = nil
-    end
-end
-
-local function touchOrder(order, key)
-    for index = #order, 1, -1 do
-        if order[index] == key then
-            table.remove(order, index)
-        end
-    end
-    table.insert(order, key)
-end
-
-local function validCachedSearch(key, record)
-    local request = type(record) == "table" and normalizedBrowseRequest(record) or nil
-    local meta = type(record) == "table" and record.meta or nil
-    if
-        type(key) ~= "string"
-        or key == ""
-        or #key > MAX_CACHE_KEY_BYTES
-        or key:find("[%c]") ~= nil
-        or type(record) ~= "table"
-        or request == nil
-        or record.mode ~= request.mode
-        or record.query ~= request.query
-        or record.genre ~= request.genre
-        or tonumber(record.page) ~= request.page
-        or tonumber(record.limit) == nil
-        or tonumber(record.limit) < 1
-        or tonumber(record.limit) > MAX_RESULTS
-        or normalizeSiteUrl(record.source_url) == nil
-        or not listingRouteMatches(request, record.source_url)
-        or type(record.items) ~= "table"
-        or #record.items > MAX_RESULTS
-        or type(meta) ~= "table"
-        or tonumber(meta.current_page) ~= request.page
-        or type(meta.has_previous) ~= "boolean"
-        or type(meta.has_next) ~= "boolean"
-        or type(meta.pageable) ~= "boolean"
-        or tonumber(meta.total_hint) == nil
-        or tonumber(record.fetched_at) == nil
-    then
-        return false
-    end
-    for _, item in ipairs(record.items) do
-        if
-            type(item) ~= "table"
-            or validSlug(item.slug) == nil
-            or normalizeSiteUrl(item.source_url) == nil
-            or (tostring(item.thumbnail_url or "") ~= "" and normalizeStillImageUrl(item.thumbnail_url) == nil)
-        then
-            return false
-        end
-    end
-    return true
-end
-
-local function validCachedDetail(key, record)
-    if
-        validSlug(key) == nil
-        or type(record) ~= "table"
-        or validSlug(record.slug) ~= key
-        or tostring(record.id or ""):match("^%d+$") == nil
-        or normalizeSiteUrl(record.source_url) == nil
-        or (tostring(record.poster_url or "") ~= "" and normalizeStillImageUrl(record.poster_url) == nil)
-        or type(record.downloads) ~= "table"
-        or tonumber(record.fetched_at) == nil
-    then
-        return false
-    end
-    local validDownload = false
-    for _, quality in ipairs({ "hd", "4k" }) do
-        local download = record.downloads[quality]
-        if download ~= nil then
-            if
-                type(download) ~= "table"
-                or tostring(download.id or ""):match("^%d+$") == nil
-                or tostring(download.quality or ""):lower() ~= quality
-                or normalizeSiteUrl(download.url) == nil
-            then
-                return false
-            end
-            validDownload = true
-        end
-    end
-    return validDownload
-end
-
-local function rebuildOrderedCache(order, values, maximum, validator)
-    local reversed = {}
-    local seen = {}
-    if type(order) == "table" and type(values) == "table" then
-        for index = #order, 1, -1 do
-            if #reversed >= maximum then
-                break
-            end
-            local key = order[index]
-            if type(key) == "string" and not seen[key] then
-                seen[key] = true
-                local record = values[key]
-                if validator(key, record) then
-                    table.insert(reversed, { key = key, record = record })
-                end
-            end
-        end
-    end
-
-    local rebuiltValues = {}
-    local rebuiltOrder = {}
-    for index = #reversed, 1, -1 do
-        local selected = reversed[index]
-        rebuiltValues[selected.key] = selected.record
-        table.insert(rebuiltOrder, selected.key)
-    end
-    return rebuiltValues, rebuiltOrder
-end
-
-local function normalizeCache(candidate)
-    if type(candidate) ~= "table" or tonumber(candidate.schema) ~= CACHE_SCHEMA then
+local function normalizeDetail(candidate, expectedSlug)
+    if type(candidate) ~= "table" then
         return nil
     end
-    local searches, searchOrder =
-        rebuildOrderedCache(candidate.search_order, candidate.searches, MAX_CACHE_SEARCHES, validCachedSearch)
-    local details, detailOrder =
-        rebuildOrderedCache(candidate.detail_order, candidate.details, MAX_CACHE_DETAILS, validCachedDetail)
+    local slug = validSlug(candidate.slug)
+    local identifier = tostring(candidate.id or "")
+    local sourceUrl = normalizeSiteUrl(candidate.source_url)
+    local fetchedAt = if type(candidate.fetched_at) == "number" then candidate.fetched_at else nil
+    local poster = tostring(candidate.poster_url or "")
+    local preview = tostring(candidate.preview_url or "")
+    if slug ~= expectedSlug
+        or identifier:match("^%d+$") == nil
+        or #identifier > 12
+        or fetchedAt == nil
+        or fetchedAt < 0
+        or fetchedAt > 9999999999
+        or math.floor(fetchedAt) ~= fetchedAt
+    then
+        return nil
+    end
+    if sourceUrl ~= BASE_URL .. "/" .. slug then
+        return nil
+    end
+    if poster ~= "" then
+        poster = normalizeStillImageUrl(poster)
+        if poster == nil then
+            return nil
+        end
+    end
+    if preview ~= "" and normalizeSiteUrl(preview) == nil then
+        return nil
+    end
+    local downloads = {}
+    for _, quality in ipairs({ "hd", "4k" }) do
+        local value = type(candidate.downloads) == "table" and candidate.downloads[quality] or nil
+        if value ~= nil then
+            local id = type(value) == "table" and tostring(value.id or "") or ""
+            local url = type(value) == "table" and normalizeSiteUrl(value.url) or nil
+            if id:match("^%d+$") == nil
+                or #id > 12
+                or tostring(value.quality or ""):lower() ~= quality
+                or url ~= BASE_URL .. "/dl/" .. quality .. "/" .. id .. "/"
+            then
+                return nil
+            end
+            downloads[quality] = {
+                id = id,
+                quality = quality,
+                label = quality:upper(),
+                resolution = bounded(value.resolution, 40),
+                advertised_size_mb = math.max(0, tonumber(value.advertised_size_mb) or 0),
+                url = url,
+            }
+        end
+    end
+    if next(downloads) == nil then
+        return nil
+    end
+    local identifierMatches = false
+    for _, download in pairs(downloads) do
+        if type(download) == "table" and download.id == identifier then
+            identifierMatches = true
+            break
+        end
+    end
+    if not identifierMatches then
+        return nil
+    end
     return {
-        schema = CACHE_SCHEMA,
-        searches = searches,
-        search_order = searchOrder,
-        details = details,
-        detail_order = detailOrder,
-    }
-end
-
-local function saveCache()
-    if cachePath == "" then
-        return false
-    end
-    local encoded, encodeError = noctalia.json.encode(cache, true)
-    if type(encoded) ~= "string" or #encoded > MAX_CACHE_BYTES then
-        status.last_error_kind = "cache"
-        status.last_error = bounded(encodeError or "MotionBGS cache exceeded its safe size", 320)
-        return false
-    end
-    local temporary = cachePath .. ".tmp"
-    local wrote, writeError = noctalia.writeFile(temporary, encoded .. "\n")
-    if wrote ~= true then
-        noctalia.removeFile(temporary)
-        status.last_error_kind = "cache"
-        status.last_error = bounded(writeError or "could not write MotionBGS cache", 320)
-        return false
-    end
-    local installed, installError = noctalia.renameFile(temporary, cachePath)
-    if installed ~= true then
-        noctalia.removeFile(temporary)
-        status.last_error_kind = "cache"
-        status.last_error = bounded(installError or "could not install MotionBGS cache", 320)
-        return false
-    end
-    return true
-end
-
-local function loadCache()
-    if cachePath == "" or not noctalia.fileExists(cachePath) then
-        return
-    end
-    local raw = readBoundedRegularFile(cachePath, MAX_CACHE_BYTES)
-    if type(raw) ~= "string" or #raw > MAX_CACHE_BYTES then
-        return
-    end
-    local decoded = noctalia.json.decode(raw)
-    local normalized = normalizeCache(decoded)
-    if normalized ~= nil then
-        cache = normalized
-    end
-end
-
-local function fresh(timestamp)
-    local age = nowSeconds() - (tonumber(timestamp) or 0)
-    return age >= 0 and age <= cacheTtlSeconds()
-end
-
-local function searchKey(request, limit)
-    return table.concat({
-        request.mode,
-        request.query:lower():gsub("%s+", " "),
-        request.genre,
-        tostring(request.page),
-        tostring(limit),
-    }, "|")
-end
-
-local function cacheSearch(request, limit, sourceUrl, items, meta)
-    local key = searchKey(request, limit)
-    cache.searches[key] = {
-        mode = request.mode,
-        query = request.query,
-        genre = request.genre,
-        page = request.page,
-        limit = limit,
+        slug = slug,
+        id = identifier,
+        title = bounded(candidate.title ~= "" and candidate.title or slug, 240),
         source_url = sourceUrl,
-        fetched_at = nowSeconds(),
-        items = items,
-        meta = meta,
+        preview_url = preview,
+        poster_url = poster,
+        thumbnail_url = poster,
+        duration = bounded(candidate.duration, 40),
+        downloads = downloads,
+        fetched_at = fetchedAt,
+        provider = "MotionBGS",
     }
-    touchOrder(cache.search_order, key)
-    trimOrder(cache.search_order, cache.searches, MAX_CACHE_SEARCHES)
-    local saved = saveCache()
-    local entry = cache.searches[key]
-    if not saved then
-        cache.searches[key] = nil
-        for index = #cache.search_order, 1, -1 do
-            if cache.search_order[index] == key then
-                table.remove(cache.search_order, index)
-            end
-        end
-    end
-    return entry, saved
 end
 
-local function cacheDetail(detail)
-    cache.details[detail.slug] = detail
-    touchOrder(cache.detail_order, detail.slug)
-    trimOrder(cache.detail_order, cache.details, MAX_CACHE_DETAILS)
-    local saved = saveCache()
-    if not saved then
-        cache.details[detail.slug] = nil
-        for index = #cache.detail_order, 1, -1 do
-            if cache.detail_order[index] == detail.slug then
-                table.remove(cache.detail_order, index)
-            end
-        end
-    end
-    return saved
-end
-
-local function setVisibleSearch(entry, nonce, cached)
-    results.nonce = nonce
-    results.mode = tostring(entry.mode or "search")
-    results.query = tostring(entry.query or "")
-    results.genre = tostring(entry.genre or "")
-    results.page = tonumber(entry.page) or 1
-    results.source_url = normalizeSiteUrl(entry.source_url) or BASE_URL
-    results.cached = cached == true
-    results.fetched_at = tonumber(entry.fetched_at) or 0
-    results.items = type(entry.items) == "table" and entry.items or {}
-    results.meta = type(entry.meta) == "table" and entry.meta or {
-        current_page = results.page,
+local function resetResults(nonce)
+    results.nonce = nonce or 0
+    results.mode = "search"
+    results.query = ""
+    results.genre = ""
+    results.page = 1
+    results.source_url = BASE_URL
+    results.cached = false
+    results.fetched_at = 0
+    results.items = {}
+    results.meta = {
+        current_page = 1,
         has_previous = false,
         has_next = false,
         pageable = false,
@@ -1182,53 +884,412 @@ local function setVisibleSearch(entry, nonce, cached)
     publishResults()
 end
 
-local function setVisibleDetail(detail, nonce, cached)
-    results.nonce = nonce
-    results.cached = cached == true
-    results.selected = detail
-    publishResults()
+local function validateDownload(operation, candidate, detail)
+    if type(candidate) ~= "table" then
+        return nil
+    end
+    local directory = tostring(operation.download_directory or "")
+    local prefix = directory ~= "" and directory .. "/" or ""
+    local path = tostring(candidate.path or "")
+    local basename = prefix ~= "" and path:sub(1, #prefix) == prefix and path:sub(#prefix + 1) or ""
+    local stem = tostring(operation.slug or "") .. "." .. tostring(operation.quality or "")
+    local escapedStem = stem:gsub("([^%w])", "%%%1")
+    local suffix = basename:match("^" .. escapedStem .. "%-(%d+)%.mp4$")
+    local expectedName = basename == stem .. ".mp4"
+        or (suffix ~= nil and #suffix <= 4 and tonumber(suffix) ~= nil and tonumber(suffix) <= 9999)
+    if not validAbsolutePath(path) or basename == "" or basename:find("/", 1, true) or not expectedName then
+        return nil
+    end
+    local sidecarPath = tostring(candidate.sidecar or "")
+    if sidecarPath ~= path .. ".motionbgs.json" then
+        return nil
+    end
+    local info = noctalia.fileInfo(path)
+    local bytes = math.floor(tonumber(candidate.bytes) or 0)
+    local maximum = configuredDownloadLimit() * 1024 * 1024
+    local sidecarRaw = readBoundedRegularFile(sidecarPath, MAX_PROVIDER_SIDECAR_BYTES)
+    local sidecar = type(sidecarRaw) == "string" and noctalia.json.decode(sidecarRaw) or nil
+    local expectedDownload = type(detail) == "table"
+            and type(detail.downloads) == "table"
+            and type(detail.downloads[operation.quality]) == "table"
+            and detail.downloads[operation.quality].url
+        or nil
+    local normalizedDownload = type(sidecar) == "table" and normalizeSiteUrl(sidecar.download_url) or nil
+    local expectedId = type(detail) == "table"
+            and type(detail.downloads) == "table"
+            and type(detail.downloads[operation.quality]) == "table"
+            and tostring(detail.downloads[operation.quality].id or "")
+        or ""
+    local mediaId = type(normalizedDownload) == "string" and normalizedDownload:match(
+        "^https://motionbgs%.com/media/([0-9]+)/[A-Za-z0-9][A-Za-z0-9._-]*%.mp4$"
+    ) or nil
+    local downloadRouteMatches = normalizedDownload == expectedDownload
+        or (mediaId ~= nil and mediaId == expectedId)
+    local digest = tostring(candidate.sha256 or "")
+    local contentType = tostring(candidate.content_type or "")
+    local downloadedAt = tostring(candidate.downloaded_at or "")
+    if type(info) ~= "table"
+        or info.isDir == true
+        or bytes < 1
+        or bytes > maximum
+        or math.floor(tonumber(info.size) or 0) ~= bytes
+        or type(sidecar) ~= "table"
+        or tonumber(sidecar.schema) ~= 1
+        or sidecar.plugin ~= "goober/wall-in-one"
+        or sidecar.provider ~= "MotionBGS"
+        or sidecar.path ~= path
+        or sidecar.title ~= detail.title
+        or sidecar.source_page ~= BASE_URL .. "/" .. tostring(operation.slug or "")
+        or not downloadRouteMatches
+        or sidecar.quality ~= operation.quality
+        or tonumber(sidecar.bytes) ~= bytes
+        or contentType ~= tostring(sidecar.content_type or "")
+        or (contentType ~= "video/mp4" and contentType ~= "application/octet-stream")
+        or digest:match("^[0-9a-f]+$") == nil
+        or #digest ~= 64
+        or sidecar.sha256 ~= digest
+        or sidecar.downloaded_at ~= downloadedAt
+        or candidate.slug ~= operation.slug
+        or candidate.title ~= detail.title
+        or candidate.quality ~= operation.quality
+        or candidate.source_url ~= sidecar.source_page
+        or candidate.download_url ~= sidecar.download_url
+        or downloadedAt:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$") == nil
+    then
+        return nil
+    end
+    return {
+        path = path,
+        sidecar = sidecarPath,
+        slug = operation.slug,
+        title = bounded(candidate.title, 240),
+        quality = operation.quality,
+        bytes = bytes,
+        source_url = sidecar.source_page,
+        download_url = normalizedDownload,
+        downloaded_at = bounded(candidate.downloaded_at, 80),
+    }
 end
 
-local function helperResult(result)
-    if type(result) ~= "table" then
-        return nil, "transport", "MotionBGS helper returned no process result"
+local function applyRpcResponse(operation, payload)
+    if type(payload) ~= "table"
+        or tonumber(payload.schema) ~= RPC_SCHEMA
+        or tostring(payload.request_id or "") ~= operation.request_id
+        or tostring(payload.action or "") ~= operation.kind
+    then
+        return false, "protocol", "MotionBGS helper returned a mismatched response envelope"
     end
-    local output = tostring(result.stdout or ""):match("([^\r\n]+)%s*$") or ""
-    local protocol, outcome, a, b, c, d, e =
-        output:match("^([^\t]+)\t([^\t]+)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-    if protocol == "WIO-MBG1" and outcome == "ok" then
-        local effectiveUrl = normalizeSiteUrl(b)
-        if effectiveUrl == nil then
-            return nil, "protocol", "MotionBGS helper returned a cross-origin or malformed effective URL"
+    if payload.ok ~= true then
+        local failure = type(payload.error) == "table" and payload.error or {}
+        return false, bounded(failure.kind or "provider", 80), bounded(failure.message or "MotionBGS request failed", 400)
+    end
+    if operation.kind == "search" then
+        local sourceUrl = normalizeSiteUrl(payload.source_url)
+        local fetchedAt = if type(payload.fetched_at) == "number" then payload.fetched_at else nil
+        local rawItems = type(payload.items) == "table" and payload.items or nil
+        if sourceUrl == nil
+            or not listingRouteMatches(operation.request, sourceUrl)
+            or payload.mode ~= operation.request.mode
+            or payload.query ~= operation.request.query
+            or payload.genre ~= operation.request.genre
+            or tonumber(payload.page) ~= operation.request.page
+            or (payload.cached ~= true and payload.cached ~= false)
+            or fetchedAt == nil
+            or fetchedAt < 0
+            or fetchedAt > 9999999999
+            or math.floor(fetchedAt) ~= fetchedAt
+            or rawItems == nil
+            or #rawItems > operation.limit
+        then
+            return false, "protocol", "MotionBGS helper returned an invalid search result"
         end
-        return {
-            status = tonumber(a) or 0,
-            effective_url = effectiveUrl,
-            content_type = c,
-            bytes = tonumber(d) or 0,
-            path = e,
-        },
-            nil,
-            nil
+        local items = {}
+        for _, rawItem in ipairs(rawItems) do
+            local item = normalizeSearchItem(rawItem)
+            if item == nil then
+                return false, "protocol", "MotionBGS helper returned an unsafe search item"
+            end
+            table.insert(items, item)
+        end
+        local meta = normalizeMeta(payload.meta, operation.request, #items)
+        if meta == nil then
+            return false, "protocol", "MotionBGS helper returned invalid pagination metadata"
+        end
+        results.nonce = operation.nonce
+        results.mode = operation.request.mode
+        results.query = operation.request.query
+        results.genre = operation.request.genre
+        results.page = operation.request.page
+        results.source_url = sourceUrl
+        results.cached = payload.cached
+        results.fetched_at = fetchedAt
+        results.items = items
+        results.meta = meta
+        results.selected = {}
+        publishResults()
+    elseif operation.kind == "details" then
+        local detail = normalizeDetail(payload.selected, operation.slug)
+        local responseSource = normalizeSiteUrl(payload.source_url)
+        local fetchedAt = if type(payload.fetched_at) == "number" then payload.fetched_at else nil
+        if detail == nil
+            or (payload.cached ~= true and payload.cached ~= false)
+            or responseSource ~= detail.source_url
+            or fetchedAt == nil
+            or fetchedAt ~= detail.fetched_at
+        then
+            return false, "protocol", "MotionBGS helper returned an unsafe detail record"
+        end
+        results.nonce = operation.nonce
+        results.cached = payload.cached
+        results.fetched_at = fetchedAt
+        results.selected = detail
+        publishResults()
+    elseif operation.kind == "download" then
+        local detail = normalizeDetail(payload.selected, operation.slug)
+        local responseSource = normalizeSiteUrl(payload.source_url)
+        local fetchedAt = if type(payload.fetched_at) == "number" then payload.fetched_at else nil
+        if detail == nil
+            or (payload.cached ~= true and payload.cached ~= false)
+            or responseSource ~= detail.source_url
+            or fetchedAt == nil
+            or fetchedAt ~= detail.fetched_at
+        then
+            return false, "protocol", "MotionBGS helper returned an unsafe download detail"
+        end
+        local download = validateDownload(operation, payload.download, detail)
+        if download == nil then
+            return false, "protocol", "MotionBGS helper returned an unsafe download installation"
+        end
+        results.nonce = operation.nonce
+        results.cached = payload.cached
+        results.fetched_at = fetchedAt
+        results.selected = detail
+        publishResults()
+        status.last_download = download
+    elseif operation.kind == "clear" then
+        if payload.cleared ~= true then
+            return false, "protocol", "MotionBGS helper returned an invalid clear result"
+        end
+        resetResults(operation.nonce)
+    else
+        return false, "protocol", "MotionBGS helper returned an unsupported action"
     end
+    return true, nil, nil
+end
 
-    local errorProtocol, errorOutcome, kind, detail = output:match("^([^\t]+)\t([^\t]+)\t([^\t]*)\t(.*)$")
-    if errorProtocol == "WIO-MBG1" and errorOutcome == "error" then
-        return nil, bounded(kind, 80), bounded(detail, 400)
+local function launcherRpcResult(operation, result)
+    if type(result) ~= "table" then
+        return nil, "transport", "MotionBGS launcher returned no process result"
     end
     if result.timedOut == true then
-        return nil, "timeout", "MotionBGS helper exceeded Noctalia's process timeout"
+        return nil, "timeout", "MotionBGS helper exceeded its bounded process timeout"
     end
-    local fallback = bounded(result.stderr or result.stdout, 400)
-    if fallback == "" then
-        fallback = "MotionBGS helper exited without a valid protocol result"
+    local line = tostring(result.stdout or ""):match("([^\r\n]+)%s*$") or ""
+    local errorProtocol, errorOutcome, kind, detail = line:match("^([^\t]+)\t([^\t]+)\t([^\t]*)\t(.*)$")
+    if errorProtocol == RPC_PROTOCOL and errorOutcome == "error" then
+        return nil, bounded(kind, 80), bounded(detail, 400)
     end
-    return nil, "protocol", fallback
+    if tonumber(result.exitCode) ~= 0 then
+        return nil, "transport", processFailureDetail(result, "MotionBGS helper process failed")
+    end
+    local protocol, outcome, requestId, path, bytes = line:match(
+        "^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$"
+    )
+    if protocol == RPC_PROTOCOL and outcome == "ok" then
+        local expectedBytes = math.floor(tonumber(bytes) or 0)
+        if requestId ~= operation.request_id
+            or path ~= operation.response_path
+            or expectedBytes < 1
+            or expectedBytes > MAX_RESPONSE_BYTES
+        then
+            return nil, "protocol", "MotionBGS launcher completion envelope did not match the request"
+        end
+        local raw = readBoundedRegularFile(path, MAX_RESPONSE_BYTES)
+        if type(raw) ~= "string" or #raw ~= expectedBytes then
+            return nil, "protocol", "MotionBGS launcher response file was missing or changed"
+        end
+        local decoded = noctalia.json.decode(raw)
+        if type(decoded) ~= "table" then
+            return nil, "protocol", "MotionBGS launcher response was not valid JSON"
+        end
+        return decoded, nil, nil
+    end
+    return nil, "protocol", processFailureDetail(result, "MotionBGS launcher returned an invalid envelope")
 end
 
-local function responsePath(operation)
+local function atomicWriteJson(path, value)
+    local encoded, encodeError = noctalia.json.encode(value, true)
+    if type(encoded) ~= "string" or #encoded + 1 > MAX_REQUEST_BYTES then
+        return false, tostring(encodeError or "request exceeded its protocol size limit")
+    end
+    local temporary = path .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, encoded .. "\n")
+    if wrote ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(writeError or "could not write request staging file")
+    end
+    local installed, installError = noctalia.renameFile(temporary, path)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or "could not install request file")
+    end
+    return true, nil
+end
+
+local function atomicWriteGuard(path)
+    if not validAbsolutePath(path) then
+        return false, "guard path is invalid"
+    end
+    local temporary = path .. ".tmp"
+    local wrote, writeError = noctalia.writeFile(temporary, OPERATION_GUARD_CONTENT)
+    if wrote ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(writeError or "could not write cancellation guard")
+    end
+    local installed, installError = noctalia.renameFile(temporary, path)
+    if installed ~= true then
+        noctalia.removeFile(temporary)
+        return false, tostring(installError or "could not install cancellation guard")
+    end
+    return true, nil
+end
+
+local function finishOperation(operation)
+    cleanupOperationFiles(operation)
+    if activeOperation == operation then
+        activeOperation = nil
+    end
+    publishStatus()
+    pumpQueue()
+end
+
+local function requestPaths(operation)
     operationSequence += 1
-    return cacheDirectory .. "/response-" .. tostring(operation.nonce) .. "-" .. tostring(operationSequence) .. ".html"
+    local token = runtimeToken .. "-" .. tostring(operation.nonce) .. "-" .. tostring(operationSequence)
+    return rpcDirectory .. "/request-" .. token .. ".json",
+        rpcDirectory .. "/response-" .. token .. ".json",
+        rpcDirectory .. "/.wall-in-one-motionbgs-guard-" .. token
+end
+
+local function requestPayload(operation)
+    local payload = {
+        schema = RPC_SCHEMA,
+        request_id = operation.request_id,
+        action = operation.kind,
+        cache_directory = cacheDirectory,
+        cache_ttl_seconds = configuredCacheSeconds(),
+        guard_path = operation.guard_path,
+        operation_timeout_ms = if operation.kind == "download"
+            then DOWNLOAD_OPERATION_BUDGET_MS
+            else RPC_OPERATION_BUDGET_MS,
+    }
+    if operation.kind == "search" then
+        payload.mode = operation.request.mode
+        payload.query = operation.request.query
+        payload.genre = operation.request.genre
+        payload.page = operation.request.page
+        payload.limit = operation.limit
+        payload.force = operation.force == true
+    elseif operation.kind == "details" then
+        payload.slug = operation.slug
+        payload.force = operation.force == true
+    elseif operation.kind == "download" then
+        payload.slug = operation.slug
+        payload.quality = operation.quality
+        payload.force = operation.force == true
+        payload.max_download_bytes = configuredDownloadLimit() * 1024 * 1024
+        payload.download_timeout_seconds = 50
+        payload.download_directory = operation.download_directory
+        payload.managed_marker_path = operation.download_directory .. "/" .. MANAGED_DIRECTORY_MARKER
+    end
+    return payload
+end
+
+local function launchOperation(operation)
+    if type(operation) ~= "table"
+        or operation.cancelled == true
+        or operation.generation ~= operationGeneration
+        or not providerAvailable()
+    then
+        return false
+    end
+    if operation.kind == "download" then
+        local directory, directoryError = prepareDownloadDirectory()
+        if directory == "" then
+            failNonce(operation.nonce, operation.kind, "configuration", directoryError)
+            return false
+        end
+        operation.download_directory = directory
+    end
+    operation.request_id = tostring(operation.nonce) .. "-" .. tostring(operationSequence + 1)
+    operation.request_path, operation.response_path, operation.guard_path = requestPaths(operation)
+    local guarded, guardError = atomicWriteGuard(operation.guard_path)
+    if not guarded then
+        failNonce(operation.nonce, operation.kind, "local-io", guardError)
+        cleanupOperationFiles(operation)
+        return false
+    end
+    local wrote, writeError = atomicWriteJson(operation.request_path, requestPayload(operation))
+    if not wrote then
+        failNonce(operation.nonce, operation.kind, "local-io", writeError)
+        cleanupOperationFiles(operation)
+        return false
+    end
+    activeOperation = operation
+    status.last_request_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    publishStatus()
+    local command = "exec bash "
+        .. shellQuote(launcherPath)
+        .. " rpc "
+        .. shellQuote(binaryCommand)
+        .. " "
+        .. shellQuote(operation.request_path)
+        .. " "
+        .. shellQuote(operation.response_path)
+        .. " "
+        .. shellQuote(operation.guard_path)
+    local timeout = if operation.kind == "download" then DOWNLOAD_TIMEOUT_MS else RPC_TIMEOUT_MS
+    local started = noctalia.runAsync(command, function(result)
+        if operation.cancelled == true or operation.generation ~= operationGeneration then
+            cleanupOperationFiles(operation)
+            if activeOperation == operation then
+                activeOperation = nil
+            end
+            publishStatus()
+            pumpQueue()
+            return
+        end
+        local payload, kind, message = launcherRpcResult(operation, result)
+        if payload == nil then
+            failNonce(operation.nonce, operation.kind, kind, message)
+        else
+            local applied, applyKind, applyError = applyRpcResponse(operation, payload)
+            if applied then
+                completeNonce(operation.nonce, operation.kind)
+            else
+                failNonce(operation.nonce, operation.kind, applyKind, applyError)
+            end
+        end
+        finishOperation(operation)
+    end, timeout)
+    if started ~= true then
+        activeOperation = nil
+        failNonce(operation.nonce, operation.kind, "launch", "Noctalia refused the MotionBGS helper process")
+        cleanupOperationFiles(operation)
+        return false
+    end
+    return true
+end
+
+pumpQueue = function()
+    if activeOperation ~= nil or probeBusy or not providerAvailable() or #pendingOperations == 0 then
+        return
+    end
+    local operation = table.remove(pendingOperations, 1)
+    if not launchOperation(operation) then
+        publishStatus()
+        pumpQueue()
+    end
 end
 
 local function enqueue(operation)
@@ -1238,462 +1299,22 @@ local function enqueue(operation)
     if #pendingOperations >= MAX_QUEUE then
         return false, "queue-full"
     end
-    operation.generation = operation.generation or operationGeneration
-    if operation.generation ~= operationGeneration then
-        return false, "cancelled"
-    end
+    operation.generation = operationGeneration
     table.insert(pendingOperations, operation)
     publishStatus()
+    pumpQueue()
     return true, nil
 end
 
-local pumpQueue
-
-local function finishNetworkOperation(operation)
-    setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
-    if activeOperation == operation then
-        networkBusy = false
-        activeOperation = nil
-    end
-    publishStatus()
-    pumpQueue()
-end
-
-local function beginSearchOperation(operation, transport)
-    local raw = readBoundedRegularFile(transport.path, MAX_HTML_RESPONSE_BYTES)
-    noctalia.removeFile(transport.path)
-    if type(raw) ~= "string" then
-        failNonce(operation.nonce, "search", "local-io", "search response could not be read safely")
-        return false
-    end
-    local parser, kind, parseError = beginSearchParse(raw, operation.limit)
-    if parser == nil then
-        failNonce(operation.nonce, "search", kind, parseError)
-        return false
-    end
-    operation.search_parse = parser
-    operation.search_source_url = transport.effective_url or operation.url
-    setUpdateCadence(SEARCH_PARSE_INTERVAL_MS)
-    return true
-end
-
-local function advanceSearchOperation(operation)
-    if
-        operation.cancelled == true
-        or operation.generation ~= operationGeneration
-        or not providerAvailable()
-    then
-        operation.search_parse = nil
-        finishNetworkOperation(operation)
-        return
-    end
-
-    local parser = operation.search_parse
-    if type(parser) ~= "table" then
-        failNonce(operation.nonce, "search", "internal", "MotionBGS search parser state was lost")
-        finishNetworkOperation(operation)
-        return
-    end
-    if parser.ready ~= true then
-        local finished, kind, parseError = advanceSearchParse(parser)
-        if finished ~= true then
-            return
-        end
-        if kind ~= nil then
-            operation.search_parse = nil
-            failNonce(operation.nonce, "search", kind, parseError)
-            finishNetworkOperation(operation)
-            return
-        end
-        -- Final metadata/cache publication runs on the next service tick so a
-        -- full 36-card page cannot combine parsing and JSON work in one CPU
-        -- budget window.
-        parser.ready = true
-        return
-    end
-
-    local items = parser.found
-    local meta = parseListingMeta(parser.html, operation.request, #items)
-    parser.html = ""
-    local entry, saved = cacheSearch(
-        operation.request,
-        operation.limit,
-        operation.search_source_url or operation.url,
-        items,
-        meta
-    )
-    operation.search_parse = nil
-    setVisibleSearch(entry, operation.nonce, false)
-    if not saved then
-        failNonce(
-            operation.nonce,
-            "search",
-            "cache",
-            status.last_error ~= "" and status.last_error or "Could not persist the MotionBGS search cache"
-        )
-        finishNetworkOperation(operation)
-        return
-    end
-    completeNonce(operation.nonce, "search")
-    finishNetworkOperation(operation)
-end
-
-local function enqueueDownload(operation, detail)
-    local quality = operation.quality
-    local choice = type(detail.downloads) == "table" and detail.downloads[quality] or nil
-    if type(choice) ~= "table" or tostring(choice.id or ""):match("^%d+$") == nil then
-        failNonce(
-            operation.nonce,
-            "download",
-            "quality",
-            "Selected MotionBGS quality is not available for this wallpaper"
-        )
-        return false
-    end
-    local queued, enqueueError = enqueue({
-        kind = "download",
-        nonce = operation.nonce,
-        slug = detail.slug,
-        id = choice.id,
-        title = detail.title,
-        quality = quality,
-        generation = operation.generation or operationGeneration,
-    })
+local function queueOrFail(operation)
+    local queued, reason = enqueue(operation)
     if not queued then
-        if enqueueError == "unavailable" then
-            failNonce(operation.nonce, "download", "unavailable", "MotionBGS integration became unavailable")
-        elseif enqueueError == "cancelled" then
-            failNonce(operation.nonce, "download", "cancelled", "MotionBGS request was cancelled")
-        else
-            failNonce(operation.nonce, "download", "queue-full", "MotionBGS request queue is full")
-        end
-    end
-    return queued
-end
-
-local function performDetails(operation, transport)
-    local raw = readBoundedRegularFile(transport.path, MAX_HTML_RESPONSE_BYTES)
-    noctalia.removeFile(transport.path)
-    if type(raw) ~= "string" then
         failNonce(
             operation.nonce,
-            operation.after_download and "download" or "details",
-            "local-io",
-            "detail response could not be read safely"
+            operation.kind,
+            reason,
+            if reason == "queue-full" then "MotionBGS request queue is full" else "MotionBGS helper is unavailable"
         )
-        return
-    end
-    local detail, kind, parseError = parseDetailsHtml(raw, operation.slug)
-    if detail == nil then
-        failNonce(operation.nonce, operation.after_download and "download" or "details", kind, parseError)
-        return
-    end
-    local saved = cacheDetail(detail)
-    setVisibleDetail(detail, operation.nonce, false)
-    if not saved then
-        failNonce(
-            operation.nonce,
-            operation.after_download and "download" or "details",
-            "cache",
-            status.last_error ~= "" and status.last_error or "Could not persist the MotionBGS detail cache"
-        )
-        return
-    end
-    if operation.after_download then
-        if not enqueueDownload(operation, detail) then
-            return
-        end
-    else
-        completeNonce(operation.nonce, "details")
-    end
-end
-
-local function validatedDownloadPath(operation, transport)
-    if type(operation) ~= "table" or type(transport) ~= "table" then
-        return nil
-    end
-    local directory = tostring(operation.download_directory or "")
-    local prefix = directory ~= "" and directory .. "/" or ""
-    local path = tostring(transport.path or "")
-    local basename = if prefix ~= "" and path:sub(1, #prefix) == prefix then path:sub(#prefix + 1) else ""
-    local stem = tostring(operation.slug or "") .. "." .. tostring(operation.quality or "")
-    local escapedStem = stem:gsub("([^%w])", "%%%1")
-    local suffix = basename:match("^" .. escapedStem .. "%-(%d+)%.mp4$")
-    local expectedName = basename == stem .. ".mp4"
-        or (suffix ~= nil and #suffix <= 4 and tonumber(suffix) ~= nil and tonumber(suffix) <= 9999)
-    local info = validAbsolutePath(path) and noctalia.fileInfo(path) or nil
-    local sidecarPath = path .. ".motionbgs.json"
-    local sidecarRaw = validAbsolutePath(path) and readBoundedRegularFile(sidecarPath, MAX_PROVIDER_SIDECAR_BYTES)
-        or nil
-    local sidecar = type(sidecarRaw) == "string"
-            and #sidecarRaw <= MAX_PROVIDER_SIDECAR_BYTES
-            and noctalia.json.decode(sidecarRaw)
-        or nil
-    local bytes = tonumber(transport.bytes) or 0
-    local maximumBytes = (tonumber(operation.download_limit_mb) or 0) * 1024 * 1024
-    if
-        not validAbsolutePath(path)
-        or prefix == ""
-        or path:sub(1, #prefix) ~= prefix
-        or not expectedName
-        or type(info) ~= "table"
-        or info.isDir == true
-        or bytes <= 0
-        or tonumber(info.size) ~= bytes
-        or maximumBytes <= 0
-        or bytes > maximumBytes
-        or (transport.content_type ~= "video/mp4" and transport.content_type ~= "application/octet-stream")
-        or (tonumber(transport.status) or 0) < 200
-        or (tonumber(transport.status) or 0) >= 300
-        or type(sidecar) ~= "table"
-        or tonumber(sidecar.schema) ~= 1
-        or sidecar.plugin ~= "goober/wall-in-one"
-        or sidecar.provider ~= "MotionBGS"
-        or sidecar.path ~= path
-        or sidecar.source_page ~= BASE_URL .. "/" .. tostring(operation.slug or "")
-        or sidecar.download_url ~= transport.effective_url
-        or sidecar.quality ~= operation.quality
-        or tonumber(sidecar.bytes) ~= bytes
-    then
-        return nil
-    end
-    return path
-end
-
-local function cleanupCancelledDownload(operation, result)
-    local transport = helperResult(result)
-    local path = validatedDownloadPath(operation, transport)
-    if path ~= nil then
-        noctalia.removeFile(path)
-        noctalia.removeFile(path .. ".motionbgs.json")
-    end
-end
-
-local function performDownload(operation, transport)
-    local path = validatedDownloadPath(operation, transport)
-    if path == nil then
-        failNonce(operation.nonce, "download", "protocol", "MotionBGS helper returned an unsafe download result")
-        return
-    end
-    status.last_download = {
-        path = path,
-        sidecar = path .. ".motionbgs.json",
-        slug = operation.slug,
-        title = operation.title,
-        quality = operation.quality,
-        bytes = transport.bytes,
-        source_url = BASE_URL .. "/" .. operation.slug,
-        download_url = transport.effective_url or "",
-        downloaded_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
-    }
-    completeNonce(operation.nonce, "download")
-end
-
-local function launchOperation(operation)
-    if
-        type(operation) ~= "table"
-        or operation.cancelled == true
-        or operation.generation ~= operationGeneration
-        or not providerAvailable()
-    then
-        return false
-    end
-    local command
-    local timeout = 30000
-    if operation.kind == "search" or operation.kind == "details" then
-        operation.response_path = responsePath(operation)
-        command = "exec bash "
-            .. shellQuote(helperPath)
-            .. " fetch-html "
-            .. shellQuote(operation.url)
-            .. " "
-            .. shellQuote(operation.response_path)
-    elseif operation.kind == "download" then
-        local directory, directoryError = prepareDownloadDirectory()
-        if directory == "" then
-            failNonce(
-                operation.nonce,
-                "download",
-                "configuration",
-                directoryError
-            )
-            return false
-        end
-        local info = noctalia.fileInfo(directory)
-        if type(info) ~= "table" or info.isDir ~= true then
-            failNonce(
-                operation.nonce,
-                "download",
-                "configuration",
-                "Configured MotionBGS download directory does not exist"
-            )
-            return false
-        end
-        operation.download_directory = directory
-        operation.download_limit_mb = configuredDownloadLimit()
-        command = "exec bash "
-            .. shellQuote(helperPath)
-            .. " download "
-            .. shellQuote(operation.id)
-            .. " "
-            .. shellQuote(operation.slug)
-            .. " "
-            .. shellQuote(operation.quality)
-            .. " "
-            .. shellQuote(directory)
-            .. " "
-            .. shellQuote(bounded(operation.title, 240))
-            .. " "
-            .. shellQuote(tostring(operation.download_limit_mb))
-            .. " "
-            .. shellQuote(tostring(DOWNLOAD_TIMEOUT_SECONDS))
-        timeout = 60000
-    else
-        failNonce(operation.nonce, operation.kind, "internal", "Unknown MotionBGS queue operation")
-        return false
-    end
-
-    networkBusy = true
-    activeOperation = operation
-    lastNetworkStartMs = noctalia.nowMs()
-    status.last_request_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-    publishStatus()
-
-    local accepted = noctalia.runAsync(command, function(result)
-        if operation.cancelled == true or operation.generation ~= operationGeneration or not providerAvailable() then
-            if operation.kind == "download" then
-                cleanupCancelledDownload(operation, result)
-            end
-            cleanupOperationResponse(operation)
-            finishNetworkOperation(operation)
-            return
-        end
-
-        local transport, kind, message = helperResult(result)
-        local deferred = false
-        if transport == nil then
-            if operation.response_path ~= nil and noctalia.fileExists(operation.response_path) then
-                noctalia.removeFile(operation.response_path)
-            end
-            failNonce(operation.nonce, operation.kind, kind, message)
-        elseif transport.effective_url == nil then
-            if operation.response_path ~= nil and noctalia.fileExists(operation.response_path) then
-                noctalia.removeFile(operation.response_path)
-            end
-            failNonce(operation.nonce, operation.kind, "protocol", "MotionBGS helper returned a cross-origin URL")
-        elseif
-            (operation.kind == "search" or operation.kind == "details")
-            and transport.path ~= operation.response_path
-        then
-            if operation.response_path ~= nil and noctalia.fileExists(operation.response_path) then
-                noctalia.removeFile(operation.response_path)
-            end
-            failNonce(operation.nonce, operation.kind, "protocol", "MotionBGS helper returned the wrong response path")
-        elseif operation.kind == "search" and not listingRouteMatches(operation.request, transport.effective_url) then
-            noctalia.removeFile(operation.response_path)
-            failNonce(operation.nonce, "search", "protocol", "MotionBGS redirected into a different catalog route")
-        elseif operation.kind == "search" then
-            deferred = beginSearchOperation(operation, transport)
-        elseif operation.kind == "details" then
-            performDetails(operation, transport)
-        else
-            performDownload(operation, transport)
-        end
-        if not deferred then
-            finishNetworkOperation(operation)
-        end
-    end, timeout)
-
-    if not accepted then
-        failNonce(operation.nonce, operation.kind, "launch", "Noctalia refused the MotionBGS helper process")
-        finishNetworkOperation(operation)
-        return false
-    end
-    return true
-end
-
-pumpQueue = function()
-    if not providerAvailable() then
-        invalidateOperations("MotionBGS integration became unavailable", false)
-        return
-    end
-    if networkBusy or #pendingOperations == 0 then
-        return
-    end
-    if noctalia.nowMs() - lastNetworkStartMs < REQUEST_DELAY_MS then
-        return
-    end
-    local operation = table.remove(pendingOperations, 1)
-    launchOperation(operation)
-end
-
-local function handleSearch(command, nonce)
-    local request, requestError = normalizedBrowseRequest(command)
-    if request == nil then
-        failNonce(nonce, "search", "invalid-browse", requestError)
-        return
-    end
-    local limit = math.floor(tonumber(command.limit) or configuredResultLimit())
-    limit = math.max(1, math.min(MAX_RESULTS, limit))
-    local cached = cache.searches[searchKey(request, limit)]
-    if command.force ~= true and type(cached) == "table" and fresh(cached.fetched_at) then
-        setVisibleSearch(cached, nonce, true)
-        completeNonce(nonce, "search")
-        return
-    end
-    local url = browseUrl(request)
-    local queued, enqueueError = enqueue({
-        kind = "search",
-        nonce = nonce,
-        request = request,
-        limit = limit,
-        url = url,
-    })
-    if not queued then
-        if enqueueError == "unavailable" then
-            failNonce(nonce, "search", "unavailable", "MotionBGS integration became unavailable")
-        else
-            failNonce(nonce, "search", "queue-full", "MotionBGS request queue is full")
-        end
-    end
-end
-
-local function handleDetails(command, nonce, afterDownload)
-    local slug = validSlug(command.slug)
-    if slug == nil then
-        failNonce(nonce, afterDownload and "download" or "details", "invalid-slug", "MotionBGS slug is invalid")
-        return
-    end
-    local detail = cache.details[slug]
-    local quality = tostring(command.quality or configuredQuality()):lower()
-    if quality ~= "hd" and quality ~= "4k" then
-        failNonce(nonce, afterDownload and "download" or "details", "invalid-quality", "Quality must be hd or 4k")
-        return
-    end
-    if command.force ~= true and type(detail) == "table" and fresh(detail.fetched_at) then
-        setVisibleDetail(detail, nonce, true)
-        if afterDownload then
-            enqueueDownload({ nonce = nonce, quality = quality }, detail)
-        else
-            completeNonce(nonce, "details")
-        end
-        return
-    end
-    local queued, enqueueError = enqueue({
-        kind = "details",
-        nonce = nonce,
-        slug = slug,
-        quality = quality,
-        after_download = afterDownload,
-        url = BASE_URL .. "/" .. slug,
-    })
-    if not queued then
-        local action = afterDownload and "download" or "details"
-        if enqueueError == "unavailable" then
-            failNonce(nonce, action, "unavailable", "MotionBGS integration became unavailable")
-        else
-            failNonce(nonce, action, "queue-full", "MotionBGS request queue is full")
-        end
     end
 end
 
@@ -1709,162 +1330,75 @@ local function handleCommand(command)
     local action = tostring(command.action or "")
     publishAck(nonce, "accepted", "")
     publishStatus()
-
-    if action == "clear" then
-        invalidateOperations("MotionBGS requests were cancelled by cache clear", true)
-        cache = { schema = CACHE_SCHEMA, searches = {}, search_order = {}, details = {}, detail_order = {} }
-        results.mode = "search"
-        results.query = ""
-        results.genre = ""
-        results.page = 1
-        results.source_url = BASE_URL
-        results.cached = false
-        results.fetched_at = 0
-        results.items = {}
-        results.meta = {
-            current_page = 1,
-            has_previous = false,
-            has_next = false,
-            pageable = false,
-            total_hint = 0,
-        }
-        results.selected = {}
-        local saved = saveCache()
-        publishResults()
-        if not saved then
-            failNonce(
-                nonce,
-                "clear",
-                "cache",
-                status.last_error ~= "" and status.last_error or "Could not persist the cleared MotionBGS cache"
-            )
-        else
-            completeNonce(nonce, "clear")
-        end
+    if action == "probe" then
+        invalidateOperations("MotionBGS requests were cancelled by a helper reprobe")
+        startProbe(true, nonce)
         return
     end
-
-    if not status.available then
-        failNonce(
-            nonce,
-            action,
-            "unavailable",
-            "MotionBGS integration is disabled or curl/helper storage is unavailable"
-        )
+    if not providerAvailable() then
+        failNonce(nonce, action, "unavailable", "MotionBGS integration requires a compatible external helper")
         return
     end
     if action == "search" then
-        handleSearch(command, nonce)
-    elseif action == "details" then
-        handleDetails(command, nonce, false)
-    elseif action == "download" then
-        handleDetails(command, nonce, true)
+        local request, requestError = normalizedBrowseRequest(command)
+        if request == nil then
+            failNonce(nonce, action, "invalid-browse", requestError)
+            return
+        end
+        queueOrFail({
+            kind = action,
+            nonce = nonce,
+            request = request,
+            limit = math.max(1, math.min(MAX_RESULTS, math.floor(tonumber(command.limit) or configuredResultLimit()))),
+            force = command.force == true,
+        })
+    elseif action == "details" or action == "download" then
+        local slug = validSlug(command.slug)
+        if slug == nil then
+            failNonce(nonce, action, "invalid-slug", "MotionBGS slug is invalid")
+            return
+        end
+        local quality = tostring(command.quality or configuredQuality()):lower()
+        if quality ~= "hd" and quality ~= "4k" then
+            failNonce(nonce, action, "invalid-quality", "Quality must be hd or 4k")
+            return
+        end
+        queueOrFail({
+            kind = action,
+            nonce = nonce,
+            slug = slug,
+            quality = quality,
+            force = command.force == true,
+        })
+    elseif action == "clear" then
+        queueOrFail({ kind = action, nonce = nonce })
     else
         failNonce(nonce, action, "unsupported-action", "Unsupported MotionBGS action: " .. bounded(action, 80))
-    end
-    pumpQueue()
-end
-
-local function initializeStorage()
-    local pluginDirectory = noctalia.pluginDir()
-    if validAbsolutePath(pluginDirectory) then
-        helperPath = pluginDirectory:gsub("/+$", "") .. "/scripts/motionbgs-provider"
-        status.helper_available = noctalia.fileExists(helperPath)
-    end
-    if
-        not configuredVideoRootExists()
-        or not settingBool("use_motionbgs", true)
-        or not status.curl_available
-        or not status.helper_available
-    then
-        return
-    end
-    local directory = noctalia.pluginDataDir()
-    if not validAbsolutePath(directory) then
-        return
-    end
-    dataDirectory = directory:gsub("/+$", "")
-    cacheDirectory = dataDirectory .. "/motionbgs"
-    local made = noctalia.mkdirAll(cacheDirectory)
-    if made ~= true then
-        cacheDirectory = ""
-        return
-    end
-    noctalia.removeFile(cacheDirectory .. "/cache-v1.json")
-    cachePath = cacheDirectory .. "/cache-v2.json"
-    loadCache()
-    -- This is deliberately separate from pluginDataDir()/motionbgs, which
-    -- stores only bounded HTML metadata. The explicit video root has already
-    -- been verified, so it is now safe to prepare the managed media child.
-    prepareDownloadDirectory()
-end
-
-function update()
-    if type(activeOperation) == "table" and type(activeOperation.search_parse) == "table" then
-        advanceSearchOperation(activeOperation)
-    else
-        pumpQueue()
     end
 end
 
 function onConfigChanged()
-    status.curl_available = noctalia.commandExists("curl")
-    status.helper_available = helperPath ~= "" and noctalia.fileExists(helperPath)
-    if configuredVideoRootExists() and settingBool("use_motionbgs", true) then
-        if cacheDirectory == "" then
-            initializeStorage()
-        else
-            prepareDownloadDirectory()
-        end
-    else
-        cacheDirectory = ""
-        cachePath = ""
-        dataDirectory = ""
-    end
-    if not providerAvailable() then
-        local invalidated = invalidateOperations("MotionBGS integration was disabled or became unavailable", false)
-        if not invalidated then
-            publishStatus()
-        end
-    else
-        publishStatus()
-        pumpQueue()
-    end
+    invalidateOperations("MotionBGS configuration changed")
+    initializeStorage()
+    startProbe(true)
 end
 
 function onExit(_signal, _reason)
-    -- No cleanup subprocess is needed. In-flight runAsync work is cancelled by
-    -- the service host, and the helper installs only complete atomic files.
-    operationGeneration += 1
-    setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
-    local cancellation = "MotionBGS service stopped before the request completed"
-    local hadOperations = #pendingOperations > 0
-        or (type(activeOperation) == "table" and activeOperation.cancelled ~= true)
-    cleanupOperationResponse(activeOperation)
-    acknowledgeCancellation(activeOperation, cancellation)
-    for _, operation in ipairs(pendingOperations) do
-        cleanupOperationResponse(operation)
-        acknowledgeCancellation(operation, cancellation)
-    end
-    pendingOperations = {}
-    networkBusy = false
-    activeOperation = nil
-    if hadOperations then
-        status.last_action = "cancel"
-        status.last_error_kind = "cancelled"
-        status.last_error = cancellation
-        status.site_changed = false
-    end
+    probeGeneration += 1
+    probeBusy = false
+    invalidateOperations("MotionBGS service stopped before the request completed")
     status.available = false
     status.busy = false
     status.active_action = ""
     status.queue_depth = 0
+    status.probe_state = "stopped"
+    status.availability_reason = "stopped"
     noctalia.state.set(STATUS_KEY, status)
 end
 
-setUpdateCadence(IDLE_UPDATE_INTERVAL_MS)
 initializeStorage()
-publishResults()
+resetResults(0)
 publishStatus()
 noctalia.state.watch(COMMAND_KEY, handleCommand)
 handleCommand(noctalia.state.get(COMMAND_KEY))
+startProbe(false)

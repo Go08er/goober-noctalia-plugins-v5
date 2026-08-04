@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Conservative transport helper for Wall-in-One's MotionBGS integration.
-#
-# This helper deliberately does not attempt to solve or evade anti-bot
-# challenges. It only issues serialized public HTTPS GETs selected by the Luau
-# service, follows at most three same-origin redirects itself, and writes every
-# successful response atomically.
+# Bounded launcher and protocol gate for the separately installed
+# wall-in-one-motionbgs program.  This script performs no provider network
+# work and parses no provider markup.  Its only jobs are to validate the
+# configured executable and transport paths, apply a file-size backstop, and
+# pass through one exact bounded probe or RPC completion record.
 
-readonly protocol='WIO-MBG1'
-readonly origin='https://motionbgs.com'
-readonly user_agent='Wall-in-One/0.6 (+https://github.com/Go08er/goober-noctalia-plugins-v5)'
-readonly html_limit=$((1024 * 1024))
-readonly html_timeout=20
-readonly max_redirects=3
+readonly probe_wire='WIO-MBGS-PROBE1'
+readonly rpc_wire='WIO-MBGS-RPC1'
+readonly legacy_self_test_wire='WIO-MBG1'
+readonly guard_wire='WIO-MBGS-GUARD1'
+readonly max_request_bytes=$((8 * 1024))
+readonly max_response_bytes=$((128 * 1024))
+readonly max_protocol_bytes=4096
+readonly max_rpc_file_kib=$((512 * 1024 + 128))
+
+stdout_file=''
+stderr_file=''
+child_pid=''
 
 clean_field() {
   local value=${1:-}
@@ -24,302 +29,325 @@ clean_field() {
 }
 
 emit_error() {
-  printf '%s\terror\t%s\t%s\n' "$protocol" "$(clean_field "${1:-unknown}")" "$(clean_field "${2:-request failed}")"
+  local wire=$1
+  local kind=$2
+  local detail=$3
+  printf '%s\terror\t%s\t%s\n' \
+    "$wire" "$(clean_field "$kind")" "$(clean_field "$detail")"
 }
 
-emit_ok() {
-  printf '%s\tok\t%s\t%s\t%s\t%s\t%s\n' \
-    "$protocol" "$(clean_field "$1")" "$(clean_field "$2")" \
-    "$(clean_field "$3")" "$(clean_field "$4")" "$(clean_field "$5")"
+cleanup() {
+  [[ -z $stdout_file ]] || rm -f -- "$stdout_file"
+  [[ -z $stderr_file ]] || rm -f -- "$stderr_file"
+  stdout_file=''
+  stderr_file=''
 }
 
-die() {
-  emit_error "$1" "$2"
-  exit "${3:-1}"
+cancelled() {
+  if [[ -n $child_pid ]]; then
+    kill -TERM -- "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+  fi
+  child_pid=''
+  cleanup
+  exit 143
 }
+
+trap cleanup EXIT
+trap cancelled HUP INT TERM
 
 has_controls() {
-  [[ ${1:-} == *$'\t'* || ${1:-} == *$'\r'* || ${1:-} == *$'\n'* ]]
+  [[ ${1:-} == *[[:cntrl:]]* ]]
 }
 
 valid_absolute_path() {
-  [[ ${1:-} == /* ]] && ! has_controls "$1"
+  local value=${1:-}
+  [[ $value == /* && $value != / && ${#value} -le 4096 ]] || return 1
+  has_controls "$value" && return 1
+  [[ $value != *\\* && $value != *'//'*
+    && $value != *'/./'* && $value != */.
+    && $value != *'/../'* && $value != */.. ]]
 }
 
-normalize_url() {
-  local candidate=${1:-}
-  has_controls "$candidate" && return 1
-  [[ $candidate != *\\* && $candidate != *'#'* ]] || return 1
+owned_regular_file() {
+  local path=$1
+  local minimum=$2
+  local maximum=$3
+  local owner size
+  [[ -f $path && ! -L $path ]] || return 1
+  owner=$(stat -c '%u' -- "$path" 2>/dev/null) || return 1
+  size=$(stat -c '%s' -- "$path" 2>/dev/null) || return 1
+  [[ $owner == "$(id -u)" && $size =~ ^[0-9]+$ ]] || return 1
+  (( size >= minimum && size <= maximum ))
+}
 
-  if [[ $candidate == /* && $candidate != //* ]]; then
-    candidate="$origin$candidate"
+owned_writable_directory() {
+  local path=$1
+  local owner
+  [[ -d $path && ! -L $path && -w $path && -x $path ]] || return 1
+  owner=$(stat -c '%u' -- "$path" 2>/dev/null) || return 1
+  [[ $owner == "$(id -u)" ]]
+}
+
+guard_ready() {
+  local path=$1
+  local bytes lines value
+  owned_regular_file "$path" $(( ${#guard_wire} + 1 )) $(( ${#guard_wire} + 1 )) || return 1
+  bytes=$(stat -c '%s' -- "$path" 2>/dev/null) || return 1
+  [[ $bytes == $(( ${#guard_wire} + 1 )) ]] || return 1
+  lines=$(wc -l <"$path") || return 1
+  (( lines == 1 )) || return 1
+  IFS= read -r value <"$path" || return 1
+  [[ $value == "$guard_wire" ]]
+}
+
+resolve_binary() {
+  local configured=$1
+  local candidate=''
+  has_controls "$configured" && return 1
+  if [[ $configured == /* ]]; then
+    valid_absolute_path "$configured" || return 1
+    candidate=$configured
+  elif [[ $configured == wall-in-one-motionbgs ]]; then
+    candidate=$(command -v wall-in-one-motionbgs 2>/dev/null) || return 1
+    [[ $candidate == /* ]] || return 1
+    valid_absolute_path "$candidate" || return 1
+  else
+    return 1
   fi
-  [[ $candidate == "$origin" || $candidate == "$origin/"* ]] || return 1
-
-  local path=${candidate#"$origin"}
-  [[ -z $path || $path == /* ]] || return 1
-  [[ $path != *'/../'* && $path != '/..' && $path != *'/..' ]] || return 1
+  [[ -f $candidate && -x $candidate ]] || return 1
   printf '%s' "$candidate"
 }
 
-header_value() {
-  local header_file=$1
-  local wanted=${2,,}
-  local line key value found=''
-  while IFS= read -r line || [[ -n $line ]]; do
-    line=${line%$'\r'}
-    [[ $line == *:* ]] || continue
-    key=${line%%:*}
-    if [[ ${key,,} == "$wanted" ]]; then
-      value=${line#*:}
-      value=${value#"${value%%[![:space:]]*}"}
-      found=$value
+allocate_transport_files() {
+  local directory=$1
+  stdout_file=$(mktemp -- "$directory/.wall-in-one-motionbgs-stdout.XXXXXX") || return 1
+  stderr_file=$(mktemp -- "$directory/.wall-in-one-motionbgs-stderr.XXXXXX") || {
+    rm -f -- "$stdout_file"
+    stdout_file=''
+    return 1
+  }
+  chmod 0600 -- "$stdout_file" "$stderr_file" || return 1
+}
+
+run_bounded() {
+  local file_limit_kib=$1
+  shift
+  (
+    umask 077
+    ulimit -f "$file_limit_kib" 2>/dev/null || exit 70
+    exec env -u PYTHONHOME -u PYTHONPATH \
+      PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
+      "$@"
+  ) >"$stdout_file" 2>"$stderr_file" &
+  child_pid=$!
+  local result=0
+  wait "$child_pid" || result=$?
+  child_pid=''
+  return "$result"
+}
+
+protocol_line() {
+  local bytes lines
+  bytes=$(stat -c '%s' -- "$stdout_file" 2>/dev/null) || return 1
+  [[ $bytes =~ ^[0-9]+$ ]] || return 1
+  (( bytes >= 2 && bytes <= max_protocol_bytes )) || return 1
+  lines=$(wc -l <"$stdout_file") || return 1
+  (( lines == 1 )) || return 1
+  IFS= read -r protocol_value <"$stdout_file" || return 1
+  [[ -n $protocol_value ]] || return 1
+  printf '%s' "$protocol_value"
+}
+
+bounded_failure_detail() {
+  local detail=''
+  if [[ -n $stderr_file && -f $stderr_file ]]; then
+    detail=$(LC_ALL=C head -c 600 -- "$stderr_file" 2>/dev/null || true)
+  fi
+  if [[ -z $detail && -n $stdout_file && -f $stdout_file ]]; then
+    detail=$(LC_ALL=C head -c 600 -- "$stdout_file" 2>/dev/null || true)
+  fi
+  clean_field "${detail:-external MotionBGS program returned no valid protocol record}"
+}
+
+valid_error_line() {
+  local expected_wire=$1
+  local line=$2
+  local wire outcome kind detail extra
+  IFS=$'\t' read -r wire outcome kind detail extra <<<"$line"
+  [[ $wire == "$expected_wire" && $outcome == error && -n $kind && -n $detail && -z ${extra:-} ]]
+}
+
+probe_binary() {
+  local configured=$1
+  local binary
+  binary=$(resolve_binary "$configured") || {
+    emit_error "$probe_wire" missing-binary 'configured MotionBGS program is absent or not executable'
+    return 127
+  }
+  allocate_transport_files /tmp || {
+    emit_error "$probe_wire" local-io 'could not allocate bounded probe transport files'
+    return 73
+  }
+  local result=0 line=''
+  run_bounded 8 "$binary" probe --protocol 1 || result=$?
+  line=$(protocol_line 2>/dev/null || true)
+  if (( result != 0 )); then
+    if valid_error_line "$probe_wire" "$line"; then
+      printf '%s\n' "$line"
+    else
+      emit_error "$probe_wire" probe-failed "$(bounded_failure_detail)"
     fi
-  done <"$header_file"
-  printf '%s' "$found"
+    return "$result"
+  fi
+  local wire outcome schema version capabilities extra
+  IFS=$'\t' read -r wire outcome schema version capabilities extra <<<"$line"
+  if [[ $wire != "$probe_wire" || $outcome != ok || $schema != 1
+    || ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9._-]+)?$
+    || $capabilities != 'search,details,download,clear' || -n ${extra:-} ]]; then
+    emit_error "$probe_wire" incompatible 'external program returned an incompatible capability probe'
+    return 70
+  fi
+  printf '%s\n' "$line"
 }
 
-atomic_fetch() {
-  local purpose=$1
-  local start_url=$2
-  local output=$3
-  local max_bytes=$4
-  local max_seconds=$5
-  local expected_type=$6
-
-  command -v curl >/dev/null 2>&1 || die missing-curl 'curl is required for MotionBGS integration' 127
-
-  valid_absolute_path "$output" || die invalid-path 'destination must be an absolute path without controls' 64
-  local output_dir=${output%/*}
-  [[ -d $output_dir ]] || die invalid-path 'destination parent directory does not exist' 72
-
-  local url
-  url=$(normalize_url "$start_url") || die invalid-url 'only same-origin MotionBGS HTTPS URLs are accepted' 64
-
-  umask 077
-  local body header
-  body=$(mktemp -- "$output_dir/.motionbgs-body.XXXXXX") || die local-io 'could not allocate response file' 73
-  header=$(mktemp -- "$output_dir/.motionbgs-header.XXXXXX") || {
-    rm -f -- "$body"
-    die local-io 'could not allocate header file' 73
-  }
-  trap 'rm -f -- "$body" "$header"' EXIT HUP INT TERM
-
-  local redirect=0
-  local deadline=$((SECONDS + max_seconds))
-  local status curl_rc location content_type bytes remaining
-  while :; do
-    : >"$body"
-    : >"$header"
-    remaining=$((deadline - SECONDS))
-    (( remaining > 0 )) || die timeout "request exceeded its ${max_seconds}s total deadline" 69
-
-    # CURLOPT_MAXFILESIZE alone cannot stop a chunked response after it has
-    # crossed the limit. RLIMIT_FSIZE supplies the hard local bound as well.
-    status=$(
-      (
-        ulimit -f "$(((max_bytes + 1023) / 1024))" 2>/dev/null || exit 70
-        exec curl --disable \
-          --silent --show-error \
-          --request GET \
-          --connect-timeout 10 \
-          --max-time "$remaining" \
-          --max-filesize "$max_bytes" \
-          --speed-limit 1024 \
-          --speed-time 15 \
-          --proto '=https' \
-          --header 'Accept-Language: en-US,en;q=0.8' \
-          --header "Accept: $expected_type" \
-          --user-agent "$user_agent" \
-          --dump-header "$header" \
-          --output "$body" \
-          --write-out '%{http_code}' \
-          --url "$url"
-      )
-    )
-    curl_rc=$?
-    if (( curl_rc != 0 )); then
-      die transport "curl failed for $purpose (code $curl_rc)" 69
+discard_invalid_response() {
+  local response=$1
+  if [[ -f $response && ! -L $response ]]; then
+    local owner
+    owner=$(stat -c '%u' -- "$response" 2>/dev/null || true)
+    if [[ $owner == "$(id -u)" ]]; then
+      rm -f -- "$response"
     fi
-
-    case $status in
-      301|302|303|307|308)
-        (( redirect < max_redirects )) || die redirects 'too many redirects' 69
-        location=$(header_value "$header" location)
-        [[ -n $location ]] || die redirects 'redirect did not include a location' 69
-        url=$(normalize_url "$location") || die redirects 'redirect left motionbgs.com or used an unsafe URL' 69
-        ((redirect += 1))
-        ;;
-      2??)
-        break
-        ;;
-      403|429)
-        die challenge "MotionBGS refused the public request (HTTP $status); no bypass was attempted" 77
-        ;;
-      *)
-        die http "MotionBGS returned HTTP $status" 69
-        ;;
-    esac
-  done
-
-  content_type=$(header_value "$header" content-type)
-  content_type=${content_type%%;*}
-  content_type=${content_type,,}
-  if [[ $purpose == html ]]; then
-    [[ $content_type == text/html || $content_type == application/xhtml+xml ]] \
-      || die content-type "expected HTML but received ${content_type:-unknown}" 65
-  else
-    [[ $content_type == video/mp4 || $content_type == application/octet-stream ]] \
-      || die content-type "expected an MP4 response but received ${content_type:-unknown}" 65
-    LC_ALL=C grep -aq 'ftyp' < <(head -c 64 -- "$body") \
-      || die content-type 'download response did not contain an MP4 file signature' 65
   fi
-
-  bytes=$(stat -c '%s' -- "$body" 2>/dev/null) || die local-io 'could not inspect response file' 74
-  [[ $bytes =~ ^[0-9]+$ ]] || die local-io 'response size is invalid' 74
-  (( bytes > 0 && bytes <= max_bytes )) || die size-limit 'response was empty or exceeded its configured size limit' 65
-
-  mv -f -- "$body" "$output" || die local-io 'could not install response atomically' 74
-  trap - EXIT HUP INT TERM
-  rm -f -- "$header"
-  emit_ok "$status" "$url" "$content_type" "$bytes" "$output"
 }
 
-json_escape() {
-  local value=${1:-}
-  value=${value//\\/\\\\}
-  value=${value//\"/\\\"}
-  value=${value//$'\b'/\\b}
-  value=${value//$'\f'/\\f}
-  value=${value//$'\n'/\\n}
-  value=${value//$'\r'/\\r}
-  value=${value//$'\t'/\\t}
-  printf '%s' "$value"
-}
-
-safe_slug() {
-  [[ ${1:-} =~ ^[a-z0-9][a-z0-9-]{0,119}$ ]]
-}
-
-download_video() {
-  local id=$1
-  local slug=$2
-  local quality=$3
-  local directory=$4
-  local title=$5
-  local max_mib=$6
-  local max_seconds=$7
-
-  [[ $id =~ ^[0-9]{1,12}$ ]] || die invalid-id 'wallpaper id must be numeric' 64
-  safe_slug "$slug" || die invalid-slug 'wallpaper slug is invalid' 64
-  [[ $quality == hd || $quality == 4k ]] || die invalid-quality 'quality must be hd or 4k' 64
-  valid_absolute_path "$directory" || die invalid-path 'download directory must be absolute and contain no controls' 64
-  [[ -d $directory && -w $directory ]] || die invalid-path 'download directory must already exist and be writable' 72
-  [[ $max_mib =~ ^[0-9]+$ ]] || die invalid-limit 'download size limit is invalid' 64
-  (( max_mib >= 16 && max_mib <= 512 )) || die invalid-limit 'download size limit must be 16-512 MiB' 64
-  [[ $max_seconds =~ ^[0-9]+$ ]] || die invalid-timeout 'download timeout is invalid' 64
-  (( max_seconds >= 10 && max_seconds <= 50 )) || die invalid-timeout 'download timeout must be 10-50 seconds' 64
-  has_controls "$title" && die invalid-title 'title contains control characters' 64
-  title=${title:0:240}
-
-  local filename="$slug.$quality.mp4"
-  local final="$directory/$filename"
-  local suffix=1
-  while [[ -e $final || -e "$final.motionbgs.json" ]]; do
-    final="$directory/$slug.$quality-$suffix.mp4"
-    ((suffix += 1))
-    (( suffix <= 9999 )) || die local-io 'could not allocate a unique output filename' 73
-  done
-
-  local max_bytes=$((max_mib * 1024 * 1024))
-  local endpoint="$origin/dl/$quality/$id/"
-  local transfer
-  transfer=$(atomic_fetch video "$endpoint" "$final" "$max_bytes" "$max_seconds" 'video/mp4,application/octet-stream;q=0.8')
-  local fetch_rc=$?
-  if (( fetch_rc != 0 )); then
-    printf '%s\n' "$transfer"
-    exit "$fetch_rc"
-  fi
-  local sidecar_tmp=''
-  # From this point until the sidecar is atomically installed, any ordinary
-  # exit or signal rolls the completed video back so callers never observe a
-  # successful helper result without its provenance record.
-  trap 'rm -f -- "${sidecar_tmp:-}" "$final"' EXIT HUP INT TERM
-
-  local _protocol outcome status effective_url content_type bytes installed
-  IFS=$'\t' read -r _protocol outcome status effective_url content_type bytes installed <<<"$transfer"
-  if [[ $_protocol != "$protocol" || $outcome != ok || $installed != "$final" ]]; then
-    rm -f -- "$final"
-    die protocol 'internal transfer result was malformed' 70
-  fi
-
-  local source_page="$origin/$slug"
-  local timestamp hash=''
-  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  if command -v sha256sum >/dev/null 2>&1; then
-    hash=$(sha256sum -- "$final" | awk '{print $1}')
-  fi
-
-  local sidecar="$final.motionbgs.json"
-  sidecar_tmp=$(mktemp -- "$directory/.motionbgs-metadata.XXXXXX") || {
-    rm -f -- "$final"
-    die local-io 'could not allocate metadata sidecar' 73
+rpc_binary() {
+  local configured=$1
+  local request=$2
+  local response=$3
+  local guard=$4
+  local binary response_directory
+  binary=$(resolve_binary "$configured") || {
+    emit_error "$rpc_wire" missing-binary 'configured MotionBGS program is absent or not executable'
+    return 127
   }
-  if ! (
-    set -e
-    printf '{\n'
-    printf '  "schema": 1,\n'
-    printf '  "plugin": "goober/wall-in-one",\n'
-    printf '  "provider": "MotionBGS",\n'
-    printf '  "path": "%s",\n' "$(json_escape "$final")"
-    printf '  "title": "%s",\n' "$(json_escape "$title")"
-    printf '  "source_page": "%s",\n' "$(json_escape "$source_page")"
-    printf '  "download_url": "%s",\n' "$(json_escape "$effective_url")"
-    printf '  "quality": "%s",\n' "$quality"
-    printf '  "content_type": "%s",\n' "$(json_escape "$content_type")"
-    printf '  "bytes": %s,\n' "$bytes"
-    printf '  "sha256": "%s",\n' "$hash"
-    printf '  "downloaded_at": "%s"\n' "$timestamp"
-    printf '}\n'
-  ) >"$sidecar_tmp"; then
-    rm -f -- "$sidecar_tmp" "$final"
-    die local-io 'could not write metadata sidecar' 74
+  if ! valid_absolute_path "$request" || ! owned_regular_file "$request" 1 "$max_request_bytes"; then
+    emit_error "$rpc_wire" invalid-request 'request must be a current-user regular file of at most 8 KiB'
+    return 64
   fi
-  mv -f -- "$sidecar_tmp" "$sidecar" || {
-    rm -f -- "$final"
-    die local-io 'could not install metadata sidecar atomically' 74
+  if ! valid_absolute_path "$response"; then
+    emit_error "$rpc_wire" invalid-path 'response path must be a safe absolute path'
+    return 64
+  fi
+  response_directory=${response%/*}
+  if ! owned_writable_directory "$response_directory"; then
+    emit_error "$rpc_wire" invalid-path 'response parent must be a current-user writable directory'
+    return 72
+  fi
+  if [[ -e $response || -L $response ]]; then
+    emit_error "$rpc_wire" conflict 'response path already exists'
+    return 73
+  fi
+  if ! valid_absolute_path "$guard" \
+    || [[ ${guard%/*} != "$response_directory" ]] \
+    || [[ ! ${guard##*/} =~ ^\.wall-in-one-motionbgs-guard-[A-Za-z0-9._-]{1,160}$ ]] \
+    || ! guard_ready "$guard"; then
+    emit_error "$rpc_wire" cancelled 'RPC cancellation guard is absent or invalid'
+    return 75
+  fi
+  allocate_transport_files "$response_directory" || {
+    emit_error "$rpc_wire" local-io 'could not allocate bounded RPC transport files'
+    return 73
   }
-  trap - EXIT HUP INT TERM
 
-  emit_ok "$status" "$effective_url" "$content_type" "$bytes" "$final"
+  local result=0 line=''
+  run_bounded "$max_rpc_file_kib" \
+    "$binary" rpc --protocol 1 --request "$request" --response "$response" --guard "$guard" || result=$?
+  line=$(protocol_line 2>/dev/null || true)
+  if (( result != 0 )); then
+    discard_invalid_response "$response"
+    if valid_error_line "$rpc_wire" "$line"; then
+      printf '%s\n' "$line"
+    else
+      emit_error "$rpc_wire" launch-failed "$(bounded_failure_detail)"
+    fi
+    return "$result"
+  fi
+
+  if ! guard_ready "$guard"; then
+    discard_invalid_response "$response"
+    emit_error "$rpc_wire" cancelled 'RPC cancellation guard was removed before completion'
+    return 75
+  fi
+
+  local wire outcome request_id installed reported_bytes extra actual_bytes
+  IFS=$'\t' read -r wire outcome request_id installed reported_bytes extra <<<"$line"
+  if [[ $wire != "$rpc_wire" || $outcome != ok
+    || ! $request_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$
+    || $installed != "$response" || ! $reported_bytes =~ ^[0-9]+$
+    || -n ${extra:-} ]]; then
+    discard_invalid_response "$response"
+    emit_error "$rpc_wire" protocol 'external program returned a malformed RPC completion record'
+    return 70
+  fi
+  if ! owned_regular_file "$response" 2 "$max_response_bytes"; then
+    discard_invalid_response "$response"
+    emit_error "$rpc_wire" protocol 'external program did not install a bounded regular response'
+    return 70
+  fi
+  actual_bytes=$(stat -c '%s' -- "$response" 2>/dev/null || printf 0)
+  if [[ $actual_bytes != "$reported_bytes" ]]; then
+    discard_invalid_response "$response"
+    emit_error "$rpc_wire" protocol 'RPC response size did not match its completion record'
+    return 70
+  fi
+  if [[ $(LC_ALL=C head -c 1 -- "$response" 2>/dev/null) != '{' ]]; then
+    discard_invalid_response "$response"
+    emit_error "$rpc_wire" protocol 'RPC response did not contain a JSON object'
+    return 70
+  fi
+  printf '%s\n' "$line"
 }
 
 self_test() {
-  local good
-  good=$(normalize_url '/search?q=space') || die self-test 'relative URL normalization failed' 70
-  [[ $good == "$origin/search?q=space" ]] || die self-test 'relative URL normalized incorrectly' 70
-  normalize_url 'https://example.com/file.mp4' >/dev/null 2>&1 && die self-test 'cross-origin URL was accepted' 70
-  normalize_url '//evil.example/file' >/dev/null 2>&1 && die self-test 'scheme-relative URL was accepted' 70
-  normalize_url '/media/../secret' >/dev/null 2>&1 && die self-test 'parent path was accepted' 70
-  safe_slug 'night-city-4k' || die self-test 'valid slug was rejected' 70
-  safe_slug '../night-city' && die self-test 'invalid slug was accepted' 70
-  printf '%s\tok\tself-test\n' "$protocol"
+  valid_absolute_path '/tmp/wall-in-one-motionbgs/request-1.json' || return 1
+  ! valid_absolute_path '/tmp/wall-in-one-motionbgs/../escape' || return 1
+  ! valid_absolute_path $'/tmp/wall-in-one-motionbgs/bad\npath' || return 1
+  resolve_binary '/definitely/missing/wall-in-one-motionbgs' >/dev/null 2>&1 && return 1
+  valid_error_line "$rpc_wire" $'WIO-MBGS-RPC1\terror\tfixture\tbounded failure' || return 1
+  ! valid_error_line "$rpc_wire" $'WIO-MBGS-PROBE1\terror\tfixture\twrong wire' || return 1
+  [[ $(( ${#guard_wire} + 1 )) == 16 ]] || return 1
+  printf '%s\tok\tself-test\n' "$legacy_self_test_wire"
 }
 
 case ${1:-} in
-  fetch-html)
-    (( $# == 3 )) || die usage 'fetch-html expects URL and output path' 64
-    atomic_fetch html "$2" "$3" "$html_limit" "$html_timeout" 'text/html,application/xhtml+xml;q=0.9'
+  probe)
+    (( $# == 2 )) || {
+      emit_error "$probe_wire" usage 'probe expects BINARY'
+      exit 64
+    }
+    probe_binary "$2"
     ;;
-  download)
-    (( $# == 8 )) || die usage 'download expects id, slug, quality, directory, title, max MiB, and timeout' 64
-    download_video "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+  rpc)
+    (( $# == 5 )) || {
+      emit_error "$rpc_wire" usage 'rpc expects BINARY REQUEST RESPONSE GUARD'
+      exit 64
+    }
+    rpc_binary "$2" "$3" "$4" "$5"
     ;;
   self-test)
-    (( $# == 1 )) || die usage 'self-test accepts no arguments' 64
-    self_test
+    (( $# == 1 )) || {
+      emit_error "$rpc_wire" usage 'self-test accepts no arguments'
+      exit 64
+    }
+    self_test || {
+      emit_error "$rpc_wire" self-test 'motionbgs-provider launcher self-test failed'
+      exit 1
+    }
     ;;
   *)
-    die usage 'expected fetch-html, download, or self-test' 64
+    emit_error "$rpc_wire" usage 'expected probe BINARY, rpc BINARY REQUEST RESPONSE GUARD, or self-test'
+    exit 64
     ;;
 esac
