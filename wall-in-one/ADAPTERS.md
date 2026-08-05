@@ -40,19 +40,29 @@ step. Customization is optional. Apply, playlist add, drag/drop, and customize
 all pass through the same validated bundle boundary.
 
 The customization editor replaces its ordinary raw still-path field with a
-fixed six-item page over indexed user-owned and Wallhaven stills. Only the
-selected page is materialized; an explicit manual-path escape hatch remains for
-media outside the index. Opening an automatic video/Workshop customization
-queues representative preparation through the coordinator rather than doing
-capture or palette extraction in a panel callback.
+fixed six-card page over indexed user-owned and Wallhaven stills. Only the
+selected page is materialized; a collapsed manual-path escape hatch remains for
+a representative still outside the index. Opening an automatic video/Workshop
+customization queues representative preparation through the coordinator rather
+than doing capture or palette extraction in a panel callback.
+
+The playlist-occurrence editor is library-first too. Its still, video, and
+Workshop source tabs each materialize one six-card page from the indexed
+library, so changing an occurrence never requires an absolute media path or a
+typed Workshop ID. Dynamic entries reuse the same representative-still picker
+and collapsed manual representative-path escape hatch. Rebinding keeps the
+occurrence ID, list position, and insertion timestamp. Representative-still and
+palette changes are saved as the selected medium's shared item-profile defaults
+and therefore refresh every occurrence linked to that medium; they are not a
+private per-occurrence override.
 
 Shop routes render fixed 12-card local pages even when a provider returns 36–48
 items. Preview identity validation is memoized for the current result generation
 and one bounded `preview.sync` request advances from the normal update path;
-frames handle only bounded drag work and never construct a complete panel tree.
-Result cards own their direct
-download/quality controls and expose installed, queued, and active state; no
-duplicated selected-item hero is rendered above the grid.
+frame callbacks advance only bounded drag, still-choice, Workshop-index, and
+palette-index reconciliation, and never construct a complete panel tree. Result
+cards own their direct download/quality controls and expose installed, queued,
+and active state; no duplicated selected-item hero is rendered above the grid.
 
 ## Coordinator and persisted state
 
@@ -89,14 +99,24 @@ profile ID with freshly derived defaults and `customized = false`, then
 synchronizes every linked occurrence. All profiles are keyed by the static path
 or dynamic medium/source identity, so customization and default changes update
 one record instead of accumulating hidden duplicates. The source is display-only
-in the editor: filesystem and Steam inventory own library identity.
+in the item-profile customization editor: filesystem and Steam inventory own
+library identity. The separate playlist-occurrence editor may rebind its one
+occurrence through the graphical library picker described above.
 
 A playlist occurrence has its own stable entry ID, a validated bundle snapshot,
 and an optional `pairing_id` link. Linked edits and resets refresh those
-snapshots. There is no public pairing-delete command. If a source disappears
-from the authoritative index, the panel stops presenting an orphan Library card
-while existing playlist snapshots remain visible as missing until removed or
+snapshots. `playlist_replace_entry` rebinds one occurrence while preserving its
+ID, position, and insertion timestamp, then resolves the selected medium's
+shared profile instead of rewriting the old profile under a new identity. There
+is no public pairing-delete command. If a source disappears from the
+authoritative index, the panel stops presenting an orphan Library card while
+existing playlist snapshots remain visible as missing until removed or
 restored.
+
+The shared-state watcher only projects `playlist_replace_entry` into a fixed
+primitive-only queue. Full configuration normalization and persistence run one
+request at a time from the ordinary coordinator update callback, so an editor
+save cannot spend the state callback's tighter CPU budget walking the project.
 
 Each display stores a pinned default playlist, ordered schedule rules, optional
 playlist playback overrides, and its own engine configuration. Playlist cards

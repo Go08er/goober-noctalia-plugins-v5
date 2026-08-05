@@ -63,9 +63,13 @@ The main workflows are:
    calendar overrides, and its owned mpvpaper and `linux-wallpaperengine`
    settings. Editing one display does not rewrite another.
 4. Add or drag cards from the playlist's visual pairing library into its
-   ordered list, then drag existing rows to reorder them. A media file or scene
-   is the pairing: its still and palette are edited only on its Library card.
-   Duplicate or remove the source itself to add or remove library identities.
+   ordered list, then drag existing rows to reorder them. **Edit** on an
+   occurrence opens a six-card, paged image/video/Workshop picker instead of a
+   raw source-path form. Choosing a different indexed item rebinds only that
+   playlist position and preserves its stable ID, position, and insertion time.
+   Its representative still and palette remain the selected media item's shared
+   defaults everywhere that item is used. Duplicate or remove the source itself
+   to add or remove library identities.
 5. On a display page, drag a playlist onto row 1 to make it the unscheduled
    default, or between later rows to configure a scheduled override. Month,
    weekday, and local-time rules are evaluated in visible order, with the
@@ -85,7 +89,9 @@ metadata, the provider-site action, and download controls usable. Search
 responses are locally paged in fixed 12-card views; preview validation is
 memoized per result generation, and one bounded backend synchronization is
 advanced from the normal update path. Complete panel trees are never rebuilt
-from a frame callback.
+from a frame callback. Large still, Workshop, palette, and shared-profile
+indexes are reconciled in fixed batches and atomically swapped; editing one
+playlist occurrence hides the unrelated add drawer and other playlist rows.
 
 The panel requests a roomy 1160 × 780 floating surface. Fixed dimensions keep
 the hub usable if an older saved Noctalia placement override survives an
@@ -140,13 +146,14 @@ and its image signature, optionally decodes it with FFmpeg, then installs it
 atomically. Cancelled or superseded work cannot promote a still or start delayed
 playback.
 
-Opening a video or Workshop item's customization eagerly requests its automatic
-representative through the coordinator's bounded capture queue. The editor
-shows pending, preparing, and ready states, and the generated still is cached by
-the medium/source identity before the wallpaper-derived palette preview runs.
-Choosing a specific representative uses a paged picker over indexed user-owned
-and Wallhaven stills; a manual absolute-path field remains an explicit escape
-hatch. Preparing a still does not apply a wallpaper, palette, or renderer.
+Opening a video or Workshop item's customization—either from its Library card
+or a playlist occurrence—eagerly requests its automatic representative through
+the coordinator's bounded capture queue. The editor shows pending, preparing,
+and ready states, and the generated still is cached by the medium/source identity
+before the wallpaper-derived palette preview runs. Choosing a specific
+representative uses a paged picker over indexed user-owned and Wallhaven stills;
+a collapsed manual absolute-path field remains an explicit escape hatch.
+Preparing a still does not apply a wallpaper, palette, or renderer.
 
 The representative remains Noctalia's real wallpaper for lock-screen fallback,
 wallpaper hooks, overview/backdrop consumers, and wallpaper-derived colors while
@@ -180,6 +187,9 @@ external palette inventory, provider-preview cache maintenance, Wallhaven
 transport/response shaping/downloads, and the already-extracted MotionBGS
 provider work into one executable. Schedule resolution, configuration
 normalization, managed-delete transactions, and host API calls stay in Luau.
+The graphical entry editor's state callback performs only a fixed scalar
+projection; full normalization and persistence are serialized on later service
+updates through a bounded queue.
 
 Install the one-shot Python 3.11+ executable from this repository's top-level
 [`wall-in-one-backend/`](../wall-in-one-backend/) directory as
@@ -383,6 +393,10 @@ small time-sensitive computation, while configuration normalization and managed
 deletion are coupled to coordinated persistence/commit checks; spawning a
 one-shot process there would add serialization or race cost without removing a
 measured callback hotspot. Those boundaries therefore stay in Luau in 0.8.
+A later reduction would have to move the complete configuration mutation
+transaction—revision check, normalization, persistence plan, and commit result—
+as one asynchronous protocol. Extracting individual validators while retaining
+their synchronous callers would only duplicate logic or reorder failures.
 
 ## Stored state and upgrades
 

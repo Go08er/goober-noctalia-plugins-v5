@@ -777,6 +777,9 @@ let
     local vmPlaylistId = ""
     local vmPairingPlaylistId = ""
     local vmDefaultPlaylistId = ""
+    local vmReplacementEntryId = ""
+    local vmReplacementAddedAt = ""
+    local vmReplacementOldPairingId = ""
     local vmAdaptivePairingId = ""
     local vmVideoPairingId = ""
     local vmScheduleUpperPlaylistId = ""
@@ -1350,6 +1353,64 @@ let
                     added_at = "2026-08-02 00:00:00",
                 },
             })
+        elseif event == "vm-playlist-entry-replace" then
+            local playlist = config.playlists[vmPairingPlaylistId]
+            local previous = type(playlist) == "table" and playlist.entries[1] or nil
+            if type(previous) == "table" then
+                vmReplacementEntryId = tostring(previous.id or "")
+                vmReplacementAddedAt = tostring(previous.added_at or "")
+                vmReplacementOldPairingId = tostring(previous.pairing_id or "")
+                vmHandle({
+                    kind = "playlist_replace_entry",
+                    playlist_id = vmPairingPlaylistId,
+                    entry_id = vmReplacementEntryId,
+                    entry = {
+                        id = vmReplacementEntryId,
+                        label = "VM graphical Workshop replacement",
+                        media = { kind = "workshop", source = "431960001" },
+                        still = { mode = "selected", path = "${fixtureWorkshopStill}" },
+                        theme = { mode = "dark", source = "builtin", selection = "Nord" },
+                        added_at = "must-not-replace-the-occurrence-timestamp",
+                    },
+                })
+            end
+        elseif event == "vm-playlist-entry-replace-probe" then
+            local playlist = config.playlists[vmPairingPlaylistId]
+            local current = type(playlist) == "table" and playlist.entries[1] or nil
+            local currentPairing = type(current) == "table"
+                    and config.pairings[tostring(current.pairing_id or "")]
+                or nil
+            local oldPairing = config.pairings[vmReplacementOldPairingId]
+            noctalia.log(
+                "WALL_IN_ONE_VM_ENTRY_REPLACE "
+                    .. tostring(payload or "")
+                    .. " preserved_id=" .. tostring(
+                        type(current) == "table" and current.id == vmReplacementEntryId
+                    )
+                    .. " preserved_time=" .. tostring(
+                        type(current) == "table" and current.added_at == vmReplacementAddedAt
+                    )
+                    .. " rebound=" .. tostring(
+                        type(current) == "table"
+                            and tostring(current.pairing_id or "") ~= ""
+                            and tostring(current.pairing_id or "") ~= vmReplacementOldPairingId
+                    )
+                    .. " workshop=" .. tostring(
+                        type(current) == "table"
+                            and type(current.media) == "table"
+                            and current.media.kind == "workshop"
+                            and current.media.source == "431960001"
+                    )
+                    .. " customized=" .. tostring(
+                        type(currentPairing) == "table" and currentPairing.customized == true
+                    )
+                    .. " old_intact=" .. tostring(
+                        type(oldPairing) == "table"
+                            and type(oldPairing.media) == "table"
+                            and oldPairing.media.kind == "video"
+                            and oldPairing.media.source == "${fixtureVideo}"
+                    )
+            )
         elseif event == "vm-palette-preview" then
             vmHandle({
                 kind = "palette_preview",
@@ -1700,6 +1761,104 @@ let
                 closePairingEditor()
                 activePage = "main"
                 activeSubpage = ""
+                return
+            elseif event == "vm-playlist-entry-editor" then
+                local playlistId = ""
+                local playlistEntryIndex = 0
+                local playlistEntry = nil
+                for _, candidateId in ipairs(sortedPlaylistIds(false)) do
+                    local candidate = playlistMap()[candidateId]
+                    local entries = type(candidate) == "table" and candidate.entries or nil
+                    if type(entries) == "table" and type(entries[1]) == "table" then
+                        playlistId = candidateId
+                        playlistEntryIndex = 1
+                        playlistEntry = entries[1]
+                        break
+                    end
+                end
+
+                local opened = false
+                local selected = false
+                local sourceChanged = false
+                local idPreserved = false
+                local addedAtPreserved = false
+                local positionPreserved = false
+                local editorRendered = false
+                local sourceChoices = {}
+                local sourceTotal = 0
+                if playlistId ~= "" and type(playlistEntry) == "table" then
+                    local originalId = tostring(playlistEntry.id or "")
+                    local originalAddedAt = tostring(playlistEntry.added_at or "")
+                    local originalMedia = type(playlistEntry.media) == "table" and playlistEntry.media or {}
+                    local originalSource = tostring(originalMedia.source or "")
+                    beginPlaylistEntryEditor(playlistEntry, playlistId, playlistEntryIndex)
+                    opened = playlistEntryEditorOpen == true
+                        and editingPlaylistEntryId == originalId
+                        and editingPlaylistEntryPlaylistId == playlistId
+                        and editingPlaylistEntryIndex == playlistEntryIndex
+
+                    -- Mirror choosing the Videos tab before choosing a real
+                    -- indexed card. No media path is fabricated by this probe.
+                    playlistEntrySourceKind = "video"
+                    playlistEntrySourcePage = 1
+                    local pageChoices, _library, totalChoices = panelUi.libraryItems(
+                        "video",
+                        0,
+                        ENTRY_SOURCE_PAGE_SIZE
+                    )
+                    sourceChoices = pageChoices
+                    sourceTotal = totalChoices
+                    for _, choice in ipairs(sourceChoices) do
+                        local entry = type(choice) == "table" and choice.entry or nil
+                        if type(entry) == "table" and tostring(entry.source or "") ~= originalSource then
+                            choice.kind = "video"
+                            panelUi.selectPlaylistEntrySource(choice)
+                            selected = true
+                            break
+                        end
+                    end
+
+                    sourceChanged = selected
+                        and entryMediaKindDraft == "video"
+                        and tostring(entryMediaSourceDraft or "") ~= ""
+                        and tostring(entryMediaSourceDraft or "") ~= originalSource
+                    idPreserved = originalId ~= "" and editingPlaylistEntryId == originalId
+                    addedAtPreserved = originalAddedAt ~= ""
+                        and tostring(entryAddedAtDraft or "") == originalAddedAt
+                    positionPreserved = editingPlaylistEntryPlaylistId == playlistId
+                        and editingPlaylistEntryIndex == playlistEntryIndex
+
+                    local editorNode = panelUi.playlistEntryEditor(playlistId, "HEADLESS-1")
+                    editorRendered = editorNode ~= nil
+                    if editorRendered then
+                        panel.render(ui.scroll({
+                            key = "wall-in-one-vm-playlist-entry-editor",
+                            flexGrow = 1,
+                            align = "stretch",
+                            gap = 8,
+                        }, { editorNode }))
+                    end
+                end
+
+                noctalia.log(
+                    "WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR "
+                        .. tostring(payload or "")
+                        .. " playlist=" .. tostring(playlistId ~= "")
+                        .. " entry=" .. tostring(type(playlistEntry) == "table")
+                        .. " open=" .. tostring(opened)
+                        .. " choices=" .. tostring(#sourceChoices)
+                        .. " selected=" .. tostring(selected)
+                        .. " source_changed=" .. tostring(sourceChanged)
+                        .. " id_preserved=" .. tostring(idPreserved)
+                        .. " added_at_preserved=" .. tostring(addedAtPreserved)
+                        .. " position_preserved=" .. tostring(positionPreserved)
+                        .. " rendered=" .. tostring(editorRendered)
+                        .. " total=" .. tostring(sourceTotal)
+                )
+                closePlaylistEntryEditor()
+                activePage = "main"
+                activeSubpage = ""
+                render()
                 return
             elseif event == "vm-wallhaven-route-cache" then
                 local items = {}
@@ -3403,6 +3562,31 @@ pkgs.testers.runNixOSTest (
           "and .theme.mode == \"auto\"] | all))' "
           "${pluginDataRoot}/config.json"
       )
+
+      # The graphical entry editor rebinds one occurrence to another indexed
+      # medium. It must preserve occurrence identity/order metadata and must
+      # not mutate the old medium's shared pairing profile.
+      noctalia_msg("plugin ${serviceId} all vm-playlist-entry-replace")
+      replacement_token = "graphical-picker"
+      replacement_filters = journal
+      for fragment in (
+          f"WALL_IN_ONE_VM_ENTRY_REPLACE {replacement_token}",
+          "preserved_id=true",
+          "preserved_time=true",
+          "rebound=true",
+          "workshop=true",
+          "customized=true",
+          "old_intact=true",
+      ):
+          replacement_filters += f" | grep -F -- {shlex.quote(fragment)}"
+      machine.wait_until_succeeds(
+          noctalia_command(
+              f"plugin ${serviceId} all vm-playlist-entry-replace-probe {replacement_token}"
+          )
+          + " >/dev/null && "
+          + replacement_filters,
+          timeout=20,
+      )
       drive_cycle(
           "start",
           "${lib.getExe pkgs.jq} -e "
@@ -4149,6 +4333,29 @@ pkgs.testers.runNixOSTest (
           "WALL_IN_ONE_VM_LIBRARY_DEFAULT_EDIT fresh-workshop "
           "existing=false open=true editor_kind=workshop media_kind=workshop "
           "source=999999999 still=automatic id_empty=true"
+      )
+
+      # Exercise the actual playlist-occurrence editor against persisted
+      # playlist state and a real indexed video card. This must build and render
+      # the production graphical picker without a raw source-path field while
+      # preserving the occurrence's durable identity fields in the draft.
+      entry_editor_token = "indexed-video"
+      assert noctalia_msg(
+          f"plugin ${pluginId}:hub all vm-playlist-entry-editor {entry_editor_token}"
+      ).strip() == "ok: dispatched 1"
+      entry_editor_marker = (
+          f"WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR {entry_editor_token} "
+          "playlist=true entry=true open=true choices=6 "
+          "selected=true source_changed=true id_preserved=true "
+          "added_at_preserved=true position_preserved=true rendered=true"
+      )
+      machine.wait_until_succeeds(
+          journal + " | grep -F -- " + shlex.quote(entry_editor_marker),
+          timeout=20,
+      )
+      machine.fail(f"{journal} | grep -F -- 'exceeded its CPU budget'")
+      machine.fail(
+          f"{journal} | grep -F -- \"plugin panel '${pluginId}:hub' disabled after repeated timeouts\""
       )
 
       # Reproduce the live Wallhaven navigation shape: a full 64-entry stale

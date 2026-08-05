@@ -211,18 +211,28 @@ fallback. It must not claim that fallback is a rendered screenshot.
    Without a valid representative it must block before the backing changes.
    Separately use valid media and a valid still with its renderer command
    unavailable and confirm the same visible degraded-live behavior.
-8. Create a new entry in the playlist editor. Its initial policy must be the
-   explicit adaptive wallpaper choice (`auto` and the first wallpaper generator,
-   falling back to `m3-tonal-spot`), not a claimed snapshot of the current shell
-   theme. Give entries policies for wallpaper-derived, built-in, community,
-   custom, and inherited palettes in auto, dark, and light modes. Confirm the
-   persisted bundle keeps the requested `{mode, source, selection}` tuple and
-   the runtime status distinguishes requested policy from applied/fallback
-   policy. Delete a custom palette or request an unavailable community palette
-   and confirm the fallback is explicit rather than reported as verified
-   success. Direct Quick Choice, library-add, and migrated compatibility entries
-   must inherit unless the legacy color-sync setting requests the configured
-   wallpaper generator.
+8. Add a library item to a playlist and open that occurrence's editor. Choose a
+   source from its separate still, video, and Workshop tabs; each tab must show
+   no more than six preview-and-palette cards per page. Page past six entries in
+   each available medium and confirm the source can be selected without typing
+   an absolute media path or Workshop ID. For a dynamic source, select its
+   representative from the six-card user/Wallhaven still picker. The only raw
+   path control should be the collapsed manual representative-still escape
+   hatch. Its initial policy must be the explicit adaptive wallpaper choice
+   (`auto` and the first wallpaper generator, falling back to
+   `m3-tonal-spot`), not a claimed snapshot of the current shell theme. Give
+   entries policies for wallpaper-derived, built-in, community, custom, and
+   inherited palettes in auto, dark, and light modes. Confirm the persisted
+   bundle keeps the requested `{mode, source, selection}` tuple and the runtime
+   status distinguishes requested policy from applied/fallback policy. Delete a
+   custom palette or request an unavailable community palette and confirm the
+   fallback is explicit rather than reported as verified success. Direct Quick
+   Choice, library-add, and migrated compatibility entries must inherit unless
+   the legacy color-sync setting requests the configured wallpaper generator.
+   While an occurrence editor is open, select a different playlist and confirm
+   the draft closes. Repeat with a 512-entry community/custom palette inventory:
+   changing palette source must show a brief loading state, keep the panel
+   responsive, and populate the completed selector without a watchdog warning.
 9. For a pairing with a selected still, request an adaptive preview and verify
    the worker runs exactly
    `noctalia theme <image> --scheme <scheme> --both -o <file>`. It must not
@@ -237,14 +247,17 @@ fallback. It must not claim that fallback is a rendered screenshot.
    oversized output, and rapidly request A/B/C: errors must be visible, stale A
    must not replace C, only the latest pending request may run, and every
    private temporary JSON file must be removed.
-10. Create reusable still, video, and Workshop pairings in their respective
-    drawers. Drag cards into two playlists and drag occurrences to reorder them;
-    then repeat using **Add to playlist** and explicit move-up/move-down buttons.
-    Pointer drag/drop and button fallbacks must produce the same stable-ID
-    result. Editing one catalog pairing must update linked occurrence snapshots.
-    Deleting it must safely detach those occurrences by clearing `pairing_id`
-    while preserving their last valid snapshots; it must not delete user media,
-    selected stills, or the playlist occurrences themselves.
+10. Use still, video, and Workshop item profiles from their library drawers.
+    Drag cards into two playlists and drag occurrences to reorder them; then
+    repeat the add using **Add to playlist**. Pointer drag/drop and the add-button
+    fallback must produce the same stable-ID result; occurrence reordering is
+    drag-only. Editing one library item's representative/palette defaults must
+    update every linked occurrence snapshot. There is no public item-profile
+    delete action: remove a disposable source from the authoritative library
+    and refresh instead, then confirm its Library card disappears while
+    existing playlist snapshots remain visibly missing until the source is
+    restored or each occurrence is removed. User media and selected stills must
+    never be deleted as a side effect.
 11. Confirm each apply is serialized: stop the old renderer, set the still via
    `wallpaper-set`, wait for its acknowledgement, set theme mode and color
    scheme, then start the dynamic renderer on a later update. A failed or stale
@@ -276,10 +289,15 @@ Create two named playlists. Put a static-only entry, a local video, and a
 numeric Workshop scene in the first; put one static-only entry in the second.
 Use both `rotate` and `shuffle`, and test the explicit random navigation action.
 
-1. Create, rename, duplicate, assign, and delete a playlist. Add, edit, reorder,
-   apply, and remove entries through both drawer drag/drop and the button
-   fallbacks. Entry IDs must remain stable when their order or labels change,
-   and runtime `current_entry`, history, and shuffle bag must contain IDs rather
+1. Create, rename, duplicate, assign, and delete a playlist. Add entries through
+   both drawer drag/drop and the **Add to playlist** fallback, reorder only by
+   dragging, and exercise the edit, apply, and remove controls. In the
+   occurrence editor, rebind one entry through the paged graphical
+   still/video/Workshop library rather than a raw source path. Its ID, list
+   position, and insertion timestamp must survive the rebind. Editing the
+   representative or palette must update the selected medium's shared defaults
+   in every linked occurrence while leaving the old medium's profile intact.
+   Runtime `current_entry`, history, and shuffle bag must contain IDs rather
    than array indexes. Deleting an entry must remove only that ID from every
    affected run.
 2. Apply the one-entry playlist. It must become parked after one successful
@@ -327,13 +345,15 @@ Use both `rotate` and `shuffle`, and test the explicit random navigation action.
    deleted playlist must be removed from output fallback and schedule
    references without leaving an orphan run.
 
-The video/Workshop library scan bounds candidate examination and performs
-metadata/JSON work incrementally after each directory listing. After changing
-a source directory or requesting refresh, allow update ticks to finish and
-wait for `library.scanning=false`; do not treat an immediate partial list as
-the completed inventory. The host `listDir` call itself may still materialize
-the directory before those per-tick bounds apply, so include a very large
-directory in exploratory responsiveness testing.
+The one-shot Python backend owns image/video/Workshop filesystem discovery,
+metadata parsing, sorting, and inventory paging. The Luau bridge launches one
+nonce-bound `library.scan` and incrementally validates its fixed-size response
+pages; it must not walk or sort the library itself. After changing a source
+directory or requesting refresh, allow update ticks to adopt every page and
+wait for `library.scanning=false`; do not treat an immediate partial list as the
+completed inventory. Include a very large directory in exploratory
+responsiveness testing and confirm neither panel nor service callback exceeds
+its CPU budget.
 
 Choose separate image/video roots and then the same root for both. Supported
 media must remain in the right still/video section, and a shared-root GIF must
@@ -468,8 +488,9 @@ data:
   configuration;
 - every item profile is a stable-ID media/still/theme bundle. Every playlist
   occurrence has its own stable entry ID, a validated bundle snapshot, and an
-  optional `pairing_id` link; detaching a deleted catalog item preserves that
-  snapshot;
+  optional `pairing_id` link; removing a source from the authoritative index
+  leaves that snapshot visibly missing until the occurrence is removed or the
+  source returns;
 - `runtime.json` is schema 6 and contains private `pairs`/`pair_registry`, runs
   keyed by output and playlist ID, output selection/pin/schedule state, palette
   request/application state, and bounded active `current_workshops`;
@@ -497,12 +518,12 @@ data:
 
 Both documents have an 8 MiB read/write ceiling. Exercise over-limit config and
 runtime files plus malformed nested maps: more than 64 outputs, more than 1024
-catalog pairings or dynamic pairs, overlong paths/keys, nonnumeric or oversized
-current Workshop IDs, too many playlists/runs/schedules, duplicate entry IDs, stale IDs in
-history/shuffle bags, and invalid nested pair/run/capture/palette records must
-all fail closed without overwriting the evidence. At the limits, successful
-writes must prune oldest pair-map entries deterministically rather than growing
-without bound.
+item profiles or dynamic pairs, overlong paths/keys, nonnumeric or oversized
+current Workshop IDs, too many playlists/runs/schedules, duplicate entry IDs,
+stale IDs in history/shuffle bags, and invalid nested
+pair/run/capture/palette records must all fail closed without overwriting the
+evidence. At the limits, successful writes must prune oldest pair-map entries
+deterministically rather than growing without bound.
 
 Before startup, place more than 512 files in `pluginDataDir()/staging`, mixing
 Wall-in-One `capture-<safe-id>.png` names with unrelated names and extensions.

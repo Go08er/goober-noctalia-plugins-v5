@@ -25,6 +25,7 @@ local MAX_PLAYLIST_RUNS = 4096
 local MAX_HISTORY_ENTRIES = 64
 local MAX_RUNTIME_OUTPUTS = 64
 local MAX_PAIR_REGISTRY_ENTRIES = 1024
+local MAX_DEFERRED_PLAYLIST_REPLACEMENTS = 16
 local MAX_PERSISTED_PATH_BYTES = 4096
 local MAX_PERSISTED_NAME_BYTES = 160
 local MAX_WORKSHOP_ID_BYTES = 24
@@ -345,6 +346,11 @@ local libraryRefreshPending = false
 local pendingLibraryResult = nil
 local libraryScanNonce = 0
 local pairingPreviewPending = nil
+local playlistReplaceQueue = {}
+local playlistReplaceQueueHead = 1
+local playlistReplaceQueueTail = 0
+local playlistReplaceQueueCount = 0
+local playlistReplaceQueueRejected = false
 local libraryRootsSignature = ""
 local settingsStatusPublishPending = false
 
@@ -7059,6 +7065,183 @@ function wallInOne.savePlaylistEntry(playlistId, rawEntry)
     return wallInOne.saveConfig(nextConfig, "playlist-entry-save")
 end
 
+-- The command bus callback has a tighter CPU budget than the coordinator's
+-- update tick. Copy only the fixed scalar surface needed by the graphical
+-- editor, then perform config normalization and persistence on the next tick.
+-- A small ring keeps several independent panel placements from retaining raw
+-- nested state or turning one callback into a whole-config walk.
+function wallInOne.queuePlaylistEntryReplacement(request)
+    if playlistReplaceQueueCount >= MAX_DEFERRED_PLAYLIST_REPLACEMENTS then
+        playlistReplaceQueueRejected = true
+        return false
+    end
+
+    local entry = type(request.entry) == "table" and request.entry or nil
+    local mediaPresent = entry ~= nil and entry.media ~= nil
+    local media = mediaPresent and type(entry.media) == "table" and entry.media or nil
+    local still = entry ~= nil and type(entry.still) == "table" and entry.still or nil
+    local theme = entry ~= nil and type(entry.theme) == "table" and entry.theme or nil
+    local valid = entry ~= nil and (not mediaPresent or media ~= nil) and still ~= nil and theme ~= nil
+
+    local function scalar(value, maximum, optional)
+        if value == nil and optional == true then
+            return ""
+        end
+        local valueType = type(value)
+        if valueType ~= "string" and valueType ~= "number" and valueType ~= "boolean" then
+            valid = false
+            return ""
+        end
+        local text = tostring(value)
+        if #text > maximum then
+            valid = false
+            return ""
+        end
+        return text
+    end
+
+    playlistReplaceQueueTail = (playlistReplaceQueueTail % MAX_DEFERRED_PLAYLIST_REPLACEMENTS) + 1
+    playlistReplaceQueue[playlistReplaceQueueTail] = {
+        valid = valid,
+        playlist_id = scalar(request.playlist_id, MAX_PERSISTED_NAME_BYTES, false),
+        entry_id = scalar(request.entry_id, MAX_PERSISTED_NAME_BYTES, false),
+        label = scalar(entry ~= nil and entry.label or nil, MAX_PERSISTED_NAME_BYTES, false),
+        media_present = mediaPresent,
+        media_kind = scalar(media ~= nil and media.kind or nil, MAX_PERSISTED_NAME_BYTES, not mediaPresent),
+        media_source = scalar(media ~= nil and media.source or nil, MAX_PERSISTED_PATH_BYTES, not mediaPresent),
+        still_mode = scalar(still ~= nil and still.mode or nil, MAX_PERSISTED_NAME_BYTES, false),
+        still_path = scalar(still ~= nil and still.path or nil, MAX_PERSISTED_PATH_BYTES, true),
+        theme_mode = scalar(theme ~= nil and theme.mode or nil, MAX_PERSISTED_NAME_BYTES, false),
+        theme_source = scalar(theme ~= nil and theme.source or nil, MAX_PERSISTED_NAME_BYTES, false),
+        theme_selection = scalar(theme ~= nil and theme.selection or nil, MAX_PERSISTED_NAME_BYTES, true),
+        added_at = scalar(entry ~= nil and entry.added_at or nil, 320, true),
+    }
+    -- The scalar projections above can discover an invalid field after the
+    -- table constructor first copied `valid`; publish the final shape verdict.
+    playlistReplaceQueue[playlistReplaceQueueTail].valid = valid
+    playlistReplaceQueueCount += 1
+    return true
+end
+
+function wallInOne.takePlaylistEntryReplacement()
+    if playlistReplaceQueueCount < 1 then
+        return nil
+    end
+    local request = playlistReplaceQueue[playlistReplaceQueueHead]
+    playlistReplaceQueue[playlistReplaceQueueHead] = nil
+    playlistReplaceQueueHead = (playlistReplaceQueueHead % MAX_DEFERRED_PLAYLIST_REPLACEMENTS) + 1
+    playlistReplaceQueueCount -= 1
+    return request
+end
+
+-- Rebind one playlist occurrence to a library medium selected by the panel.
+-- The occurrence keeps its durable id, position, and insertion timestamp;
+-- still/palette edits belong to the target medium's shared pairing profile.
+-- In particular, never reuse the old pairing id for a different medium: that
+-- would silently rewrite every playlist occurrence linked to the old item.
+function wallInOne.replacePlaylistEntry(playlistId, entryId, rawEntry)
+    playlistId = tostring(playlistId or "")
+    entryId = tostring(entryId or "")
+    local nextConfig = wallInOne.editableConfig()
+    local playlist = nextConfig ~= nil and nextConfig.playlists[playlistId] or nil
+    local index = type(playlist) == "table" and wallInOne.entryIndexById(playlist, entryId) or nil
+    local previousEntry = index ~= nil and playlist.entries[index] or nil
+    if type(rawEntry) ~= "table" or type(previousEntry) ~= "table" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry_missing"), "playlist-entry-replace")
+        return false
+    end
+
+    local candidate = wallInOne.normalizedEntryBundle({
+        id = entryId,
+        label = rawEntry.label,
+        media = rawEntry.media,
+        still = rawEntry.still,
+        theme = rawEntry.theme,
+        added_at = if tostring(previousEntry.added_at or "") ~= ""
+            then previousEntry.added_at
+            else rawEntry.added_at,
+        customized = true,
+    })
+    if candidate == nil or wallInOne.bundleIdentity(candidate) == "" then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "playlist-entry-replace")
+        return false
+    end
+
+    local pairingId, canCollapse, ambiguous = wallInOne.pairingIdentitySelection(nextConfig, candidate)
+    if ambiguous then
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "playlist-entry-replace")
+        return false
+    end
+    if pairingId == nil then
+        if wallInOne.countMap(nextConfig.pairings) >= MAX_PAIRINGS then
+            wallInOne.setActionError(
+                noctalia.tr("errors.pairing_limit", { limit = tostring(MAX_PAIRINGS) }),
+                "playlist-entry-replace"
+            )
+            return false
+        end
+        local used = {}
+        for id in pairs(nextConfig.pairings) do
+            used[id] = true
+        end
+        pairingId = wallInOne.uniqueIdentifier(
+            used,
+            wallInOne.stableIdentifier("pairing", wallInOne.bundleSignature(candidate), noctalia.nowMs())
+        )
+        if pairingId == nil then
+            wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), "playlist-entry-replace")
+            return false
+        end
+    end
+
+    local previousPairing = nextConfig.pairings[pairingId]
+    local pairing = wallInOne.pairingFromEntry(candidate, pairingId)
+    pairing.customized = true
+    if type(previousPairing) == "table" and tostring(previousPairing.added_at or "") ~= "" then
+        pairing.added_at = previousPairing.added_at
+    end
+    nextConfig.pairings[pairingId] = pairing
+    local replacement = wallInOne.pairingFromEntry(pairing, entryId)
+    replacement.pairing_id = pairingId
+    replacement.added_at = candidate.added_at
+    playlist.entries[index] = replacement
+    if canCollapse then
+        wallInOne.collapsePairingIdentity(nextConfig, pairingId, false)
+    else
+        wallInOne.syncPairingSnapshots(nextConfig, pairingId)
+    end
+    return wallInOne.saveConfig(nextConfig, "playlist-entry-replace")
+end
+
+function wallInOne.applyPendingPlaylistEntryReplacement()
+    if playlistReplaceQueueRejected then
+        playlistReplaceQueueRejected = false
+        wallInOne.setActionError(noctalia.tr("errors.playlist_entry"), nil)
+        return true
+    end
+    local request = wallInOne.takePlaylistEntryReplacement()
+    if type(request) ~= "table" then
+        return false
+    end
+    local entry = if request.valid == true
+        then {
+            label = request.label,
+            media = if request.media_present == true
+                then { kind = request.media_kind, source = request.media_source }
+                else nil,
+            still = { mode = request.still_mode, path = request.still_path },
+            theme = {
+                mode = request.theme_mode,
+                source = request.theme_source,
+                selection = request.theme_selection,
+            },
+            added_at = request.added_at,
+        }
+        else {}
+    wallInOne.replacePlaylistEntry(request.playlist_id, request.entry_id, entry)
+    return true
+end
+
 function wallInOne.movePlaylistEntry(playlistId, entryId, direction)
     playlistId = tostring(playlistId or "")
     local nextConfig = wallInOne.editableConfig()
@@ -8424,6 +8607,8 @@ function wallInOne.handleCommand(request)
         wallInOne.addPlaylistEntry(request.output, request.playlist_id, request.entry, request.before_id)
     elseif kind == "playlist_save_entry" then
         wallInOne.savePlaylistEntry(request.playlist_id, request.entry)
+    elseif kind == "playlist_replace_entry" then
+        wallInOne.queuePlaylistEntryReplacement(request)
     elseif kind == "playlist_remove_entry" then
         wallInOne.removePlaylistEntry(request.playlist_id, request.entry_id)
     elseif kind == "playlist_move_entry" then
@@ -8516,6 +8701,9 @@ end
 
 function update()
     noctalia.setUpdateInterval(UPDATE_INTERVAL_MS)
+    if wallInOne.applyPendingPlaylistEntryReplacement() then
+        return
+    end
     wallInOne.drainPostApplyQueue()
     if wallInOne.applyPendingLibraryResult() then
         wallInOne.publishStatus()

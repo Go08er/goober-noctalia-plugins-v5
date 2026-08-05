@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract gate for Wall-in-One 0.7.
+"""Offline contract gate for Wall-in-One 0.8.
 
 The test deliberately avoids a compositor and the network.  It pins the
 manifest/state protocols statically, runs each shell helper's local checks,
@@ -1177,6 +1177,8 @@ def test_coordinator_contract() -> None:
             'kind == "playlist_add_pairing"',
             'kind == "playlist_add_entry"',
             'kind == "playlist_save_entry"',
+            'kind == "playlist_replace_entry"',
+            "wallInOne.queuePlaylistEntryReplacement(request)",
             'kind == "playlist_remove_entry"',
             'kind == "playlist_move_entry"',
             'kind == "playlist_place_entry"',
@@ -1201,6 +1203,39 @@ def test_coordinator_contract() -> None:
     assert 'kind == "pairing_delete"' not in commands, (
         "pairing deletion must not remain exposed through the public command protocol"
     )
+
+    replacement_queue = service[
+        service.index("function wallInOne.queuePlaylistEntryReplacement") : service.index(
+            "function wallInOne.replacePlaylistEntry"
+        )
+    ]
+    require_all(
+        replacement_queue,
+        (
+            "MAX_DEFERRED_PLAYLIST_REPLACEMENTS",
+            "playlistReplaceQueueCount >= MAX_DEFERRED_PLAYLIST_REPLACEMENTS",
+            "media_source = scalar(",
+            "MAX_PERSISTED_PATH_BYTES",
+            "playlistReplaceQueueCount += 1",
+            "function wallInOne.takePlaylistEntryReplacement()",
+        ),
+        "fixed-slot primitive-only playlist-entry replacement queue",
+    )
+    assert re.search(r"^\s*(for|while)\b", replacement_queue, flags=re.MULTILINE) is None
+    for forbidden in (
+        "table.sort",
+        "noctalia.json",
+        "wallInOne.editableConfig",
+        "wallInOne.saveConfig",
+    ):
+        assert forbidden not in replacement_queue
+
+    coordinator_update = service[
+        service.index("function update()") : service.index("function onConfigChanged()")
+    ]
+    assert "if wallInOne.applyPendingPlaylistEntryReplacement() then" in coordinator_update
+    assert coordinator_update.index("wallInOne.applyPendingPlaylistEntryReplacement()") \
+        < coordinator_update.index("wallInOne.drainPostApplyQueue()")
 
     add_playlist_entry = service[
         service.index("function wallInOne.addPlaylistEntry") : service.index(
@@ -1667,6 +1702,33 @@ def test_item_default_provenance_contract() -> None:
     assert 'kind == "pairing_delete"' not in commands
     assert "function wallInOne.deletePairing" not in service
 
+    replacement = service[
+        service.index("function wallInOne.replacePlaylistEntry") : service.index(
+            "function wallInOne.movePlaylistEntry"
+        )
+    ]
+    require_all(
+        replacement,
+        (
+            "function wallInOne.replacePlaylistEntry(playlistId, entryId, rawEntry)",
+            "local previousEntry = index ~= nil and playlist.entries[index] or nil",
+            "id = entryId",
+            "added_at = if tostring(previousEntry.added_at or \"\") ~= \"\"",
+            "customized = true",
+            "wallInOne.bundleIdentity(candidate)",
+            "wallInOne.pairingIdentitySelection(nextConfig, candidate)",
+            "local pairing = wallInOne.pairingFromEntry(candidate, pairingId)",
+            "replacement.pairing_id = pairingId",
+            "replacement.added_at = candidate.added_at",
+            "playlist.entries[index] = replacement",
+            'wallInOne.saveConfig(nextConfig, "playlist-entry-replace")',
+        ),
+        "identity-safe graphical playlist-entry replacement",
+    )
+    assert "rawEntry.pairing_id" not in replacement, (
+        "entry replacement must resolve the selected medium instead of reusing the old pairing id"
+    )
+
     panel_ui_declaration = panel.index("local panelUi = {}")
     open_editor_start = panel.index("local function openLibraryEntryPairing")
     assert panel_ui_declaration < open_editor_start, (
@@ -1786,38 +1848,39 @@ def test_item_default_provenance_contract() -> None:
             "then instance == libraryPairingCache.instance",
             "and revision == libraryPairingCache.revision",
             "and pairings == libraryPairingCache.source",
-            "if dragTokensDirty then",
+            "if not dragTokensDirty then",
+            "markDragTokensDirty()",
             "return libraryPairingCache.index",
-            "for _, pairing in pairs(pairings) do",
-            "nextIndex[key] = preferredPairingForLibraryEntry(nextIndex[key], pairing)",
-            "libraryPairingCache.index = nextIndex",
             "return if key ~= nil then indexedLibraryPairings()[key] else nil",
         ),
         "snapshot-indexed deterministic library item profile resolver",
     )
-    assert resolver.count("for _, pairing in pairs(pairings) do") == 1
-    assert resolver.index("if dragTokensDirty then") < resolver.index(
-        "for _, pairing in pairs(pairings) do"
-    ), "a render must use the last complete pairing index while incremental reconciliation is pending"
+    indexed_resolver = resolver[
+        resolver.index("local function indexedLibraryPairings") : resolver.index(
+            "local function matchingPairingForLibraryEntry"
+        )
+    ]
+    assert re.search(r"^\s*for\b", indexed_resolver, flags=re.MULTILINE) is None
     assert "sortedPairingIds" not in panel
 
     palette_names = panel[
         panel.index("local paletteEntryIndexes = {}") : panel.index(
-            "local function paletteInventoryEntry"
+            "local function basename"
         )
     ]
     require_all(
         palette_names,
         (
-            'local cacheKey = "names\\0" .. tostring(source or "")',
-            "local cached = paletteEntryIndexes[cacheKey]",
-            "if type(cached) == \"table\" and cached.source == values then",
-            "return cached.names",
-            "paletteEntryIndexes[cacheKey] = { source = values, names = names }",
+            "local function paletteEntryIndex(source)",
+            "if cached.source ~= values then",
+            "sourceItems = values",
+            "nextNames = {}",
+            "ready = false",
+            "return cached.names, cached.ready == true, cached.nameIndex",
+            "local function stepPaletteEntryIndexReconciliation()",
         ),
-        "snapshot-keyed palette-name cache",
+        "snapshot-keyed incremental palette-name cache",
     )
-    assert palette_names.count("for _, entry in ipairs(values) do") == 1
 
     close_editor = panel[
         panel.index("local function closePairingEditor()") : panel.index(
@@ -2400,7 +2463,8 @@ def test_automatic_pairing_preview_contract() -> None:
         (
             'entryStillModeDraft = if math.floor(tonumber(index) or 0) == 1 then "selected" else "automatic"',
             "local requestedPalette = requestPairingAdaptivePreview(",
-            "bundleFromDraft(editingPairingId)",
+            "currentBundle()",
+            "previewPairingId",
             "requestAutomaticStillPreparation(kind, source)",
             "render()",
         ),
@@ -4254,10 +4318,17 @@ def test_provider_preview_panel_contract() -> None:
         (
             "if isOpen and dragTokensDirty then",
             "if stepDragTokenReconciliation() then",
+            "local stillChoiceWork = isOpen",
+            "panelUi.pairingStillChoiceWork()",
+            "if stillChoiceWork and panelUi.stepPairingStillChoiceReconciliation() then",
             "render()",
-            "preview.settle(isOpen and dragTokensDirty)",
+            "panelUi.workshopIndexWork()",
+            "panelUi.stepWorkshopIndexReconciliation()",
+            "paletteEntryIndexWork()",
+            "stepPaletteEntryIndexReconciliation()",
+            "preview.settle(isOpen and (dragTokensDirty or stillChoiceWork or workshopIndexWork or paletteIndexWork))",
         ),
-        "drag-only frame callback",
+        "bounded presentation-data frame callback",
     )
     for forbidden in (
         "preview.step()",
@@ -5750,9 +5821,9 @@ def test_declarative_ui_layout_contract() -> None:
         ),
         "bounded explicit browser grids and split schedule controls",
     )
-    assert panel.count("panelUi.appendExplicitGrid(") == 7, (
+    assert panel.count("panelUi.appendExplicitGrid(") == 8, (
         "the grid helper must serve providers, local libraries, the pairing still picker, "
-        "the pairing library, and display playlists"
+        "the pairing library, playlist-entry source picker, and display playlists"
     )
 
     explicit_grid = panel[
@@ -5818,6 +5889,7 @@ def test_display_navigation_and_drag_contract() -> None:
     """Pin the display-first navigation and library-backed ordering surfaces."""
 
     panel = text("panel.luau")
+    vm = (ROOT.parent / "tests" / "vm" / "wall-in-one.nix").read_text(encoding="utf-8")
     page_registry = panel[
         panel.index("local panelPages = {") : panel.index("function panelPages.screenNames()")
     ]
@@ -5957,7 +6029,10 @@ def test_display_navigation_and_drag_contract() -> None:
             "local _, redraw = preview.step()",
             "if preview.takeRender() then",
             "panelPages.renderNow()",
-            "preview.settle(isOpen and dragTokensDirty)",
+            "panelUi.pairingStillChoiceWork()",
+            "panelUi.workshopIndexWork()",
+            "paletteEntryIndexWork()",
+            "preview.settle(isOpen and (dragTokensDirty or stillChoiceWork or workshopIndexWork or paletteIndexWork))",
         ),
         "update-bounded provider scheduler",
     )
@@ -5969,10 +6044,16 @@ def test_display_navigation_and_drag_contract() -> None:
         (
             "if isOpen and dragTokensDirty then",
             "if stepDragTokenReconciliation() then",
+            "panelUi.pairingStillChoiceWork()",
+            "panelUi.stepPairingStillChoiceReconciliation()",
             "render()",
-            "preview.settle(isOpen and dragTokensDirty)",
+            "panelUi.workshopIndexWork()",
+            "panelUi.stepWorkshopIndexReconciliation()",
+            "paletteEntryIndexWork()",
+            "stepPaletteEntryIndexReconciliation()",
+            "preview.settle(isOpen and (dragTokensDirty or stillChoiceWork or workshopIndexWork or paletteIndexWork))",
         ),
-        "frame-bounded drag-token scheduler",
+        "frame-bounded presentation-data schedulers",
     )
     assert "preview.step()" not in frame_tick
     assert "preview.takeRender()" not in frame_tick
@@ -6177,9 +6258,11 @@ def test_display_navigation_and_drag_contract() -> None:
         playlist_rendering,
         (
             "panelUi.playlistPairingLibrary(playlistId, output)",
+            "if not editingThisPlaylist then",
             "local playlistPageCount = math.max(1, math.ceil(#entries / PLAYLIST_ENTRY_CHUNK))",
-            "local playlistFirstEntry = (playlistEntryPage - 1) * PLAYLIST_ENTRY_CHUNK + 1",
-            "local playlistLastEntry = math.min(#entries, playlistFirstEntry + PLAYLIST_ENTRY_CHUNK - 1)",
+            "then editingPlaylistEntryIndex",
+            "else (playlistEntryPage - 1) * PLAYLIST_ENTRY_CHUNK + 1",
+            "else math.min(#entries, playlistFirstEntry + PLAYLIST_ENTRY_CHUNK - 1)",
             "for index = playlistFirstEntry, playlistLastEntry do",
             "panelUi.appendPageControls(",
             "local previewPath, sourceAvailable = panelUi.playlistEntryVisualState(entry, output)",
@@ -6187,16 +6270,166 @@ def test_display_navigation_and_drag_contract() -> None:
             "panelUi.compactPaletteSwatch(entry, tostring(entry.pairing_id or \"\"))",
             'noctalia.tr("panel.playlists.entry.missing_source")',
             'dragType = "wio-entry"',
+            'noctalia.tr("panel.playlists.entry_edit")',
+            "beginPlaylistEntryEditor(currentEntry, playlistId, index)",
+            "panelUi.playlistEntryEditor(playlistId, output)",
             'kind = "playlist_remove_entry"',
         ),
-        "read-only visual playlist rows with missing-source state",
+        "visual playlist rows with bounded graphical entry editing",
     )
-    assert "entryEditor(" not in playlist_rendering
     assert "editEntryDraft(" not in playlist_rendering
-    assert 'noctalia.tr("panel.playlists.entry_edit")' not in playlist_rendering
     assert 'noctalia.tr("panel.playlists.entry_move_up")' not in playlist_rendering
     assert 'noctalia.tr("panel.playlists.entry_move_down")' not in playlist_rendering
     assert 'kind = "playlist_move_entry"' not in playlist_rendering
+
+    playlist_entry_editor = panel[
+        panel.index("local function beginPlaylistEntryEditor") : panel.index(
+            "local function playlistInsertionZone"
+        )
+    ]
+    require_all(
+        playlist_entry_editor,
+        (
+            "local function beginPlaylistEntryEditor(entry, playlistId, entryIndex)",
+            "editingPlaylistEntryPlaylistId = tostring(playlistId or \"\")",
+            "editingPlaylistEntryIndex = math.max(0, math.floor(tonumber(entryIndex) or 0))",
+            "function panelUi.playlistEntrySourcePicker(output)",
+            "ENTRY_SOURCE_PAGE_SIZE",
+            "panelUi.pairingStillChoices(",
+            "sourceReady = choicesReady",
+            "panelUi.libraryItems(kind, offset, ENTRY_SOURCE_PAGE_SIZE)",
+            'id = "static"',
+            'id = "video"',
+            'id = "workshop"',
+            "panelUi.appendExplicitGrid(children, items, #items, PLAYLIST_LIBRARY_COLUMNS",
+            "panelUi.libraryThumbnail(",
+            "panelUi.compactPaletteSwatch(",
+            "panelUi.selectPlaylistEntrySource(item)",
+            "panelUi.appendPageControls(",
+            "pairingEditor(entryMediaKindDraft, { playlist_id = playlistId })",
+            'kind = "playlist_replace_entry"',
+            "playlist_id = editingPlaylistEntryPlaylistId",
+            "entry_id = editingPlaylistEntryId",
+            "entry = currentBundle()",
+            'noctalia.tr("panel.pairings.still_manual_show")',
+            'noctalia.tr("panel.playlists.entry.still_path_placeholder")',
+        ),
+        "paged library-first playlist-entry editor",
+    )
+    for obsolete in (
+        "panel.playlists.entry.source_still_placeholder",
+        "panel.playlists.entry.source_video_placeholder",
+        "panel.playlists.entry.source_workshop_placeholder",
+    ):
+        assert obsolete not in panel
+
+    require_all(
+        vm,
+        (
+            'event == "vm-playlist-entry-editor"',
+            "beginPlaylistEntryEditor(playlistEntry, playlistId, playlistEntryIndex)",
+            "panelUi.selectPlaylistEntrySource(choice)",
+            "panelUi.playlistEntryEditor(playlistId, \"HEADLESS-1\")",
+            "editingPlaylistEntryPlaylistId == playlistId",
+            "editingPlaylistEntryIndex == playlistEntryIndex",
+            "WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR",
+            'timeout=20',
+            "exceeded its CPU budget",
+            "disabled after repeated timeouts",
+        ),
+        "panel-side graphical playlist-entry VM regression",
+    )
+
+    still_reconciliation = panel[
+        panel.index("panelUi.pairingStillChoiceCache =") : panel.index(
+            "local function pairingEditor"
+        )
+    ]
+    require_all(
+        still_reconciliation,
+        (
+            'ownership == "user" or provider == "local" or provider == "Wallhaven"',
+            "local last = math.min(#sourceItems, first + STILL_CHOICE_RECONCILE_BATCH - 1)",
+            "for index = first, last do",
+            "choiceCache.cursor = last + 1",
+            "choiceCache.ready = true",
+            "return {}, 0, 1, false",
+        ),
+        "bounded still-picker eligibility reconciliation",
+    )
+
+    workshop_reconciliation = panel[
+        panel.index("panelUi.workshopIndexCache =") : panel.index(
+            "local function openLibraryEntryPairing"
+        )
+    ]
+    require_all(
+        workshop_reconciliation,
+        (
+            "sourceItems = workshops",
+            "index = cached.index",
+            "ready = false",
+            "local last = math.min(#sourceItems, first + WORKSHOP_INDEX_RECONCILE_BATCH - 1)",
+            "for index = first, last do",
+            "cached.index = cached.nextIndex",
+            "cached.ready = true",
+        ),
+        "bounded Workshop metadata reconciliation",
+    )
+
+    palette_reconciliation = panel[
+        panel.index("local PALETTE_INDEX_SOURCES =") : panel.index("local function basename")
+    ]
+    require_all(
+        palette_reconciliation,
+        (
+            "names = cached.names",
+            "nameIndex = cached.nameIndex",
+            "byName = cached.byName",
+            "ready = false",
+            "return cached.names, cached.ready == true, cached.nameIndex",
+            "return paletteEntryIndex(source).byName",
+            "local last = math.min(#sourceItems, first + PALETTE_INDEX_RECONCILE_BATCH - 1)",
+            "for index = first, last do",
+            "cached.names = cached.nextNames",
+            "cached.byName = cached.nextByName",
+            "cached.ready = true",
+        ),
+        "bounded atomic palette selector indexes",
+    )
+    palette_name_lookup = palette_reconciliation[
+        palette_reconciliation.index("local function paletteNames") : palette_reconciliation.index(
+            "local function paletteEntryIndexWork"
+        )
+    ]
+    assert re.search(r"^\s*(for|while)\b", palette_name_lookup, flags=re.MULTILINE) is None
+
+    pairing_index_lookup = panel[
+        panel.index("local function indexedLibraryPairings") : panel.index(
+            "local function matchingPairingForLibraryEntry"
+        )
+    ]
+    require_all(
+        pairing_index_lookup,
+        (
+            "if not dragTokensDirty then",
+            "markDragTokensDirty()",
+            "return libraryPairingCache.index",
+        ),
+        "render-safe library pairing index fallback",
+    )
+    assert re.search(r"^\s*for\b", pairing_index_lookup, flags=re.MULTILINE) is None
+
+    require_all(
+        panel,
+        (
+            "local function clearAutomaticStillPreparation(kind, source)",
+            "clearAutomaticStillPreparation(kind, entryMediaSourceDraft)",
+            "closePlaylistEntryEditor()\n                    selectedPlaylistId = ids[",
+            "editingPlaylistEntryPlaylistId ~= playlistId",
+        ),
+        "playlist-entry editor retry and playlist identity guards",
+    )
 
     playlist_zone = panel[
         panel.index("local function playlistInsertionZone") : panel.index(

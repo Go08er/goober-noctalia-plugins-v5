@@ -21,7 +21,7 @@ inside the guest. Once every file is committed, `.#...` is equivalent.
 | --- | --- |
 | `vm-test` | Hydra rendering, actions, hot reload, settings, and native searchable glyph picker |
 | `vm-test-nocvox` | NocVox singleton listener, state/control matrix, diagnostics, validation, privacy, and teardown |
-| `vm-test-wall-in-one` | Six-service startup, unified external-backend bridge, reusable pairings/playlists, month-aware schedules, adaptive palette and provider-thumbnail rendering, direct renderer ownership and crash backoff, MotionBGS compatibility fixtures, schema-3→5/runtime-6 migration, panel compilation/IPC, and teardown persistence |
+| `vm-test-wall-in-one` | Six-service startup, unified external-backend bridge, graphical playlist-entry rebinding, month-aware schedules, adaptive palette and provider-thumbnail rendering, direct renderer ownership and crash backoff, 36-result MotionBGS plus Wallhaven-navigation panel-budget coverage, schema-3→5/runtime-6 migration, and teardown persistence |
 
 Each suite also exposes an interactive driver by adding `-driver` to its
 package name. For example:
@@ -92,9 +92,14 @@ Before opening the floating hub, the suite compiles the exact materialized
 log, a changed compositor screenshot, a provider probe initiated by `onOpen`,
 and successful panel IPC. Luau load failures, `onOpen` failures, and local-route
 callback failures stop the guest. The panel probe also opens a fresh Workshop
-card's synthesized-default editor
-and drives the bounded Wallhaven navigation path; a nil namespace lookup or
-callback CPU-budget overrun fails the guest.
+card's synthesized-default editor, opens a persisted playlist occurrence,
+selects a real indexed video card through the production picker, drives the
+bounded Wallhaven navigation path, and renders 36 MotionBGS results while
+sustaining frame ticks. Frame callbacks may advance only bounded drag,
+still-choice, Workshop-index, and palette-index reconciliation; they may not
+build a complete panel tree. A nil namespace
+lookup, callback CPU-budget overrun, or `goober/wall-in-one:hub`
+timeout-disable record fails the guest.
 
 Wallhaven and MotionBGS thumbnail presentation is also exercised without the
 internet. The shipped thumbnail helper first runs its own boundary self-test;
@@ -136,9 +141,14 @@ occurrences linked to reusable item profiles. The explicit schema-3 fixture
 proves migration creates those links, defaults an omitted month filter to all
 twelve months, removes numeric priority, and retains the original schema-3
 document as the migration backup. The guest exercises pairing save,
-linked-occurrence synchronization, add, stable-ID placement, and safe catalog
-deletion that detaches but preserves a playlist snapshot. It also pins
-per-output shuffle/interval overrides and clean inheritance back to playlist
+linked-occurrence synchronization, add, and stable-ID placement. Its
+`playlist_replace_entry` fixture exercises the command used by the graphical
+editor to rebind an occurrence to a Workshop medium. It verifies that the
+occurrence ID and insertion timestamp survive, the selected medium's shared
+profile is synchronized, and the old profile remains intact; the offline
+contract separately pins same-index replacement. Source removal is an inventory
+observation rather than a public item-profile deletion command. The suite also
+pins per-output shuffle/interval overrides and clean inheritance back to playlist
 defaults. The guest drives start/stop/pause/resume/next/previous/random, checks
 runtime-schema-6 stable entry IDs, cursor/history/shuffle-bag and absolute
 next-due state, and reloads to prove the playlist and runtime survive while the

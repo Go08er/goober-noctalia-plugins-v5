@@ -33,6 +33,24 @@ All notable staging changes will be recorded here.
 
 ## Unreleased — Wall-in-One 0.8.0
 
+- Add a library-first playlist-entry editor with six-card pages for stills,
+  videos, and installed Workshop scenes. Rebinding preserves the occurrence's
+  stable ID, list position, and insertion time; representative-still and palette
+  edits update the selected medium's shared defaults instead of cloning hidden
+  pairings. Keep only the existing collapsed manual representative-path escape
+  hatch—playlist sources no longer require typed paths or Workshop IDs.
+- Reconcile representative-still eligibility in fixed 32-record frame steps and
+  queue the resulting render for the ordinary update callback. A frame callback
+  still never constructs a complete panel tree, and source-picker pages perform
+  only six bounded library-item projections.
+- Reconcile Workshop metadata and palette name/preview indexes in fixed
+  32-record frame steps, atomically swapping complete lookup snapshots. Editing
+  one playlist occurrence hides the unrelated 24-card add drawer and all other
+  rows, and a draft is now locked to its originating playlist and position.
+- Defer graphical entry replacement from the shared-state watcher into a fixed
+  16-slot primitive-only queue. The coordinator performs at most one full
+  normalize/persist operation per ordinary update tick, while preserving the
+  existing occurrence identity and shared-default semantics.
 - Consolidate the separately installed process boundary into one Python 3.11+
   executable, `wall-in-one-backend`. Its exact generic schema-1 interface owns
   `library.scan`, `palettes.inventory`, `preview.sync`, and Wallhaven

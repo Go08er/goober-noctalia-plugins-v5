@@ -232,7 +232,10 @@ absent or incompatible program degrades those backend-owned capabilities,
 while configured playlists, adaptive palette previews, host-coupled renderer,
 wallpaper/palette application, and direct-site controls remain available. Each
 indexed source is automatically its own pairing, with
-an editable static representative and complete theme policy. Visual
+an editable static representative and complete theme policy. Playlist rows can
+be rebound through a paged graphical image/video/Workshop picker without typing
+source paths; representative and palette changes remain shared item defaults.
+Visual
 rotate/shuffle playlists can mix all media types, run independently per output,
 and select lower-listed month/weekday/time rules when schedules overlap.
 

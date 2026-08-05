@@ -73,11 +73,30 @@ coordinator. The dedicated capture may populate the cache registry and library,
 but must not mutate the applied per-output pair, wallpaper, palette, or
 renderer.
 
+Open an existing playlist occurrence's editor and require a library-first
+source picker with separate still, video, and Workshop tabs. Each tab must
+materialize at most six cards per page, including preview and palette swatch,
+and the editor must expose no raw source-media path or Workshop-ID input. A
+dynamic occurrence must reuse the six-card still-library picker; only its
+collapsed manual representative-still escape hatch may accept an absolute path.
+Rebind an occurrence to a different medium and verify that its stable entry ID,
+list position, and insertion timestamp are preserved. Its representative and
+palette edits must update the selected medium's shared item profile and every
+linked occurrence, rather than becoming an isolated occurrence override or
+rewriting the old medium's profile.
+Switch playlists while that editor is open and verify the draft closes rather
+than targeting an equal entry ID in another playlist. The VM panel probe must
+invoke the production open/select/render path with a real indexed card, preserve
+the originating playlist and absolute position, and reject watchdog log records.
+The state watcher may only queue a fixed scalar projection; normalization and
+persistence must occur from the ordinary coordinator update callback.
+
 Navigate into MotionBGS with a 36-result fixture and a full preview backlog.
 Render the production route as three fixed 12-card local pages, drive sustained
-frame callbacks, and prove that frames advance only bounded drag work. Preview
+frame callbacks, and prove that frames advance only bounded drag and
+still-choice, Workshop-index, and palette-index reconciliation. Preview
 synchronization and full `panel.render` tree construction belong only to
-`update()`. The
+`update()`. Drive the Wallhaven navigation callback through the same panel. The
 journal must contain no panel callback CPU-budget overrun or timeout-disable
 sequence.
 
@@ -317,8 +336,15 @@ profile is reused, every linked snapshot is refreshed, and duplicate records
 are not created. Remove a source from the indexed library and verify that it no
 longer produces an orphan Library card; an existing playlist snapshot remains
 visibly marked missing until the source is restored or that occurrence is
-removed. Drag/drop and explicit buttons must produce identical bounded
-commands; drag payloads never carry trusted paths or deletion authority.
+removed. Drag/drop and the **Add to playlist** button must produce identical
+bounded add commands; occurrence reordering remains drag-only. Drag payloads
+never carry trusted paths or deletion authority.
+
+Exercise the VM `playlist_replace_entry` fixture after playlist placement. It
+must rebind the selected occurrence to the fixture Workshop medium while
+preserving the occurrence ID, array position, and `added_at`; it must leave the
+old medium's profile intact and synchronize the selected Workshop profile's
+shared representative/palette snapshot.
 
 Test named playlist create/rename/duplicate/delete, stable-ID reorder, rotate,
 shuffle bag, start/pause/resume/stop/next/previous/random, Quick Choice, and
