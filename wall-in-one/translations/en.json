@@ -195,7 +195,6 @@
     "transaction_recovery": "A previous coordinated storage update could not be recovered safely.",
     "theme_mode": "The wallpaper was applied, but Noctalia's theme-mode update failed: {detail}",
     "theme_mode_start": "The wallpaper was applied, but the Noctalia theme-mode command could not start.",
-    "steam_open": "Could not open Wallpaper Engine through Steam: {detail}",
     "steam_start": "Could not start Steam or the desktop URL opener.",
     "video_source": "Choose a readable configured video source first.",
     "video_source_degraded": "Video is missing or unreadable, so its static representative was applied and the live layer was stopped: {path}",

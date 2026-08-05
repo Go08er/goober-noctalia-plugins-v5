@@ -84,6 +84,16 @@ All notable staging changes will be recorded here.
   previews, and integrated shops without disabling host-coupled renderer,
   wallpaper/palette application, adaptive previews, configured playlists, or
   direct-site controls.
+- Hand off to Steam instead of supervising it. Noctalia signals a timed-out
+  command's whole process group, and `steam -applaunch` *is* the client rather
+  than a launcher, so a cold client boot was killed at the ten-second deadline
+  and reported as "Could not open Wallpaper Engine through Steam". Prefer the
+  `steam://run` URL the client registers, which dispatches immediately when
+  Steam is up and starts it first when it is not, fall back to the bare binary
+  only where no opener exists, and background the command so the deadline is
+  never reached. The coordinator never learns the pid, so it still owns no
+  processes. A handoff has no result worth reporting: only a launcher that
+  cannot start at all is now an error.
 - Record the process boundary explicitly: Noctalia host APIs, IPC dispatch,
   adaptive `noctalia theme` preview/source hashing, exact-PID renderer
   ownership, and UI stay in Luau. Schedule resolution remains a small

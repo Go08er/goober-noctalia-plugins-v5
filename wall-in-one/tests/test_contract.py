@@ -1563,6 +1563,38 @@ def test_coordinator_contract() -> None:
         assert forbidden not in service, f"coordinator must not own processes: {forbidden}"
 
 
+def test_steam_handoff_is_disowned_contract() -> None:
+    """Pin the Steam handoff so a cold client boot is never killed or reported.
+
+    Noctalia signals a timed-out command's whole process group, so waiting on
+    `steam -applaunch` -- which *is* the client, not a launcher -- killed a cold
+    boot at the deadline and surfaced it as a failure.
+    """
+
+    service = text("service.luau")
+    handoff = service[
+        service.index("function wallInOne.disownedHandoff") : service.index(
+            "function wallInOne.runOwnedRendererControl"
+        )
+    ]
+    require_all(
+        service,
+        ('return command .. " >/dev/null 2>&1 </dev/null &"',),
+        "handoff must background so the runAsync deadline is unreachable",
+    )
+    # The URL handler starts Steam when it is down and dispatches when it is up;
+    # the bare binary is only a fallback for hosts with no opener at all.
+    assert handoff.index('xdg-open " .. wallInOne.shellQuote("steam://run/') < handoff.index(
+        'steam -applaunch'
+    ), "steam:// handoff must be preferred over the steam binary"
+    assert "wallInOne.disownedHandoff(command)" in handoff
+    assert "errors.steam_open" not in service, (
+        "a disowned handoff has no result to report; only a failure to start is an error"
+    )
+    for waited in ("result.timedOut", "commandFailureDetail"):
+        assert waited not in handoff, f"handoff must not wait on a result: {waited}"
+
+
 def test_reusable_pairing_catalog_contract() -> None:
     """Pin identity-owned pairings, synchronized snapshots, and application."""
 
@@ -6801,6 +6833,7 @@ def main() -> None:
     test_manifest_and_translations()
     test_schema_document_fixtures()
     test_coordinator_contract()
+    test_steam_handoff_is_disowned_contract()
     test_reusable_pairing_catalog_contract()
     test_item_default_provenance_contract()
     test_renderer_crash_backoff_contract()

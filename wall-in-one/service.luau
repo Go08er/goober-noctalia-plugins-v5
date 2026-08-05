@@ -7983,27 +7983,41 @@ function wallInOne.openWallhavenSite()
     end
 end
 
+-- Noctalia gives every runAsync command its own process group and signals the
+-- whole group on timeout (kill(-pid), SIGTERM then SIGKILL). That path only
+-- runs on timeout or cancellation, never on normal exit, so backgrounding is
+-- what keeps a handoff safe: /bin/sh returns in about two milliseconds, the
+-- deadline is never reached, and nothing signals the group the target sits in.
+-- The coordinator stays out of process ownership -- it never learns the pid and
+-- never reaps it. Anything needing a supervised pid belongs in renderer.luau.
+function wallInOne.disownedHandoff(command)
+    return command .. " >/dev/null 2>&1 </dev/null &"
+end
+
 function wallInOne.openSteamTarget(action)
     local command
-    if action == "steam_launch" and noctalia.commandExists("steam") then
-        command = "steam -applaunch " .. WALLPAPER_ENGINE_APP_ID
-    elseif action == "steam_launch" then
+    if action == "steam_launch" and noctalia.commandExists("xdg-open") then
+        -- steam://run is the handoff Steam itself registers: it dispatches
+        -- instantly when the client is up and boots it first when it is not.
+        -- Preferred over the steam binary, which *is* the client process and
+        -- so cannot be waited on.
         command = "xdg-open " .. wallInOne.shellQuote("steam://run/" .. WALLPAPER_ENGINE_APP_ID)
+    elseif action == "steam_launch" then
+        command = "steam -applaunch " .. wallInOne.shellQuote(WALLPAPER_ENGINE_APP_ID)
     else
         command = "xdg-open " .. wallInOne.shellQuote(WALLPAPER_ENGINE_WORKSHOP_URL)
     end
-    local started = noctalia.runAsync(command, function(result)
-        if type(result) ~= "table" or result.timedOut or tonumber(result.exitCode) ~= 0 then
-            wallInOne.setActionError(noctalia.tr("errors.steam_open", { detail = wallInOne.commandFailureDetail(result) }), action)
-        else
-            lastActionError = ""
-            lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
-            wallInOne.publishStatus()
-        end
-    end, 10000)
+    -- A handoff has no result worth waiting for: Steam owns the outcome once it
+    -- starts, and a cold boot outlives any timeout we could pick. Waiting for an
+    -- exit code reported that boot as a failure and killed Steam with it.
+    local started = noctalia.runAsync(wallInOne.disownedHandoff(command), function() end, 5000)
     if not started then
         wallInOne.setActionError(noctalia.tr("errors.steam_start"), action)
+        return
     end
+    lastActionError = ""
+    lastActionAt = noctalia.formatTime("%Y-%m-%d %H:%M:%S")
+    wallInOne.publishStatus()
 end
 
 function wallInOne.runOwnedRendererControl(request, action)
