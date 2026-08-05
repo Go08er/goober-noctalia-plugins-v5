@@ -7984,7 +7984,7 @@ function wallInOne.openWallhavenSite()
 end
 
 -- Noctalia gives every runAsync command its own process group and signals the
--- whole group on timeout (kill(-pid), SIGTERM then SIGKILL). That path only
+-- whole group on timeout, SIGTERM then SIGKILL. That path only
 -- runs on timeout or cancellation, never on normal exit, so backgrounding is
 -- what keeps a handoff safe: /bin/sh returns in about two milliseconds, the
 -- deadline is never reached, and nothing signals the group the target sits in.

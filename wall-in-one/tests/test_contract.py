@@ -35,6 +35,19 @@ def text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def vm_fixture() -> str:
+    """The VM fixture's text on the host, or "" when running inside that VM.
+
+    The guest stages only wall-in-one/, wall-in-one-backend/, and the root
+    documentation, so tests/vm/ is absent there. These are host-side assertions
+    that the fixture still covers a regression; asserting a fixture against its
+    own text from inside the VM it defines would be circular, and staging the
+    file would make the derivation depend on its own definition.
+    """
+    path = ROOT.parent / "tests" / "vm" / "wall-in-one.nix"
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
 def dotted_value(document: dict[str, object], key: str) -> object:
     value: object = document
     for component in key.split("."):
@@ -49,10 +62,16 @@ def require_all(source: str, needles: Iterable[str], label: str) -> None:
 
 
 def luau_function(source: str, name: str) -> str:
-    """Return one top-level Luau function without coupling tests to line numbers."""
+    """Return one top-level Luau function without coupling tests to line numbers.
+
+    A bare name also matches a namespaced definition: Luau's 200-local limit
+    forces panel-scope routines to be table fields, and that placement is not
+    what these tests are about.
+    """
 
     match = re.search(
-        rf"(?ms)^(?:local\s+)?function\s+{re.escape(name)}\([^\n]*\).*?(?=^(?:local\s+)?function\s+|\Z)",
+        rf"(?ms)^(?:local\s+)?function\s+(?:[\w]+\.)?{re.escape(name)}\([^\n]*\)"
+        rf".*?(?=^(?:local\s+)?function\s+|\Z)",
         source,
     )
     assert match is not None, f"missing top-level Luau function {name}"
@@ -1561,6 +1580,138 @@ def test_coordinator_contract() -> None:
     assert "lastWallhavenDownloadPath" not in service
     for forbidden in ("pgrep", "pkill", "killall", "setsid", "/proc/"):
         assert forbidden not in service, f"coordinator must not own processes: {forbidden}"
+    # Mirror the VM gate's word-boundary form so a bare `kill` -- even inside a
+    # comment describing how Noctalia signals a process group -- fails offline
+    # instead of eight minutes into the VM run.
+    for path in ("service.luau", "scripts/capture-still"):
+        body = (ROOT / path).read_text(encoding="utf-8")
+        hit = re.search(r"(?:^|[^0-9A-Za-z_])(?:kill|killall|pkill)(?:[^0-9A-Za-z_]|$)", body)
+        assert hit is None, f"coordinator must not own processes: {path} contains {hit.group(0)!r}"
+
+
+LUAU_BLOCK_OPENER_RE = re.compile(
+    r"^(?:local function |function |do$|if .*then$|for .*do$|while .*do$)|function\s*\([^)]*\)\s*$"
+)
+
+
+def main_chunk_lines(source: str) -> list[str]:
+    """Return the statements a Luau file holds open for its whole main chunk.
+
+    Declarations inside a top-level block release their registers when the block
+    ends, so only these outlive everything. Continuation lines are indented,
+    which is what makes a column-0 scan enough; the balance check below fails
+    loudly rather than silently under-reporting if that ever stops holding.
+    """
+
+    depth = 0
+    top_level = []
+    for line in source.split("\n"):
+        if line[:1] in (" ", "\t") or not line.strip():
+            continue
+        if LUAU_BLOCK_OPENER_RE.search(line):
+            if depth == 0:
+                top_level.append(line)
+            depth += 1
+            continue
+        if line.startswith("end"):
+            depth -= 1
+            continue
+        if depth == 0:
+            top_level.append(line)
+    assert depth == 0, "Luau block scan did not balance; the column-0 assumption broke"
+    return top_level
+
+
+def test_block_scoped_luau_helpers_stay_inside_their_block() -> None:
+    """Calling a block-scoped local from outside its block reaches nil, not it.
+
+    Luau resolves the name to a global instead of erroring at compile time, so
+    the whole entry loads and only the callback that reaches the line dies. The
+    panel's preview scheduler is a `do ... end` module for exactly that reason,
+    and three call sites had drifted onto its private `wakeUpdate` rather than
+    the exported `preview.wake`. Nothing else catches this offline.
+    """
+
+    for name in ("panel.luau", "service.luau", "palettes.luau"):
+        source = text(name)
+        lines = source.split("\n")
+        block = luau_top_level_block(lines)
+        if block is None:
+            continue
+        start, end = block
+        declared = set()
+        for line in lines[start : end - 1]:
+            declaration = re.match(r"^local (?:function )?([\w]+)", line)
+            if declaration is not None:
+                declared.add(declaration.group(1))
+        for index, line in enumerate(lines, 1):
+            if start < index <= end or line.lstrip().startswith("--"):
+                continue
+            for helper in declared:
+                assert re.search(rf"(?<![\w.:]){helper}\s*\(", line) is None, (
+                    f"{name}:{index} calls {helper!r}, which is scoped to the block at "
+                    f"line {start}; it resolves to nil there"
+                )
+
+
+def luau_top_level_block(lines: list[str]) -> tuple[int, int] | None:
+    """Return the 1-based bounds of the first column-0 `do ... end` block."""
+
+    try:
+        start = next(index for index, line in enumerate(lines, 1) if line == "do")
+    except StopIteration:
+        return None
+    depth = 0
+    for index in range(start - 1, len(lines)):
+        line = lines[index]
+        if line[:1] in (" ", "\t") or not line.strip():
+            continue
+        if LUAU_BLOCK_OPENER_RE.search(line):
+            depth += 1
+        elif line.startswith("end"):
+            depth -= 1
+        if depth == 0 and index + 1 > start:
+            return start, index + 1
+    raise AssertionError("unterminated top-level Luau block")
+
+
+def test_luau_local_budget_contract() -> None:
+    """Keep the panel compilable: Luau allows 200 locals per function.
+
+    A whole entry file is one function, so its top-level declarations are a
+    fixed budget rather than free naming. Overrunning it is a hard CompileError
+    that takes the entry down entirely, and panel.luau -- by far the largest
+    entry -- had already crossed the limit and could not load at all. Its
+    constants and routines therefore live as fields of `const` and `panelUi`,
+    which cost no registers. This asserts that convention directly instead of
+    re-deriving Luau's register allocation from the text.
+    """
+
+    for line in main_chunk_lines(text("panel.luau")):
+        stray_function = re.match(r"^local function ([\w]+)", line)
+        assert stray_function is None, (
+            f"panel.luau declares top-level local function {stray_function.group(1)!r}; "
+            "define it as a panelUi field so it costs no local register"
+        )
+        stray_constant = re.match(r"^local ([A-Z][A-Z0-9_]*)\s*=", line)
+        assert stray_constant is None, (
+            f"panel.luau declares top-level constant {stray_constant.group(1)!r}; "
+            "define it as a const field so it costs no local register"
+        )
+
+    # The exact check, whenever the compiler is reachable. The VM gate always
+    # has it; a developer shell usually does, and offline runs simply skip it.
+    compiler = shutil.which("luau-compile")
+    if compiler is None:
+        return
+    for entry in sorted(ROOT.glob("*.luau")):
+        completed = subprocess.run(
+            [compiler, "--null", str(entry)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, f"{entry.name} does not compile: {completed.stdout.strip()}"
 
 
 def test_steam_handoff_is_disowned_contract() -> None:
@@ -1815,12 +1966,12 @@ def test_item_default_provenance_contract() -> None:
     )
 
     panel_ui_declaration = panel.index("local panelUi = {}")
-    open_editor_start = panel.index("local function openLibraryEntryPairing")
+    open_editor_start = panel.index("function panelUi.openLibraryEntryPairing")
     assert panel_ui_declaration < open_editor_start, (
         "the panelUi namespace must be local before the fresh-library edit callback closes over it"
     )
     open_editor = panel[
-        open_editor_start : panel.index("local function actionLabel")
+        open_editor_start : panel.index("function panelUi.actionLabel")
     ]
     require_all(
         open_editor,
@@ -1907,7 +2058,7 @@ def test_item_default_provenance_contract() -> None:
     require_all(
         default_bundle,
         (
-            "local useAdaptiveColors = settings().sync_colors ~= false",
+            "local useAdaptiveColors = panelUi.settings().sync_colors ~= false",
             'else { mode = "automatic" }',
             'then { mode = "auto", source = "wallpaper", selection = scheme }',
             'else { mode = "inherit", source = "inherit", selection = "" }',
@@ -1918,17 +2069,17 @@ def test_item_default_provenance_contract() -> None:
     assert "entry.still_path" not in default_bundle
 
     resolver = panel[
-        panel.index("local function preferredPairingForLibraryEntry") : panel.index(
-            "local function actionLabel"
+        panel.index("function panelUi.preferredPairingForLibraryEntry") : panel.index(
+            "function panelUi.actionLabel"
         )
     ]
     require_all(
         resolver,
         (
-            "local function preferredPairingForLibraryEntry(existing, candidate)",
+            "function panelUi.preferredPairingForLibraryEntry(existing, candidate)",
             "if existingCustomized ~= candidateCustomized then",
-            "local function libraryPairingKey(kind, source)",
-            "local function indexedLibraryPairings()",
+            "function panelUi.libraryPairingKey(kind, source)",
+            "function panelUi.indexedLibraryPairings()",
             "local revision = tonumber(state.revision)",
             "then instance == libraryPairingCache.instance",
             "and revision == libraryPairingCache.revision",
@@ -1936,13 +2087,13 @@ def test_item_default_provenance_contract() -> None:
             "if not dragTokensDirty then",
             "markDragTokensDirty()",
             "return libraryPairingCache.index",
-            "return if key ~= nil then indexedLibraryPairings()[key] else nil",
+            "return if key ~= nil then panelUi.indexedLibraryPairings()[key] else nil",
         ),
         "snapshot-indexed deterministic library item profile resolver",
     )
     indexed_resolver = resolver[
-        resolver.index("local function indexedLibraryPairings") : resolver.index(
-            "local function matchingPairingForLibraryEntry"
+        resolver.index("function panelUi.indexedLibraryPairings") : resolver.index(
+            "function panelUi.matchingPairingForLibraryEntry"
         )
     ]
     assert re.search(r"^\s*for\b", indexed_resolver, flags=re.MULTILINE) is None
@@ -1950,26 +2101,26 @@ def test_item_default_provenance_contract() -> None:
 
     palette_names = panel[
         panel.index("local paletteEntryIndexes = {}") : panel.index(
-            "local function basename"
+            "function panelUi.basename"
         )
     ]
     require_all(
         palette_names,
         (
-            "local function paletteEntryIndex(source)",
+            "function panelUi.paletteEntryIndex(source)",
             "if cached.source ~= values then",
             "sourceItems = values",
             "nextNames = {}",
             "ready = false",
             "return cached.names, cached.ready == true, cached.nameIndex",
-            "local function stepPaletteEntryIndexReconciliation()",
+            "function panelUi.stepPaletteEntryIndexReconciliation()",
         ),
         "snapshot-keyed incremental palette-name cache",
     )
 
     close_editor = panel[
-        panel.index("local function closePairingEditor()") : panel.index(
-            "local function preferredPairingForLibraryEntry"
+        panel.index("function panelUi.closePairingEditor()") : panel.index(
+            "function panelUi.preferredPairingForLibraryEntry"
         )
     ]
     require_all(
@@ -2004,7 +2155,7 @@ def test_item_default_provenance_contract() -> None:
             "local last = math.min(total, first + maximum - 1)",
             "for index = first, last do",
             "local sourceItem = sourceItems[index]",
-            "add(entry, sourceItem, matchingPairingForLibraryEntry(entry))",
+            "add(entry, sourceItem, panelUi.matchingPairingForLibraryEntry(entry))",
             "return items, currentLibrary, total",
         ),
         "source-authoritative indexed library",
@@ -2014,14 +2165,14 @@ def test_item_default_provenance_contract() -> None:
     assert "still_path = tostring(sourceItem.preview" not in library_items
 
     library_page = panel[
-        panel.index("local function librarySection") : panel.index(
-            "local function playlistActionButton"
+        panel.index("function panelUi.librarySection") : panel.index(
+            "function panelUi.playlistActionButton"
         )
     ]
     require_all(
         library_page,
         (
-            "(page - 1) * LIBRARY_PAGE_SIZE",
+            "(page - 1) * const.LIBRARY_PAGE_SIZE",
             "LIBRARY_PAGE_SIZE",
             "panelUi.appendPageControls(children, total, page",
         ),
@@ -2039,7 +2190,7 @@ def test_item_default_provenance_contract() -> None:
             'local path = if tostring(still.mode or "") == "selected"',
             "path = tostring(libraryItem.paired_preview or \"\")",
             "path = tostring(libraryItem.preview or \"\")",
-            "local withOutput = entryForOutput(entry, output)",
+            "local withOutput = panelUi.entryForOutput(entry, output)",
         ),
         "explicit, paired, provider, and current-output thumbnail precedence",
     )
@@ -2048,7 +2199,7 @@ def test_item_default_provenance_contract() -> None:
     ) < library_preview.index("libraryItem.preview") < library_preview.index("entryForOutput(entry, output)")
 
     pairing_editor = panel[
-        panel.index("local function pairingEditor") : panel.index(
+        panel.index("function panelUi.pairingEditor") : panel.index(
             "function panelUi.playlistPairingLibrary"
         )
     ]
@@ -2067,14 +2218,14 @@ def test_item_default_provenance_contract() -> None:
 
     compact_swatch = panel[
         panel.index("function panelUi.compactPaletteSwatch") : panel.index(
-            "local function pairingKindLabel"
+            "function panelUi.pairingKindLabel"
         )
     ]
     require_all(
         compact_swatch,
         (
             'ui.glyph({ name = "palette", size = 14, color = "on_surface_variant" })',
-            "local colors = normalizedPreviewMode(preview, \"dark\")",
+            "local colors = panelUi.normalizedPreviewMode(preview, \"dark\")",
         ),
         "neutral unresolved compact palette cue",
     )
@@ -2083,7 +2234,7 @@ def test_item_default_provenance_contract() -> None:
 
     pairing_library = panel[
         panel.index("function panelUi.playlistPairingLibrary") : panel.index(
-            "local function playlistInsertionZone"
+            "function panelUi.playlistInsertionZone"
         )
     ]
     require_all(
@@ -2092,7 +2243,7 @@ def test_item_default_provenance_contract() -> None:
             'for _, kind in ipairs({ "static", "video", "workshop" }) do',
             'if playlistLibraryFilter == "all" or playlistLibraryFilter == kind then',
             "local take = math.min(remaining, math.max(0, kindTotal - kindOffset))",
-            "panelUi.appendExplicitGrid(children, items, #items, PLAYLIST_LIBRARY_COLUMNS",
+            "panelUi.appendExplicitGrid(children, items, #items, const.PLAYLIST_LIBRARY_COLUMNS",
             "panelUi.appendPageControls(",
             "panelUi.libraryThumbnail(",
             "compactPaletteSwatch(bundle, pairingId)",
@@ -2454,8 +2605,8 @@ def test_automatic_pairing_preview_contract() -> None:
     service = text("service.luau")
 
     descriptor = panel[
-        panel.index("local function automaticRepresentativePath") : panel.index(
-            "local function requestPairingAdaptivePreview"
+        panel.index("function panelUi.automaticRepresentativePath") : panel.index(
+            "function panelUi.requestPairingAdaptivePreview"
         )
     ]
     require_all(
@@ -2474,7 +2625,7 @@ def test_automatic_pairing_preview_contract() -> None:
             '"automatic"',
             "media_kind = mediaKind",
             "media_source = mediaSource",
-            "path = automaticRepresentativePath(mediaKind, mediaSource)",
+            "path = panelUi.automaticRepresentativePath(mediaKind, mediaSource)",
         ),
         "source-addressed automatic representative descriptor",
     )
@@ -2483,8 +2634,8 @@ def test_automatic_pairing_preview_contract() -> None:
     )
 
     request_preview = panel[
-        panel.index("local function requestPairingAdaptivePreview") : panel.index(
-            "local function retryPairingAdaptivePreview"
+        panel.index("function panelUi.requestPairingAdaptivePreview") : panel.index(
+            "function panelUi.retryPairingAdaptivePreview"
         )
     ]
     require_all(
@@ -2495,9 +2646,9 @@ def test_automatic_pairing_preview_contract() -> None:
             'request.kind = "pairing_prepare_still"',
             "request.media_kind = descriptor.media_kind",
             "request.media_source = descriptor.media_source",
-            "request.output = if selectedScreen ~= \"\" then selectedScreen else focusedOutput()",
+            "request.output = if selectedScreen ~= \"\" then selectedScreen else panelUi.focusedOutput()",
             "send(request)",
-            "local function requestAutomaticStillPreparation(kind, source)",
+            "function panelUi.requestAutomaticStillPreparation(kind, source)",
             'capture_only = true',
         ),
         "panel-to-service automatic preview request",
@@ -2516,15 +2667,15 @@ def test_automatic_pairing_preview_contract() -> None:
         )
 
     begin_editor = panel[
-        panel.index("local function beginPairingEditor") : panel.index(
-            "local function closePairingEditor"
+        panel.index("function panelUi.beginPairingEditor") : panel.index(
+            "function panelUi.closePairingEditor"
         )
     ]
     require_all(
         begin_editor,
         (
             "loadBundleDraft(pairing, kind)",
-            "requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)",
+            "panelUi.requestPairingAdaptivePreview(panelUi.bundleFromDraft(editingPairingId), editingPairingId)",
             "requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))",
             "render()",
         ),
@@ -2533,7 +2684,7 @@ def test_automatic_pairing_preview_contract() -> None:
     assert begin_editor.index("requestPairingAdaptivePreview(") < begin_editor.index("render()")
 
     pairing_editor = panel[
-        panel.index("local function pairingEditor") : panel.index(
+        panel.index("function panelUi.pairingEditor") : panel.index(
             "function panelUi.playlistPairingLibrary"
         )
     ]
@@ -2547,7 +2698,7 @@ def test_automatic_pairing_preview_contract() -> None:
         automatic_change,
         (
             'entryStillModeDraft = if math.floor(tonumber(index) or 0) == 1 then "selected" else "automatic"',
-            "local requestedPalette = requestPairingAdaptivePreview(",
+            "local requestedPalette = panelUi.requestPairingAdaptivePreview(",
             "currentBundle()",
             "previewPairingId",
             "requestAutomaticStillPreparation(kind, source)",
@@ -3246,7 +3397,16 @@ def test_palette_inventory_contract() -> None:
         ),
         "bounded palette paging and fixed-slot shared-backend queue",
     )
-    assert "table.insert(pending" not in backend_bridge, "backend requests must not accumulate in an unbounded queue"
+    # Requests use fixed slots (pendingOperation, pendingPaletteOperation), never
+    # a growing list. pendingCleanupPaths is exempt by name: it holds page files
+    # of the one operation that just ended and update() drains it in batches.
+    for needle in ("table.insert(pendingOperation", "table.insert(pendingPaletteOperation"):
+        assert needle not in backend_bridge, "backend requests must not accumulate in an unbounded queue"
+    assert re.search(r"table\.insert\(pending(?!CleanupPaths)", backend_bridge) is None, (
+        "backend requests must not accumulate in an unbounded queue"
+    )
+    assert "local function drainPageCleanup(limit)" in backend_bridge
+    assert "if drainPageCleanup(CLEANUP_BATCH) then" in backend_bridge
 
     require_all(
         backend_program,
@@ -3539,9 +3699,13 @@ def test_backend_binary_discovery_and_setup_contract() -> None:
             "function panelUi.backendSetupCard()",
             "4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391",
             "https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/",
-            "wall-in-one-backend.sha256",
         ),
         "cached pinned backend setup surface",
+    )
+    # The digest is the one pinned in the plugin, never a sibling file from the
+    # same host: a host able to swap the payload could swap a checksum beside it.
+    assert "wall-in-one-backend.sha256" not in panel, (
+        "setup must verify against the pinned digest, not a downloaded checksum"
     )
     assert panel.count("local backendSetupCache =") == 1, (
         "the setup command block must have one cached construction slot"
@@ -3566,33 +3730,52 @@ def test_backend_binary_discovery_and_setup_contract() -> None:
             "backendSetupCache",
             "curl --disable --fail --silent --show-error",
             "--max-redirs 0",
-            "--proto '=https'",
-            "wall-in-one-backend.sha256",
-            "sha256sum -c",
+            "--proto =https",
+            "BACKEND_INSTALL_SHA256",
+            "sha256sum -c -",
             "chmod 0755",
-            "mv -fT --",
             "backend-path",
             "self-test",
             '}, "\\n")',
         ),
-        "five-command checksum-first backend setup",
+        "pinned-digest backend setup",
     )
-    assert setup_commands.count("--output") == 2, (
-        "setup must fetch the pinned payload and sibling checksum as separate data files"
+    # No inner quoting on =https: the option string is single-quoted whole into
+    # $get, so embedded quotes would reach curl literally.
+    assert "--proto '=https'" not in setup_commands, (
+        "quoted =https would be passed to curl verbatim once $get is expanded"
     )
-    assert setup_commands.count("mv -fT --") >= 2, (
-        "setup must atomically publish both the backend executable and pointer"
-    )
-    checksum_at = setup_commands.index("sha256sum -c")
+    checksum_at = setup_commands.index("sha256sum -c -")
     chmod_at = setup_commands.index("chmod 0755")
-    pointer_at = setup_commands.rindex("backend-path")
+    # Anchored on the command text: the bare "backend-path" literal also appears
+    # in the pointerPath assignment above, which is not part of the block.
+    pointer_at = setup_commands.index("backendSetupShellQuote(pointerPath)")
     self_test_at = setup_commands.rindex("self-test")
     assert checksum_at < chmod_at < pointer_at < self_test_at, (
-        "setup must verify before chmod, publish the pointer atomically, then self-test"
+        "setup must verify before chmod, write the pointer, then self-test"
     )
     command_entries = luau_braced_list_entry_count(setup_commands, "local commands = table.concat({")
-    assert command_entries == 5, (
-        f"backend setup must expose exactly five nonblank commands, found {command_entries}"
+    assert command_entries <= 5, (
+        f"the pasted block must stay short enough to read, found {command_entries} commands"
+    )
+    # Long one-liners are five commands only by counting; they are not usable.
+    assert "install_dir=" not in setup_commands and "test -n " not in setup_commands, (
+        "setup commands must be readable steps, not guard-chained one-liners"
+    )
+
+    # The pointer is written by the plugin, before the download, because the
+    # target is re-validated on every discovery retry: a pointer at a file that
+    # does not exist yet is simply unresolved until the executable lands.
+    write_pointer = luau_function(panel, "writeBackendPointer")
+    require_all(
+        write_pointer,
+        (
+            "noctalia.mkdirAll(",
+            "noctalia.writeFile(",
+            "noctalia.renameFile(",
+            'installDirectory .. "/wall-in-one-backend\\n"',
+        ),
+        "plugin-side pointer linking",
     )
 
     setup_card = luau_function(panel, "panelUi.backendSetupCard")
@@ -3606,11 +3789,23 @@ def test_backend_binary_discovery_and_setup_contract() -> None:
             'noctalia.tr("panel.backend_setup.command_label")',
             'noctalia.tr("panel.backend_setup.copy")',
             'noctalia.copyToClipboard(commands, "text/plain;charset=utf-8")',
+            'noctalia.tr("panel.backend_setup.directory_label")',
+            'noctalia.tr("panel.backend_setup.install")',
+            "noctalia.runInTerminal(terminalCommand)",
+            "writeBackendPointer(installDirectory)",
         ),
-        "unresolved-backend Home setup card and native copy API",
+        "unresolved-backend Home setup card, copy API, and terminal install",
     )
+    # Installing is now a button, but only on an explicit click and only into a
+    # terminal the user can watch. Silent background execution stays forbidden:
+    # runInTerminal is detached and visible, runAsync would be neither.
     assert "noctalia.runAsync" not in setup_card, (
-        "the setup card may copy commands but must never execute installer steps"
+        "the setup card must never run installer steps silently in the background"
+    )
+    install_at = setup_card.index("noctalia.runInTerminal(")
+    link_at = setup_card.index("writeBackendPointer(")
+    assert link_at < install_at, (
+        "the chosen directory is only known here, so link before handing off to the terminal"
     )
     home = luau_function(panel, "panelPages.homeSection")
     require_all(
@@ -4335,9 +4530,9 @@ def test_provider_preview_panel_contract() -> None:
     """Pin the thin preview.sync bridge and its update-only scheduler."""
 
     panel = text("panel.luau")
-    vm = (ROOT.parent / "tests" / "vm" / "wall-in-one.nix").read_text(encoding="utf-8")
+    vm = vm_fixture()
     preview_block = panel[
-        panel.index("local preview = {}") : panel.index("local function resetLibraryVisibility")
+        panel.index("local preview = {}") : panel.index("function panelUi.resetLibraryVisibility")
     ]
     require_all(
         preview_block,
@@ -4627,7 +4822,7 @@ def test_provider_preview_panel_contract() -> None:
         ),
         "12-card provider paging",
     )
-    chunk = re.search(r"local PROVIDER_RESULT_CHUNK = ([0-9]+)", panel)
+    chunk = re.search(r"const\.PROVIDER_RESULT_CHUNK = ([0-9]+)", panel)
     assert chunk is not None and int(chunk.group(1)) == 12
     assert [((page - 1) * 12 + 1, min(36, page * 12)) for page in range(1, 4)] == [
         (1, 12),
@@ -4636,10 +4831,10 @@ def test_provider_preview_panel_contract() -> None:
     ]
 
     wallhaven_section = panel[
-        panel.index("local function wallhavenSection") : panel.index("local function motionBgsSection")
+        panel.index("function panelUi.wallhavenSection") : panel.index("function panelUi.motionBgsSection")
     ]
     motionbgs_section = panel[
-        panel.index("local function motionBgsSection") : panel.index("local function librarySection")
+        panel.index("function panelUi.motionBgsSection") : panel.index("function panelUi.librarySection")
     ]
     for source, provider, readiness in (
         (wallhaven_section, "wallhaven", "ready"),
@@ -4667,18 +4862,20 @@ def test_provider_preview_panel_contract() -> None:
         assert source.count("preview.node(") == 1
         assert "preview.ensure(" not in source
 
-    require_all(
-        vm,
-        (
-            "for index = 1, 36 do",
-            '"items=36 visible=12"',
-            "vm-motion-sustained-start",
-            "vm-motion-sustained-probe",
-            "exceeded its CPU budget",
-            "disabled after repeated timeouts",
-        ),
-        "36-result sustained-frame VM regression",
-    )
+    # Skipped inside the VM, where tests/vm/ is not staged.
+    if vm:
+        require_all(
+            vm,
+            (
+                "for index = 1, 36 do",
+                '"items=36 visible=12"',
+                "vm-motion-sustained-start",
+                "vm-motion-sustained-probe",
+                "exceeded its CPU budget",
+                "disabled after repeated timeouts",
+            ),
+            "36-result sustained-frame VM regression",
+        )
 
     update_callback = panel[
         panel.index("function update()") : panel.index("function onFrameTick(_deltaMs)")
@@ -4695,7 +4892,11 @@ def test_provider_preview_panel_contract() -> None:
         ),
         "update-only preview completion and full render",
     )
-    assert update_callback.index("preview.step()") < update_callback.index("panelPages.renderNow()")
+    # The pending render is drained before the step, not after. A step that
+    # finishes a preview RPC and then renders in the same callback overran
+    # Noctalia's CPU budget; deferring the render one tick keeps each callback
+    # to a single expensive pass.
+    assert update_callback.index("panelPages.renderNow()") < update_callback.index("preview.step()")
 
     frame_callback = panel[
         panel.index("function onFrameTick(_deltaMs)") : panel.index("function onIpc")
@@ -4704,7 +4905,7 @@ def test_provider_preview_panel_contract() -> None:
         frame_callback,
         (
             "if isOpen and dragTokensDirty then",
-            "if stepDragTokenReconciliation() then",
+            "if panelUi.stepDragTokenReconciliation() then",
             "local stillChoiceWork = isOpen",
             "panelUi.pairingStillChoiceWork()",
             "if stillChoiceWork and panelUi.stepPairingStillChoiceReconciliation() then",
@@ -5868,7 +6069,11 @@ def test_motionbgs_contract() -> None:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=75,
+        # Generous on purpose. This suite runs ~50s on a developer machine and
+        # several times that inside the single-vCPU NixOS test guest, where a
+        # tight bound turns a slow host into a spurious failure. The timeout is
+        # here to bound a genuine hang, not to police runtime.
+        timeout=300,
     )
     assert helper_suite.returncode == 0, helper_suite.stdout + helper_suite.stderr
     helper_stderr = ANSI_ESCAPE_RE.sub("", helper_suite.stderr)
@@ -5939,25 +6144,25 @@ def test_ui_and_documentation_surface() -> None:
         require_all(
             source,
             (
-                'local STATUS_KEY = "wall_in_one_status"',
-                'local COMMAND_KEY = "wall_in_one_command"',
+                'STATUS_KEY = "wall_in_one_status"',
+                'COMMAND_KEY = "wall_in_one_command"',
             ),
             "UI state protocol",
         )
     require_all(
         panel,
         (
-            'local CONFIG_STATE_KEY = "wall_in_one_config_state_v1"',
-            'local RUNTIME_STATE_KEY = "wall_in_one_runtime_state_v1"',
-            'local LIBRARY_STATE_KEY = "wall_in_one_library_state_v1"',
-            'local RENDERER_STATUS_KEY = "wall_in_one_renderer_status_v1"',
-            'local MOTIONBGS_STATUS_KEY = "wall_in_one_motionbgs_status_v1"',
-            'local MOTIONBGS_RESULTS_KEY = "wall_in_one_motionbgs_results_v1"',
-            'local PALETTES_STATUS_KEY = "wall_in_one_palettes_status_v1"',
-            'local WALLHAVEN_STATUS_KEY = "wall_in_one_wallhaven_status_v1"',
-            'local WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"',
-            "local function composeStatus()",
-            "local function adoptDomain(current, candidate)",
+            'const.CONFIG_STATE_KEY = "wall_in_one_config_state_v1"',
+            'const.RUNTIME_STATE_KEY = "wall_in_one_runtime_state_v1"',
+            'const.LIBRARY_STATE_KEY = "wall_in_one_library_state_v1"',
+            'const.RENDERER_STATUS_KEY = "wall_in_one_renderer_status_v1"',
+            'const.MOTIONBGS_STATUS_KEY = "wall_in_one_motionbgs_status_v1"',
+            'const.MOTIONBGS_RESULTS_KEY = "wall_in_one_motionbgs_results_v1"',
+            'const.PALETTES_STATUS_KEY = "wall_in_one_palettes_status_v1"',
+            'const.WALLHAVEN_STATUS_KEY = "wall_in_one_wallhaven_status_v1"',
+            'const.WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"',
+            "function panelUi.composeStatus()",
+            "function panelUi.adoptDomain(current, candidate)",
             "local isOpen = false",
             'kind = "playlist_create"',
             'kind = "playlist_rename"',
@@ -5991,7 +6196,7 @@ def test_ui_and_documentation_surface() -> None:
             'key = "motionbgs-page-" .. tostring(motionPageInputRevision)',
             'noctalia.tr("panel.motionbgs.previous_page")',
             'noctalia.tr("panel.motionbgs.next_page")',
-            "local function paletteInventory()",
+            "function panelUi.paletteInventory()",
             '{ id = "audio_volume_down", label = "actions.audio_volume_down" }',
             '{ id = "audio_volume_up", label = "actions.audio_volume_up" }',
             'audio_volume_down = "set_volume"',
@@ -6023,8 +6228,8 @@ def test_ui_and_documentation_surface() -> None:
     )
 
     wallhaven_store = panel[
-        panel.index("local function wallhavenSection") : panel.index(
-            "local function motionBgsSection"
+        panel.index("function panelUi.wallhavenSection") : panel.index(
+            "function panelUi.motionBgsSection"
         )
     ]
     require_all(
@@ -6042,8 +6247,8 @@ def test_ui_and_documentation_surface() -> None:
         "inline Wallhaven card download state and action",
     )
     motionbgs_store = panel[
-        panel.index("local function motionBgsSection") : panel.index(
-            "local function librarySection"
+        panel.index("function panelUi.motionBgsSection") : panel.index(
+            "function panelUi.librarySection"
         )
     ]
     require_all(
@@ -6091,50 +6296,50 @@ def test_ui_and_documentation_surface() -> None:
         assert retired not in panel, f"panel leaked retired surface {retired!r}"
     open_close = panel[panel.index("function onOpen") : panel.index("function onSettings")]
     require_all(open_close, ("isOpen = true", "isOpen = false", "panel.close()"), "panel lifecycle")
-    watcher = panel[panel.index("noctalia.state.watch(STATUS_KEY") :]
+    watcher = panel[panel.index("noctalia.state.watch(const.STATUS_KEY") :]
     require_all(
         watcher,
         (
-            "if adoptLifecycle(nextStatus) then",
-            "noctalia.state.watch(CONFIG_STATE_KEY",
-            "noctalia.state.watch(RUNTIME_STATE_KEY",
-            "noctalia.state.watch(LIBRARY_STATE_KEY",
-            "noctalia.state.watch(RENDERER_STATUS_KEY",
-            "noctalia.state.watch(MOTIONBGS_STATUS_KEY",
-            "noctalia.state.watch(MOTIONBGS_RESULTS_KEY",
-            "noctalia.state.watch(PALETTES_STATUS_KEY",
-            "noctalia.state.watch(WALLHAVEN_STATUS_KEY",
-            "noctalia.state.watch(WALLHAVEN_RESULTS_KEY",
+            "if panelUi.adoptLifecycle(nextStatus) then",
+            "noctalia.state.watch(const.CONFIG_STATE_KEY",
+            "noctalia.state.watch(const.RUNTIME_STATE_KEY",
+            "noctalia.state.watch(const.LIBRARY_STATE_KEY",
+            "noctalia.state.watch(const.RENDERER_STATUS_KEY",
+            "noctalia.state.watch(const.MOTIONBGS_STATUS_KEY",
+            "noctalia.state.watch(const.MOTIONBGS_RESULTS_KEY",
+            "noctalia.state.watch(const.PALETTES_STATUS_KEY",
+            "noctalia.state.watch(const.WALLHAVEN_STATUS_KEY",
+            "noctalia.state.watch(const.WALLHAVEN_RESULTS_KEY",
             "refreshPanelState()",
         ),
         "revisioned domain and direct provider watches",
     )
     refresh = panel[panel.index("refreshPanelState = function()") : panel.index("reloadSharedState = function()")]
-    require_all(refresh, ("status = composeStatus()", "if isOpen then", "render()"), "closed-panel render gate")
+    require_all(refresh, ("status = panelUi.composeStatus()", "if isOpen then", "render()"), "closed-panel render gate")
     lifecycle_watch = panel[
-        panel.index("noctalia.state.watch(STATUS_KEY") : panel.index("noctalia.state.watch(CONFIG_STATE_KEY")
+        panel.index("noctalia.state.watch(const.STATUS_KEY") : panel.index("noctalia.state.watch(const.CONFIG_STATE_KEY")
     ]
     require_all(
         lifecycle_watch,
         (
-            "configState = noctalia.state.get(CONFIG_STATE_KEY)",
-            "runtimeState = noctalia.state.get(RUNTIME_STATE_KEY)",
-            "libraryState = noctalia.state.get(LIBRARY_STATE_KEY)",
+            "configState = noctalia.state.get(const.CONFIG_STATE_KEY)",
+            "runtimeState = noctalia.state.get(const.RUNTIME_STATE_KEY)",
+            "libraryState = noctalia.state.get(const.LIBRARY_STATE_KEY)",
             "refreshPanelState()",
         ),
         "coalesced domain commit render",
     )
     domain_watches = panel[
-        panel.index("noctalia.state.watch(CONFIG_STATE_KEY") : panel.index(
-            "noctalia.state.watch(RENDERER_STATUS_KEY"
+        panel.index("noctalia.state.watch(const.CONFIG_STATE_KEY") : panel.index(
+            "noctalia.state.watch(const.RENDERER_STATUS_KEY"
         )
     ]
     assert "refreshPanelState()" not in domain_watches, "one domain commit must not rebuild the panel repeatedly"
     for reset in (
         "resetPanelVisibility()",
         "playlistEntryPage = 1",
-        "wallhavenVisibleResults = PROVIDER_RESULT_CHUNK",
-        "motionBgsVisibleResults = PROVIDER_RESULT_CHUNK",
+        "wallhavenVisibleResults = const.PROVIDER_RESULT_CHUNK",
+        "motionBgsVisibleResults = const.PROVIDER_RESULT_CHUNK",
     ):
         assert reset not in refresh, f"domain update collapsed show-more state via {reset!r}"
 
@@ -6198,11 +6403,11 @@ def test_declarative_ui_layout_contract() -> None:
     require_all(
         panel,
         (
-            "local BROWSER_GRID_COLUMNS = 4",
+            "const.BROWSER_GRID_COLUMNS = 4",
             "function panelUi.appendExplicitGrid(children, items, visible, columns, cardBuilder)",
             'preview.node("wallhaven", item, 216, 122, "photo")',
             'preview.node("motionbgs", item, 216, 122, "movie")',
-            "panelUi.appendExplicitGrid(children, items, visible, BROWSER_GRID_COLUMNS",
+            "panelUi.appendExplicitGrid(children, items, visible, const.BROWSER_GRID_COLUMNS",
             "local firstWeekdays = {}",
             "local secondWeekdays = {}",
             "local firstMonthRow = {}",
@@ -6279,7 +6484,7 @@ def test_display_navigation_and_drag_contract() -> None:
     """Pin the display-first navigation and library-backed ordering surfaces."""
 
     panel = text("panel.luau")
-    vm = (ROOT.parent / "tests" / "vm" / "wall-in-one.nix").read_text(encoding="utf-8")
+    vm = vm_fixture()
     page_registry = panel[
         panel.index("local panelPages = {") : panel.index("function panelPages.screenNames()")
     ]
@@ -6314,9 +6519,9 @@ def test_display_navigation_and_drag_contract() -> None:
     require_all(
         navigation,
         (
-            "local playlistPages = math.max(1, math.ceil(#playlistIds / PLAYLIST_NAV_PAGE_SIZE))",
-            "local firstPlaylist = (playlistNavigationPage - 1) * PLAYLIST_NAV_PAGE_SIZE + 1",
-            "local lastPlaylist = math.min(#playlistIds, firstPlaylist + PLAYLIST_NAV_PAGE_SIZE - 1)",
+            "local playlistPages = math.max(1, math.ceil(#playlistIds / const.PLAYLIST_NAV_PAGE_SIZE))",
+            "local firstPlaylist = (playlistNavigationPage - 1) * const.PLAYLIST_NAV_PAGE_SIZE + 1",
+            "local lastPlaylist = math.min(#playlistIds, firstPlaylist + const.PLAYLIST_NAV_PAGE_SIZE - 1)",
         ),
         "bounded playlist navigation pages",
     )
@@ -6330,7 +6535,7 @@ def test_display_navigation_and_drag_contract() -> None:
         select_screen,
         (
             "local fallback = tostring(configured.fallback_playlist or \"\")",
-            "selectedPlaylistId = if type(playlistMap()[fallback]) == \"table\"",
+            "selectedPlaylistId = if type(panelUi.playlistMap()[fallback]) == \"table\"",
             'activePage = "main"',
             'activeSubpage = "display"',
         ),
@@ -6368,13 +6573,13 @@ def test_display_navigation_and_drag_contract() -> None:
     )
 
     library_section = panel[
-        panel.index("local function librarySection") : panel.index("local function playlistActionButton")
+        panel.index("function panelUi.librarySection") : panel.index("function panelUi.playlistActionButton")
     ]
     assert "beginPairingEditor(" not in library_section, "Library must not expose a separate create-pairing button"
     assert 'noctalia.tr("panel.pairings.new")' not in library_section
 
     token_reconciliation = panel[
-        panel.index("local function markDragTokensDirty()") : panel.index(
+        panel.index("function panelUi.markDragTokensDirty()") : panel.index(
             "-- Every insertion zone shares one callback."
         )
     ]
@@ -6384,8 +6589,8 @@ def test_display_navigation_and_drag_contract() -> None:
             "dragTokenGeneration += 1",
             "dragReconcile = nil",
             "resetLibraryDragTokens()",
-            "local function stepDragTokenReconciliation()",
-            "for _ = 1, DRAG_RECONCILE_BATCH do",
+            "function panelUi.stepDragTokenReconciliation()",
+            "for _ = 1, const.DRAG_RECONCILE_BATCH do",
             "state.generation ~= dragTokenGeneration",
             'phase = "pairings"',
             "for _, descriptor in ipairs(noctalia.outputs()) do",
@@ -6433,7 +6638,7 @@ def test_display_navigation_and_drag_contract() -> None:
         frame_tick,
         (
             "if isOpen and dragTokensDirty then",
-            "if stepDragTokenReconciliation() then",
+            "if panelUi.stepDragTokenReconciliation() then",
             "panelUi.pairingStillChoiceWork()",
             "panelUi.stepPairingStillChoiceReconciliation()",
             "render()",
@@ -6464,14 +6669,14 @@ def test_display_navigation_and_drag_contract() -> None:
     )
 
     library_watch = panel[
-        panel.index("noctalia.state.watch(LIBRARY_STATE_KEY") : panel.index(
-            "noctalia.state.watch(RENDERER_STATUS_KEY"
+        panel.index("noctalia.state.watch(const.LIBRARY_STATE_KEY") : panel.index(
+            "noctalia.state.watch(const.RENDERER_STATUS_KEY"
         )
     ]
     require_all(
         library_watch,
         (
-            "local adopted, changed = adoptDomain(libraryState, nextState)",
+            "local adopted, changed = panelUi.adoptDomain(libraryState, nextState)",
             "if changed then",
             "resetLibraryDragTokens()",
         ),
@@ -6496,7 +6701,7 @@ def test_display_navigation_and_drag_contract() -> None:
     )
     display_drop = panel[
         panel.index("function onDisplayPlaylistDrop(payload, value)") : panel.index(
-            "local function adaptivePreviewSession"
+            "function panelUi.adaptivePreviewSession"
         )
     ]
     require_all(
@@ -6509,7 +6714,7 @@ def test_display_navigation_and_drag_contract() -> None:
             'send({ kind = "playlist_assign", output = selectedScreen, playlist_id = playlistId })',
             'if tostring(target.schedule_output or "") ~= selectedScreen then',
             "resetScheduleDraft(playlistId)",
-            'scheduleNameDraft = tostring(playlistMap()[playlistId].name or playlistId)',
+            'scheduleNameDraft = tostring(panelUi.playlistMap()[playlistId].name or playlistId)',
             'scheduleInsertBeforeDraft = tostring(target.schedule_before_id or "")',
             "scheduleEditorOpen = true",
         ),
@@ -6584,7 +6789,7 @@ def test_display_navigation_and_drag_contract() -> None:
     assert "wallInOne.upsertSchedule(request.output, request.schedule, request.before_id)" in commands
     assert 'kind == "pairing_delete"' not in commands
     schedule_ui = panel[
-        panel.index("local function scheduleInsertionZone") : panel.index(
+        panel.index("function panelUi.scheduleInsertionZone") : panel.index(
             "function panelUi.displayPlaylistLibrary"
         )
     ]
@@ -6600,8 +6805,8 @@ def test_display_navigation_and_drag_contract() -> None:
             'dragType = "wio-schedule"',
             "payload = dragToken",
             'text = tostring(scheduleIndex + 1) .. ". " .. scheduledPlaylistName',
-            "table.insert(children, scheduleInsertionZone(output, scheduleId))",
-            'table.insert(children, scheduleInsertionZone(output, ""))',
+            "table.insert(children, panelUi.scheduleInsertionZone(output, scheduleId))",
+            'table.insert(children, panelUi.scheduleInsertionZone(output, ""))',
             "local scheduleEditorPositioned = false",
             'if scheduleEditorOpen and editingScheduleId == "" and scheduleInsertBeforeDraft == scheduleId then',
             "scheduleEditorPositioned = true",
@@ -6617,14 +6822,14 @@ def test_display_navigation_and_drag_contract() -> None:
 
     display_library = panel[
         panel.index("function panelUi.displayPlaylistLibrary") : panel.index(
-            "local function playlistsSection"
+            "function panelUi.playlistsSection"
         )
     ]
     require_all(
         display_library,
         (
             "function panelUi.displayPlaylistLibrary(output)",
-            "local ids = sortedPlaylistIds(false)",
+            "local ids = panelUi.sortedPlaylistIds(false)",
             "panelUi.appendExplicitGrid(children, ids, displayPlaylistVisible, 2",
             "previewPath = panelUi.playlistEntryVisualState(first, output)",
             "panelUi.compactPaletteSwatch(first, tostring(first.pairing_id or \"\"))",
@@ -6640,8 +6845,8 @@ def test_display_navigation_and_drag_contract() -> None:
     )
 
     playlist_rendering = panel[
-        panel.index("local function playlistsSection") : panel.index(
-            "local function diagnosticsSection"
+        panel.index("function panelUi.playlistsSection") : panel.index(
+            "function panelUi.diagnosticsSection"
         )
     ]
     require_all(
@@ -6649,10 +6854,10 @@ def test_display_navigation_and_drag_contract() -> None:
         (
             "panelUi.playlistPairingLibrary(playlistId, output)",
             "if not editingThisPlaylist then",
-            "local playlistPageCount = math.max(1, math.ceil(#entries / PLAYLIST_ENTRY_CHUNK))",
+            "local playlistPageCount = math.max(1, math.ceil(#entries / const.PLAYLIST_ENTRY_CHUNK))",
             "then editingPlaylistEntryIndex",
-            "else (playlistEntryPage - 1) * PLAYLIST_ENTRY_CHUNK + 1",
-            "else math.min(#entries, playlistFirstEntry + PLAYLIST_ENTRY_CHUNK - 1)",
+            "else (playlistEntryPage - 1) * const.PLAYLIST_ENTRY_CHUNK + 1",
+            "else math.min(#entries, playlistFirstEntry + const.PLAYLIST_ENTRY_CHUNK - 1)",
             "for index = playlistFirstEntry, playlistLastEntry do",
             "panelUi.appendPageControls(",
             "local previewPath, sourceAvailable = panelUi.playlistEntryVisualState(entry, output)",
@@ -6673,25 +6878,25 @@ def test_display_navigation_and_drag_contract() -> None:
     assert 'kind = "playlist_move_entry"' not in playlist_rendering
 
     playlist_entry_editor = panel[
-        panel.index("local function beginPlaylistEntryEditor") : panel.index(
-            "local function playlistInsertionZone"
+        panel.index("function panelUi.beginPlaylistEntryEditor") : panel.index(
+            "function panelUi.playlistInsertionZone"
         )
     ]
     require_all(
         playlist_entry_editor,
         (
-            "local function beginPlaylistEntryEditor(entry, playlistId, entryIndex)",
+            "function panelUi.beginPlaylistEntryEditor(entry, playlistId, entryIndex)",
             "editingPlaylistEntryPlaylistId = tostring(playlistId or \"\")",
             "editingPlaylistEntryIndex = math.max(0, math.floor(tonumber(entryIndex) or 0))",
             "function panelUi.playlistEntrySourcePicker(output)",
             "ENTRY_SOURCE_PAGE_SIZE",
             "panelUi.pairingStillChoices(",
             "sourceReady = choicesReady",
-            "panelUi.libraryItems(kind, offset, ENTRY_SOURCE_PAGE_SIZE)",
+            "panelUi.libraryItems(kind, offset, const.ENTRY_SOURCE_PAGE_SIZE)",
             'id = "static"',
             'id = "video"',
             'id = "workshop"',
-            "panelUi.appendExplicitGrid(children, items, #items, PLAYLIST_LIBRARY_COLUMNS",
+            "panelUi.appendExplicitGrid(children, items, #items, const.PLAYLIST_LIBRARY_COLUMNS",
             "panelUi.libraryThumbnail(",
             "panelUi.compactPaletteSwatch(",
             "panelUi.selectPlaylistEntrySource(item)",
@@ -6713,33 +6918,35 @@ def test_display_navigation_and_drag_contract() -> None:
     ):
         assert obsolete not in panel
 
-    require_all(
-        vm,
-        (
-            'event == "vm-playlist-entry-editor"',
-            "beginPlaylistEntryEditor(playlistEntry, playlistId, playlistEntryIndex)",
-            "panelUi.selectPlaylistEntrySource(choice)",
-            "panelUi.playlistEntryEditor(playlistId, \"HEADLESS-1\")",
-            "editingPlaylistEntryPlaylistId == playlistId",
-            "editingPlaylistEntryIndex == playlistEntryIndex",
-            "WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR",
-            'timeout=20',
-            "exceeded its CPU budget",
-            "disabled after repeated timeouts",
-        ),
-        "panel-side graphical playlist-entry VM regression",
-    )
+    # Skipped inside the VM, where tests/vm/ is not staged.
+    if vm:
+        require_all(
+            vm,
+            (
+                'event == "vm-playlist-entry-editor"',
+                "beginPlaylistEntryEditor(playlistEntry, playlistId, playlistEntryIndex)",
+                "panelUi.selectPlaylistEntrySource(choice)",
+                "panelUi.playlistEntryEditor(playlistId, \"HEADLESS-1\")",
+                "editingPlaylistEntryPlaylistId == playlistId",
+                "editingPlaylistEntryIndex == playlistEntryIndex",
+                "WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR",
+                'timeout=20',
+                "exceeded its CPU budget",
+                "disabled after repeated timeouts",
+            ),
+            "panel-side graphical playlist-entry VM regression",
+        )
 
     still_reconciliation = panel[
         panel.index("panelUi.pairingStillChoiceCache =") : panel.index(
-            "local function pairingEditor"
+            "function panelUi.pairingEditor"
         )
     ]
     require_all(
         still_reconciliation,
         (
             'ownership == "user" or provider == "local" or provider == "Wallhaven"',
-            "local last = math.min(#sourceItems, first + STILL_CHOICE_RECONCILE_BATCH - 1)",
+            "local last = math.min(#sourceItems, first + const.STILL_CHOICE_RECONCILE_BATCH - 1)",
             "for index = first, last do",
             "choiceCache.cursor = last + 1",
             "choiceCache.ready = true",
@@ -6750,7 +6957,7 @@ def test_display_navigation_and_drag_contract() -> None:
 
     workshop_reconciliation = panel[
         panel.index("panelUi.workshopIndexCache =") : panel.index(
-            "local function openLibraryEntryPairing"
+            "function panelUi.openLibraryEntryPairing"
         )
     ]
     require_all(
@@ -6759,7 +6966,7 @@ def test_display_navigation_and_drag_contract() -> None:
             "sourceItems = workshops",
             "index = cached.index",
             "ready = false",
-            "local last = math.min(#sourceItems, first + WORKSHOP_INDEX_RECONCILE_BATCH - 1)",
+            "local last = math.min(#sourceItems, first + const.WORKSHOP_INDEX_RECONCILE_BATCH - 1)",
             "for index = first, last do",
             "cached.index = cached.nextIndex",
             "cached.ready = true",
@@ -6768,7 +6975,7 @@ def test_display_navigation_and_drag_contract() -> None:
     )
 
     palette_reconciliation = panel[
-        panel.index("local PALETTE_INDEX_SOURCES =") : panel.index("local function basename")
+        panel.index("const.PALETTE_INDEX_SOURCES =") : panel.index("function panelUi.basename")
     ]
     require_all(
         palette_reconciliation,
@@ -6778,8 +6985,8 @@ def test_display_navigation_and_drag_contract() -> None:
             "byName = cached.byName",
             "ready = false",
             "return cached.names, cached.ready == true, cached.nameIndex",
-            "return paletteEntryIndex(source).byName",
-            "local last = math.min(#sourceItems, first + PALETTE_INDEX_RECONCILE_BATCH - 1)",
+            "return panelUi.paletteEntryIndex(source).byName",
+            "local last = math.min(#sourceItems, first + const.PALETTE_INDEX_RECONCILE_BATCH - 1)",
             "for index = first, last do",
             "cached.names = cached.nextNames",
             "cached.byName = cached.nextByName",
@@ -6788,15 +6995,15 @@ def test_display_navigation_and_drag_contract() -> None:
         "bounded atomic palette selector indexes",
     )
     palette_name_lookup = palette_reconciliation[
-        palette_reconciliation.index("local function paletteNames") : palette_reconciliation.index(
-            "local function paletteEntryIndexWork"
+        palette_reconciliation.index("function panelUi.paletteNames") : palette_reconciliation.index(
+            "function panelUi.paletteEntryIndexWork"
         )
     ]
     assert re.search(r"^\s*(for|while)\b", palette_name_lookup, flags=re.MULTILINE) is None
 
     pairing_index_lookup = panel[
-        panel.index("local function indexedLibraryPairings") : panel.index(
-            "local function matchingPairingForLibraryEntry"
+        panel.index("function panelUi.indexedLibraryPairings") : panel.index(
+            "function panelUi.matchingPairingForLibraryEntry"
         )
     ]
     require_all(
@@ -6813,7 +7020,7 @@ def test_display_navigation_and_drag_contract() -> None:
     require_all(
         panel,
         (
-            "local function clearAutomaticStillPreparation(kind, source)",
+            "function panelUi.clearAutomaticStillPreparation(kind, source)",
             "clearAutomaticStillPreparation(kind, entryMediaSourceDraft)",
             "closePlaylistEntryEditor()\n                    selectedPlaylistId = ids[",
             "editingPlaylistEntryPlaylistId ~= playlistId",
@@ -6822,8 +7029,8 @@ def test_display_navigation_and_drag_contract() -> None:
     )
 
     playlist_zone = panel[
-        panel.index("local function playlistInsertionZone") : panel.index(
-            "local function scheduleSelectionSummary"
+        panel.index("function panelUi.playlistInsertionZone") : panel.index(
+            "function panelUi.scheduleSelectionSummary"
         )
     ]
     assert 'accepts = { "wio-library-item", "wio-entry" }' in playlist_zone
@@ -6833,6 +7040,8 @@ def main() -> None:
     test_manifest_and_translations()
     test_schema_document_fixtures()
     test_coordinator_contract()
+    test_luau_local_budget_contract()
+    test_block_scoped_luau_helpers_stay_inside_their_block()
     test_steam_handoff_is_disowned_contract()
     test_reusable_pairing_catalog_contract()
     test_item_default_provenance_contract()

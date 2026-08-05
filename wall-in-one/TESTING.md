@@ -160,13 +160,19 @@ backend used by library, palette, preview, or Wallhaven operations. Exercise
 unified and legacy launch/cancellation, plus automatic adoption of a newly
 installed shared pointer while the legacy bridge is active.
 
-Pin the Home setup card to the documented five-command flow: full commit
+Pin the Home setup card to the documented three-command flow: full commit
 `4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391`, SHA-256
-`49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a`,
-quoted current-directory paths, verification before `chmod`, same-directory
-atomic promotion of `pluginDataDir()/backend-path`, and `self-test` as the final
-command. Copying the commands is allowed; the plugin itself must never run the
-download, checksum, permission, pointer-install, or self-test commands.
+`49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a` verified
+against the value pinned in the plugin rather than a downloaded `.sha256`,
+quoted paths, verification before `chmod`, the `pluginDataDir()/backend-path`
+pointer, and `self-test` as the final step. The card may write that pointer
+itself and may hand the commands to the user's terminal or clipboard; it must
+never run the download, checksum, permission, or self-test steps silently in
+the background. A rejected or absent terminal must say so rather than appear to
+succeed, and an install directory that does not exist yet must be created.
+Confirm both paths end with a resolved backend: the in-panel install, and the
+copied block pasted into an unrelated directory, which must write its own
+pointer from `$PWD`.
 
 Pin `WIO-BACKEND-PROBE1` and `WIO-BACKEND-RPC1` interface schema 1. Requests are
 at most 64 KiB and the manifest plus each page are at most 128 KiB. Transport

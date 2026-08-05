@@ -191,39 +191,47 @@ The graphical entry editor's state callback performs only a fixed scalar
 projection; full normalization and persistence are serialized on later service
 updates through a bounded queue.
 
-Install the one-shot Python 3.11+ executable in any user-owned directory, then
-let Wall-in-One discover it. Resolution has three explicit tiers: the advanced
-**Wall-in-One backend program** setting wins, followed by the regular-file
-pointer at `pluginDataDir()/backend-path`, followed by the fixed
+The one-shot Python 3.11+ executable installs into any user-owned directory,
+and Wall-in-One then discovers it. Resolution has three explicit tiers: the
+advanced **Wall-in-One backend program** setting wins, followed by the
+regular-file pointer at `pluginDataDir()/backend-path`, followed by the fixed
 `wall-in-one-backend` name on Noctalia's `PATH`. The pointer contains one
-absolute executable path; the documented installer creates it as a regular
-file rather than a symlink. Wall-in-One never downloads, updates, or grants
-execute permission to code automatically.
+absolute executable path and is a regular file rather than a symlink. Nothing
+is downloaded, updated, or made executable until you ask for it.
 
-The setup card in **Home** copies the same five commands with its exact
-`pluginDataDir()` path. In a terminal, first enter the directory where the
-backend should remain, then run the commands. The example below uses
-Noctalia's default XDG state location; when Noctalia runs under a custom state
-root, use the pointer destination shown by the setup card. Every expansion that
-may contain spaces is quoted.
+While the backend is missing, **Home** shows a setup card. Type the directory
+the backend should live in -- it defaults to `~/.local/bin` -- and press
+**Install in terminal**. Wall-in-One writes the pointer for that directory,
+then opens the commands in your configured terminal; the download is what you
+watch, and nothing else needs configuring afterwards. A pointer aimed at a file
+that does not exist yet is simply unresolved, so writing it first is safe.
+
+If no terminal is configured, or the backend belongs somewhere the panel does
+not know about, **Copy commands** puts the same block on the clipboard. Run it
+from the directory the backend should remain in; it writes the pointer from
+`$PWD` itself, so a pasted run needs nothing from the panel. The card always
+shows its exact `pluginDataDir()` destination, which matters when Noctalia runs
+under a custom state root.
 
 ```bash
-installed=0; install_dir="$(pwd -P)" || install_dir=; backend="$install_dir/wall-in-one-backend"; pointer_dir="${XDG_STATE_HOME:-$HOME/.local/state}/noctalia/plugins/data/goober/wall-in-one"; expected='49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a'; base='https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391/wall-in-one-backend'; stage=; test -n "$install_dir" && stage="$(mktemp -d --tmpdir="$install_dir" .wall-in-one-backend.XXXXXX)"
-test -n "$stage" && curl --disable --fail --silent --show-error --location --max-redirs 0 --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 1048576 --output "$stage/wall-in-one-backend" "$base/wall-in-one-backend" && curl --disable --fail --silent --show-error --location --max-redirs 0 --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 4096 --output "$stage/wall-in-one-backend.sha256" "$base/wall-in-one-backend.sha256"
-test -n "$stage" && { checksum_line="$(<"$stage/wall-in-one-backend.sha256")"; test "$checksum_line" = "$expected  wall-in-one-backend" && test "$(wc -l < "$stage/wall-in-one-backend.sha256")" = 1 && (cd "$stage" && sha256sum -c -- wall-in-one-backend.sha256 && : > .verified); }
-test -n "$stage" && test -f "$stage/.verified" && chmod 0755 -- "$stage/wall-in-one-backend" && mv -fT -- "$stage/wall-in-one-backend" "$backend" && rm -f -- "$stage/wall-in-one-backend.sha256" "$stage/.verified" && rmdir -- "$stage" && mkdir -p -- "$pointer_dir" && pointer_tmp="$(mktemp --tmpdir="$pointer_dir" .backend-path.XXXXXX)" && printf '%s\n' "$backend" > "$pointer_tmp" && chmod 0600 -- "$pointer_tmp" && mv -fT -- "$pointer_tmp" "$pointer_dir/backend-path" && installed=1
-test "$installed" = 1 && ./wall-in-one-backend self-test
+get='curl --disable --fail --silent --show-error --location --max-redirs 0 --proto =https --proto-redir =https --tlsv1.2 --max-filesize 1048576'
+$get -o wall-in-one-backend 'https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391/wall-in-one-backend/wall-in-one-backend'
+printf '%s  wall-in-one-backend\n' '49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a' | sha256sum -c - \
+  && chmod 0755 wall-in-one-backend \
+  && mkdir -p ~/.local/state/noctalia/plugins/data/goober/wall-in-one \
+  && printf '%s\n' "$PWD/wall-in-one-backend" > ~/.local/state/noctalia/plugins/data/goober/wall-in-one/backend-path \
+  && ./wall-in-one-backend self-test
 ```
 
-The second command downloads both files as non-executable data. The third must
-report `OK` and creates its private `.verified` marker only after both the
-tracked digest line and payload pass; the fourth refuses to `chmod` without
-that marker even when the whole block was pasted at once. Both the pinned
-program and this documented digest are served from the
+The download lands as non-executable data. The digest is the one pinned in the
+plugin, not a sibling file fetched alongside the program: a host that could
+serve a swapped binary could serve a matching checksum next to it. The steps
+are `&&`-chained, so a failed digest cannot fall through to `chmod`, to the
+pointer, or to running the result -- pasting the whole block at once is the
+intended use. Both the pinned program and this documented digest come from the
 same GitHub account, so the checksum detects corruption or unexpected content
 but is not an independent proof of provenance. Verify the account and full
 commit through a separately trusted GitHub view when that distinction matters.
-The same-directory renames atomically replace both the executable and pointer.
 While the backend is unresolved, the bridges automatically discover a newly
 valid pointer without a Noctalia restart; a ready backend is not process-probed
 forever for optional manual pointer changes. An explicit configured path

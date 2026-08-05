@@ -121,9 +121,10 @@ The available bar entries are `goober/hydra-update-examiner:hydra`,
 managed by Noctalia; a separate manual checkout is not required for the
 plugins. Noctalia does not install Wall-in-One's optional external backend;
 its **Get backend** link opens the separately staged
-[`wall-in-one-backend/`](wall-in-one-backend/) source. The
+[`wall-in-one-backend/`](wall-in-one-backend/) source, and its setup card runs
+a checksum-verified install in your own terminal on request. The
 [`wall-in-one/README.md`](wall-in-one/README.md#external-backend-installation)
-describes checksum-verified user-local installation and degraded behavior.
+describes that installation and the degraded behavior without it.
 
 ### Declarative configuration
 

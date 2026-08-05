@@ -71,19 +71,51 @@ All notable staging changes will be recorded here.
   fallback. Retain `motionbgs_binary_path` as an invisible, MotionBGS-only
   compatibility fallback for the pre-0.8 standalone helper; it cannot select
   the generic backend used by library, palette, preview, or Wallhaven work.
-- Add a five-command Home setup card and matching documentation for the external
-  backend: download raw content pinned to the full repository commit, verify the
-  tracked SHA-256 digest before `chmod`, atomically write the regular-file
-  `pluginDataDir()/backend-path` pointer, and finish with the backend self-test.
-  Resolve an explicit advanced path first, the automatic pointer second, and
-  the fixed PATH name last; automatically discover a pointer installed while
-  the backend is missing and move an active legacy MotionBGS bridge onto that
-  shared backend. Wall-in-One only copies the commands and never downloads,
-  updates, or executes them.
+- Add a Home setup card and matching documentation for the external backend.
+  Pick the directory the backend should live in, press **Install in terminal**,
+  and Wall-in-One writes the `pluginDataDir()/backend-path` pointer and opens
+  the download in the configured terminal; a pointer aimed at a file that has
+  not landed yet is simply unresolved, so it is safe to write first. The block
+  is three readable commands: download raw content pinned to the full
+  repository commit, verify it against the SHA-256 digest pinned in the plugin
+  -- not a `.sha256` fetched from the same host that served the program -- and
+  only then `chmod`, write the pointer, and run the backend self-test.
+  **Copy commands** still covers terminals Noctalia cannot launch; the pasted
+  form writes its own pointer from `$PWD`. Resolve an explicit advanced path
+  first, the automatic pointer second, and the fixed PATH name last;
+  automatically discover a pointer installed while the backend is missing and
+  move an active legacy MotionBGS bridge onto that shared backend. Nothing is
+  downloaded, verified, or executed until the user asks, and never silently in
+  the background.
   A missing backend still degrades library/external-palette refresh, provider
   previews, and integrated shops without disabling host-coupled renderer,
   wallpaper/palette application, adaptive previews, configured playlists, or
   direct-site controls.
+- Fix a panel that could not load at all. Luau allows 200 locals per function
+  and an entry file is one function, so `panel.luau` had grown past the limit
+  and failed to compile outright. Its constants and panel-scope routines are
+  now fields of `const` and `panelUi`, which cost no registers; the offline
+  contract asserts that placement and compiles every entry whenever
+  `luau-compile` is reachable, so the ceiling cannot be crossed silently again.
+- Route three panel reconciliation caches through `preview.wake()`. They called
+  the preview scheduler's private `wakeUpdate`, which is scoped to that module's
+  block and resolves to nil outside it -- Luau treats the name as a global, so
+  the entry still loads and only the callback that reaches the line dies. The
+  offline contract now rejects any call to a block-scoped local from outside
+  its block.
+- Give each expensive RPC step a service tick of its own. Noctalia meters
+  `update` at 12ms of thread CPU. Decoding a response envelope and validating
+  every page descriptor it names shared one callback, as did decoding a page and
+  normalizing its first batch of entries, and unlinking a cancelled paged
+  operation's page files was an unbounded run of stat/unlink pairs in a single
+  callback -- that one is now drained in batches like validation already was.
+  All three overran the budget on a real library scan, and repeated overruns
+  disable a plugin outright. Validation is a little slower per page and no
+  longer risks the ceiling. The panel's `update` now drains a
+  pending render before stepping the preview scheduler for the same reason:
+  finishing a provider-preview RPC and rebuilding every card in one callback
+  overran the same budget, and a render the step requests is picked up on the
+  next tick, which stays at the active poll interval while one is pending.
 - Hand off to Steam instead of supervising it. Noctalia signals a timed-out
   command's whole process group, and `steam -applaunch` *is* the client rather
   than a launcher, so a cold client boot was killed at the ten-second deadline

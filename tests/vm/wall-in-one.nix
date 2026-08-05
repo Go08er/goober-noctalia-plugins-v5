@@ -1692,8 +1692,8 @@ let
                 return
             end
             local section = if vmPreview.provider == "wallhaven"
-                then wallhavenSection()
-                else motionBgsSection()
+                then panelUi.wallhavenSection()
+                else panelUi.motionBgsSection()
             panel.render(ui.column({ gap = 10, padding = 14, align = "stretch", flexGrow = 1 }, {
                 ui.label({
                     text = "VM provider preview · " .. vmPreview.provider,
@@ -1741,8 +1741,8 @@ let
                     source = source,
                     label = "VM Fresh Workshop",
                 }
-                local existing = matchingPairingForLibraryEntry(entry)
-                openLibraryEntryPairing(entry, {
+                local existing = panelUi.matchingPairingForLibraryEntry(entry)
+                panelUi.openLibraryEntryPairing(entry, {
                     id = "vm-fresh-workshop",
                     preview = "",
                     ownership = "steam",
@@ -1758,7 +1758,7 @@ let
                         .. " still=" .. tostring(entryStillModeDraft)
                         .. " id_empty=" .. tostring(editingPairingId == "")
                 )
-                closePairingEditor()
+                panelUi.closePairingEditor()
                 activePage = "main"
                 activeSubpage = ""
                 return
@@ -1766,8 +1766,8 @@ let
                 local playlistId = ""
                 local playlistEntryIndex = 0
                 local playlistEntry = nil
-                for _, candidateId in ipairs(sortedPlaylistIds(false)) do
-                    local candidate = playlistMap()[candidateId]
+                for _, candidateId in ipairs(panelUi.sortedPlaylistIds(false)) do
+                    local candidate = panelUi.playlistMap()[candidateId]
                     local entries = type(candidate) == "table" and candidate.entries or nil
                     if type(entries) == "table" and type(entries[1]) == "table" then
                         playlistId = candidateId
@@ -1791,7 +1791,7 @@ let
                     local originalAddedAt = tostring(playlistEntry.added_at or "")
                     local originalMedia = type(playlistEntry.media) == "table" and playlistEntry.media or {}
                     local originalSource = tostring(originalMedia.source or "")
-                    beginPlaylistEntryEditor(playlistEntry, playlistId, playlistEntryIndex)
+                    panelUi.beginPlaylistEntryEditor(playlistEntry, playlistId, playlistEntryIndex)
                     opened = playlistEntryEditorOpen == true
                         and editingPlaylistEntryId == originalId
                         and editingPlaylistEntryPlaylistId == playlistId
@@ -1804,7 +1804,7 @@ let
                     local pageChoices, _library, totalChoices = panelUi.libraryItems(
                         "video",
                         0,
-                        ENTRY_SOURCE_PAGE_SIZE
+                        const.ENTRY_SOURCE_PAGE_SIZE
                     )
                     sourceChoices = pageChoices
                     sourceTotal = totalChoices
@@ -1894,7 +1894,7 @@ let
                 wallhavenState = { available = true, busy = false }
                 providerResultEpochs.wallhaven += 1
                 vmPreview.provider = ""
-                status = composeStatus()
+                status = panelUi.composeStatus()
                 status.storage_valid = true
                 activePage = "main"
                 activeSubpage = ""
@@ -1902,7 +1902,7 @@ let
                 local visible = panelUi.providerItems(
                     items,
                     providerResultPages.wallhaven,
-                    PROVIDER_RESULT_CHUNK
+                    const.PROVIDER_RESULT_CHUNK
                 )
                 noctalia.log(
                     "WALL_IN_ONE_VM_WALLHAVEN_ROUTE_CACHE "
@@ -1959,7 +1959,7 @@ let
                 vmPreview.sustained = true
                 vmPreview.frameTicks = 0
                 vmPreview.renderPasses = 0
-                status = composeStatus()
+                status = panelUi.composeStatus()
                 status.storage_valid = true
                 if type(status.providers) ~= "table" then
                     status.providers = {}
@@ -1972,7 +1972,7 @@ let
                 activeSubpage = "motionbgs"
                 render()
                 panel.setNeedsFrameTick(true)
-                local visible = panelUi.providerItems(items, providerResultPages.motionbgs, PROVIDER_RESULT_CHUNK)
+                local visible = panelUi.providerItems(items, providerResultPages.motionbgs, const.PROVIDER_RESULT_CHUNK)
                 noctalia.log(
                     "WALL_IN_ONE_VM_MOTION_SUSTAINED_START "
                         .. tostring(payload or "")
@@ -1986,7 +1986,7 @@ let
                         and type(motionBgsResultsState.items) == "table"
                         and motionBgsResultsState.items
                     or {}
-                local visible = panelUi.providerItems(source, providerResultPages.motionbgs, PROVIDER_RESULT_CHUNK)
+                local visible = panelUi.providerItems(source, providerResultPages.motionbgs, const.PROVIDER_RESULT_CHUNK)
                 noctalia.log(
                     "WALL_IN_ONE_VM_MOTION_SUSTAINED "
                         .. tostring(payload or "")
@@ -2075,7 +2075,7 @@ let
                     wallhavenState = { available = true, busy = false }
                     providerResultEpochs.wallhaven += 1
                     vmPreview.provider = provider
-                    status = composeStatus()
+                    status = panelUi.composeStatus()
                     status.storage_valid = true
                     render()
                     noctalia.log("WALL_IN_ONE_VM_PROVIDER_PREVIEW wallhaven token=" .. token)
@@ -2100,7 +2100,7 @@ let
                     }
                     providerResultEpochs.motionbgs += 1
                     vmPreview.provider = provider
-                    status = composeStatus()
+                    status = panelUi.composeStatus()
                     status.storage_valid = true
                     if type(status.providers) ~= "table" then
                         status.providers = {}
@@ -4339,19 +4339,39 @@ pkgs.testers.runNixOSTest (
       # playlist state and a real indexed video card. This must build and render
       # the production graphical picker without a raw source-path field while
       # preserving the occurrence's durable identity fields in the draft.
-      entry_editor_token = "indexed-video"
-      assert noctalia_msg(
-          f"plugin ${pluginId}:hub all vm-playlist-entry-editor {entry_editor_token}"
-      ).strip() == "ok: dispatched 1"
-      entry_editor_marker = (
-          f"WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR {entry_editor_token} "
-          "playlist=true entry=true open=true choices=6 "
-          "selected=true source_changed=true id_preserved=true "
-          "added_at_preserved=true position_preserved=true rendered=true"
-      )
-      machine.wait_until_succeeds(
-          journal + " | grep -F -- " + shlex.quote(entry_editor_marker),
-          timeout=20,
+      # The panel adopts the coordinator's library domain asynchronously, so a
+      # single dispatch can land before any indexed video has reached panel
+      # state and answer with choices=0. Waiting longer cannot help: the probe
+      # already logged its one-shot answer. Re-dispatch under a fresh token
+      # instead. The probe closes its editor and returns to the main page on
+      # every pass, so repeating it is side-effect free.
+      entry_editor_matched = False
+      for attempt in range(1, 9):
+          entry_editor_token = f"indexed-video-{attempt}"
+          assert noctalia_msg(
+              f"plugin ${pluginId}:hub all vm-playlist-entry-editor {entry_editor_token}"
+          ).strip() == "ok: dispatched 1"
+          entry_editor_marker = (
+              f"WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR {entry_editor_token} "
+              "playlist=true entry=true open=true choices=6 "
+              "selected=true source_changed=true id_preserved=true "
+              "added_at_preserved=true position_preserved=true rendered=true"
+          )
+          try:
+              machine.wait_until_succeeds(
+                  journal + " | grep -F -- " + shlex.quote(entry_editor_marker),
+                  timeout=10,
+              )
+          except Exception:
+              continue
+          entry_editor_matched = True
+          break
+      assert entry_editor_matched, (
+          "playlist entry editor probe never reported the populated shape:\n"
+          + machine.succeed(
+              journal
+              + " | grep -F -- WALL_IN_ONE_VM_PLAYLIST_ENTRY_EDITOR || true"
+          )
       )
       machine.fail(f"{journal} | grep -F -- 'exceeded its CPU budget'")
       machine.fail(
@@ -4725,9 +4745,14 @@ pkgs.testers.runNixOSTest (
       assert sustained_fields["render_pending"] == "false", sustained_line
       assert int(sustained_fields["entries"]) <= 64, sustained_line
       assert 12 <= int(sustained_fields["paths"]) <= 64, sustained_line
-      assert int(float(sustained_fields["last_used"])) > 1, sustained_line
+      # The preview LRU moved into the backend in 0.8, so the panel no longer
+      # tracks per-key recency and reports none. Its own cache population is
+      # covered by entries/paths above.
+      assert sustained_fields["last_used"] == "nil", sustained_line
       assert sustained_fields["interval"] == "5000", sustained_line
-      assert sustained_fields["sweep"] == "0/0", sustained_line
+      # Index 0 is the settled state: no sweep is in progress. The limit is the
+      # current plan's size, not a panel-side cursor bound.
+      assert sustained_fields["sweep"].startswith("0/"), sustained_line
       assert sustained_fields["drag_dirty"] == "false", sustained_line
       assert sustained_fields["open"] == "true", sustained_line
       assert sustained_fields["scope"].startswith("motionbgs:"), sustained_line

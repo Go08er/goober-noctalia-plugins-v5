@@ -2,30 +2,36 @@
 -- Wall-in-One full-size hub. It controls its coordinator and renderer only
 -- through versioned shared state; website links are always explicit actions.
 
-local STATUS_KEY = "wall_in_one_status"
-local COMMAND_KEY = "wall_in_one_command"
-local CONFIG_STATE_KEY = "wall_in_one_config_state_v1"
-local RUNTIME_STATE_KEY = "wall_in_one_runtime_state_v1"
-local LIBRARY_STATE_KEY = "wall_in_one_library_state_v1"
-local RENDERER_STATUS_KEY = "wall_in_one_renderer_status_v1"
-local MOTIONBGS_STATUS_KEY = "wall_in_one_motionbgs_status_v1"
-local MOTIONBGS_RESULTS_KEY = "wall_in_one_motionbgs_results_v1"
-local PALETTES_STATUS_KEY = "wall_in_one_palettes_status_v1"
-local WALLHAVEN_STATUS_KEY = "wall_in_one_wallhaven_status_v1"
-local WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"
-local PROVIDER_RESULT_CHUNK = 12
-local LIBRARY_ENTRY_CHUNK = 8
-local PLAYLIST_ENTRY_CHUNK = 12
-local PAIRING_CARD_CHUNK = 12
-local ENTRY_SOURCE_PAGE_SIZE = 6
-local STILL_CHOICE_RECONCILE_BATCH = 32
-local WORKSHOP_INDEX_RECONCILE_BATCH = 32
-local PALETTE_INDEX_RECONCILE_BATCH = 32
-local BROWSER_GRID_COLUMNS = 4
-local PLAYLIST_LIBRARY_COLUMNS = 3
-local DRAG_RECONCILE_BATCH = 64
-local LIBRARY_PAGE_SIZE = 24
-local PLAYLIST_NAV_PAGE_SIZE = 16
+-- Luau allows 200 locals per function and this file is one function.
+-- Panel-scope constants and routines therefore live as fields of two
+-- tables rather than as top-level locals; fields cost no registers.
+local const = {}
+local panelUi = {}
+
+const.STATUS_KEY = "wall_in_one_status"
+const.COMMAND_KEY = "wall_in_one_command"
+const.CONFIG_STATE_KEY = "wall_in_one_config_state_v1"
+const.RUNTIME_STATE_KEY = "wall_in_one_runtime_state_v1"
+const.LIBRARY_STATE_KEY = "wall_in_one_library_state_v1"
+const.RENDERER_STATUS_KEY = "wall_in_one_renderer_status_v1"
+const.MOTIONBGS_STATUS_KEY = "wall_in_one_motionbgs_status_v1"
+const.MOTIONBGS_RESULTS_KEY = "wall_in_one_motionbgs_results_v1"
+const.PALETTES_STATUS_KEY = "wall_in_one_palettes_status_v1"
+const.WALLHAVEN_STATUS_KEY = "wall_in_one_wallhaven_status_v1"
+const.WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"
+const.PROVIDER_RESULT_CHUNK = 12
+const.LIBRARY_ENTRY_CHUNK = 8
+const.PLAYLIST_ENTRY_CHUNK = 12
+const.PAIRING_CARD_CHUNK = 12
+const.ENTRY_SOURCE_PAGE_SIZE = 6
+const.STILL_CHOICE_RECONCILE_BATCH = 32
+const.WORKSHOP_INDEX_RECONCILE_BATCH = 32
+const.PALETTE_INDEX_RECONCILE_BATCH = 32
+const.BROWSER_GRID_COLUMNS = 4
+const.PLAYLIST_LIBRARY_COLUMNS = 3
+const.DRAG_RECONCILE_BATCH = 64
+const.LIBRARY_PAGE_SIZE = 24
+const.PLAYLIST_NAV_PAGE_SIZE = 16
 
 local status = nil
 local lifecycleStatus = nil
@@ -94,7 +100,7 @@ local pendingResetPairingId = ""
 local playlistLibraryFilter = "all"
 local playlistLibraryPage = 1
 local playlistNavigationPage = 1
-local displayPlaylistVisible = PAIRING_CARD_CHUNK
+local displayPlaylistVisible = const.PAIRING_CARD_CHUNK
 local adaptivePreviewSequence = 0
 local adaptivePreviewInstance = ""
 local adaptivePreviewKeys = {}
@@ -162,48 +168,116 @@ local reloadSharedState
 -- The backend setup instructions are immutable for this panel runtime. Build
 -- them once: a missing backend must not add string-building work to every
 -- render while Noctalia is already protecting a tight callback budget.
-local BACKEND_INSTALL_REF = "4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391"
-local BACKEND_INSTALL_SHA256 = "49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a"
+const.BACKEND_INSTALL_REF = "4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391"
+const.BACKEND_INSTALL_SHA256 = "49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a"
 local backendSetupCache = nil
 local backendSetupCopyFeedback = ""
+local backendInstallDirDraft = ""
 
-local function backendSetupShellQuote(value)
+-- Where the executable goes when the user does not choose somewhere else.
+const.BACKEND_DEFAULT_INSTALL_DIR = "~/.local/bin"
+
+function panelUi.backendInstallDirectory()
+    local raw = noctalia.string.trim(backendInstallDirDraft)
+    if raw == "" then
+        raw = const.BACKEND_DEFAULT_INSTALL_DIR
+    end
+    local expanded = tostring(noctalia.expandPath(raw) or ""):gsub("/+$", "")
+    if expanded:sub(1, 1) ~= "/" or expanded:find("[%c]") ~= nil then
+        return ""
+    end
+    return expanded
+end
+
+function panelUi.backendSetupShellQuote(value)
     return "'" .. tostring(value or ""):gsub("'", "'\"'\"'") .. "'"
 end
 
-local function backendSetupDetails()
-    if type(backendSetupCache) == "table" then
+function panelUi.backendSetupDetails()
+    local installDirectory = panelUi.backendInstallDirectory()
+    -- Keyed on the chosen directory: still built once per distinct choice, so a
+    -- missing backend adds no string work to renders the user is not driving.
+    if type(backendSetupCache) == "table" and backendSetupCache.install_dir == installDirectory then
         return backendSetupCache
     end
     local pluginDataDirectory = tostring(noctalia.pluginDataDir() or ""):gsub("/+$", "")
     local pointerPath = pluginDataDirectory .. "/backend-path"
     local rawBase = "https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/"
-        .. BACKEND_INSTALL_REF
+        .. const.BACKEND_INSTALL_REF
         .. "/wall-in-one-backend"
+    -- No inner quoting around =https: this string is single-quoted whole into
+    -- $get below, so embedded quotes would reach curl literally and be rejected.
+    -- Word splitting on $get is what expands the options, and every value here
+    -- is a fixed literal with no whitespace, so splitting is safe.
     local curlProgram = "curl --disable --fail --silent --show-error --location --max-redirs 0"
-        .. " --proto '=https' --proto-redir '=https' --tlsv1.2"
+        .. " --proto =https --proto-redir =https --tlsv1.2"
+    -- Four readable lines, not four hundred-character ones. The digest is the
+    -- one pinned in this plugin, not a sibling file fetched from the same host:
+    -- a host that could serve a swapped binary could serve a matching checksum
+    -- next to it, so downloading .sha256 would verify nothing an attacker could
+    -- not forge. Verifying against the pinned value is both shorter and
+    -- stronger. The steps are &&-chained, so a failed digest cannot fall
+    -- through to chmod, to the pointer write, or to running the result.
     local commands = table.concat({
-        "installed=0; install_dir=\"$(pwd -P)\" || install_dir=; backend=\"$install_dir/wall-in-one-backend\"; pointer_dir="
-            .. backendSetupShellQuote(pluginDataDirectory)
-            .. "; expected="
-            .. backendSetupShellQuote(BACKEND_INSTALL_SHA256)
-            .. "; base="
-            .. backendSetupShellQuote(rawBase)
-            .. "; stage=; test -n \"$install_dir\" && stage=\"$(mktemp -d --tmpdir=\"$install_dir\" .wall-in-one-backend.XXXXXX)\"",
-        "test -n \"$stage\" && "
-            .. curlProgram
-            .. " --max-filesize 1048576 --output \"$stage/wall-in-one-backend\" \"$base/wall-in-one-backend\" && "
-            .. curlProgram
-            .. " --max-filesize 4096 --output \"$stage/wall-in-one-backend.sha256\" \"$base/wall-in-one-backend.sha256\"",
-        "test -n \"$stage\" && { checksum_line=\"$(<\"$stage/wall-in-one-backend.sha256\")\"; test \"$checksum_line\" = \"$expected  wall-in-one-backend\" && test \"$(wc -l < \"$stage/wall-in-one-backend.sha256\")\" = 1 && (cd \"$stage\" && sha256sum -c -- wall-in-one-backend.sha256 && : > .verified); }",
-        "test -n \"$stage\" && test -f \"$stage/.verified\" && chmod 0755 -- \"$stage/wall-in-one-backend\" && mv -fT -- \"$stage/wall-in-one-backend\" \"$backend\" && rm -f -- \"$stage/wall-in-one-backend.sha256\" \"$stage/.verified\" && rmdir -- \"$stage\" && mkdir -p -- \"$pointer_dir\" && pointer_tmp=\"$(mktemp --tmpdir=\"$pointer_dir\" .backend-path.XXXXXX)\" && printf '%s\\n' \"$backend\" > \"$pointer_tmp\" && chmod 0600 -- \"$pointer_tmp\" && mv -fT -- \"$pointer_tmp\" \"$pointer_dir/backend-path\" && installed=1",
-        "test \"$installed\" = 1 && ./wall-in-one-backend self-test",
+        "get=" .. panelUi.backendSetupShellQuote(curlProgram .. " --max-filesize 1048576"),
+        "$get -o wall-in-one-backend " .. panelUi.backendSetupShellQuote(rawBase .. "/wall-in-one-backend"),
+        "printf '%s  wall-in-one-backend\\n' "
+            .. panelUi.backendSetupShellQuote(const.BACKEND_INSTALL_SHA256)
+            .. " | sha256sum -c - \\\n"
+            .. "  && chmod 0755 wall-in-one-backend \\\n"
+            .. "  && mkdir -p "
+            .. panelUi.backendSetupShellQuote(pluginDataDirectory)
+            .. " \\\n  && printf '%s\\n' \"$PWD/wall-in-one-backend\" > "
+            .. panelUi.backendSetupShellQuote(pointerPath)
+            .. " \\\n  && ./wall-in-one-backend self-test",
     }, "\n")
+    -- The same steps, run in the directory the user picked instead of wherever
+    -- they happened to cd. The trailing pause keeps the checksum result and the
+    -- self-test banner readable after a terminal that closes on exit.
+    local terminalCommand = ""
+    if installDirectory ~= "" then
+        terminalCommand = "mkdir -p " .. panelUi.backendSetupShellQuote(installDirectory)
+            .. " && cd " .. panelUi.backendSetupShellQuote(installDirectory) .. " || exit 1\n"
+            .. commands
+            .. "\nstatus=$?\n"
+            .. "printf '\\n%s\\n' 'Press Enter to close.'\n"
+            .. "read _\n"
+            .. "exit \"$status\""
+    end
     backendSetupCache = {
         commands = commands,
+        terminal_command = terminalCommand,
+        install_dir = installDirectory,
         pointer_path = pointerPath,
     }
     return backendSetupCache
+end
+
+-- Written before the download runs, not after: resolution re-validates the
+-- pointer target every DISCOVERY_RETRY_MS, so a pointer aimed at a file that
+-- does not exist yet is simply unresolved until the executable lands. The
+-- pasted command block writes the same pointer from "$PWD" because a user who
+-- copies it may run it anywhere; doing it here as well is what makes the
+-- in-panel install self-contained even if that last step never runs.
+function panelUi.writeBackendPointer(installDirectory)
+    local details = panelUi.backendSetupDetails()
+    local pointerPath = tostring(details.pointer_path or "")
+    if pointerPath == "" or installDirectory == "" then
+        return false
+    end
+    local directory = pointerPath:match("^(.*)/[^/]+$") or ""
+    if directory ~= "" and noctalia.mkdirAll(directory) ~= true then
+        return false
+    end
+    local temporary = pointerPath .. ".tmp"
+    if noctalia.writeFile(temporary, installDirectory .. "/wall-in-one-backend\n") ~= true then
+        return false
+    end
+    if noctalia.renameFile(temporary, pointerPath) ~= true then
+        noctalia.removeFile(temporary)
+        return false
+    end
+    return true
 end
 
 local preview = {}
@@ -1041,25 +1115,25 @@ preview.close = function()
 end
 end
 
-local function resetLibraryVisibility()
+function panelUi.resetLibraryVisibility()
     libraryPageStills = 1
     libraryPageVideos = 1
     libraryPageWorkshops = 1
 end
 
-local function resetPanelVisibility()
+function panelUi.resetPanelVisibility()
     playlistEntryPage = 1
     providerResultPages.wallhaven = 1
     providerResultPages.motionbgs = 1
-    resetLibraryVisibility()
+    panelUi.resetLibraryVisibility()
     playlistLibraryPage = 1
     playlistNavigationPage = 1
-    displayPlaylistVisible = PAIRING_CARD_CHUNK
+    displayPlaylistVisible = const.PAIRING_CARD_CHUNK
 end
 
 -- Wallhaven accepts this documented, closed color set. Keeping the picker
 -- constrained prevents avoidable request errors from free-form hex values.
-local WALLHAVEN_COLOR_VALUES = {
+const.WALLHAVEN_COLOR_VALUES = {
     "660000",
     "990000",
     "cc0000",
@@ -1091,7 +1165,7 @@ local WALLHAVEN_COLOR_VALUES = {
     "424153",
 }
 
-local ACTIONS = {
+const.ACTIONS = {
     { id = "native_next", label = "actions.native_next" },
     { id = "native_previous", label = "actions.native_previous" },
     { id = "native_random", label = "actions.native_random" },
@@ -1132,7 +1206,7 @@ local ACTIONS = {
     { id = "no_action", label = "actions.no_action" },
 }
 
-local GENERIC_RENDERER_CAPABILITIES = {
+const.GENERIC_RENDERER_CAPABILITIES = {
     playback_pause = "pause",
     playback_resume = "resume",
     playback_toggle = "toggle",
@@ -1144,7 +1218,7 @@ local GENERIC_RENDERER_CAPABILITIES = {
     audio_volume_up = "set_volume",
 }
 
-local function matchingDomain(candidate)
+function panelUi.matchingDomain(candidate)
     if type(candidate) ~= "table" or tonumber(candidate.protocol) ~= 1 then
         return nil
     end
@@ -1157,7 +1231,7 @@ local function matchingDomain(candidate)
     return candidate
 end
 
-local function composeStatus()
+function panelUi.composeStatus()
     if type(lifecycleStatus) ~= "table" then
         return nil
     end
@@ -1172,7 +1246,7 @@ local function composeStatus()
         view[key] = value
     end
 
-    local configDomain = matchingDomain(configState)
+    local configDomain = panelUi.matchingDomain(configState)
     if type(configDomain) == "table" then
         if type(configDomain.config) == "table" then
             view.config = configDomain.config
@@ -1182,7 +1256,7 @@ local function composeStatus()
         end
     end
 
-    local runtimeDomain = matchingDomain(runtimeState)
+    local runtimeDomain = panelUi.matchingDomain(runtimeState)
     local runtime = type(runtimeDomain) == "table" and type(runtimeDomain.runtime) == "table"
             and runtimeDomain.runtime
         or {}
@@ -1194,7 +1268,7 @@ local function composeStatus()
     view.current_workshops = type(runtime.current_workshops) == "table" and runtime.current_workshops or {}
     view.last_capture = type(runtime.last_capture) == "table" and runtime.last_capture or {}
 
-    local libraryDomain = matchingDomain(libraryState)
+    local libraryDomain = panelUi.matchingDomain(libraryState)
     view.library = type(libraryDomain) == "table" and type(libraryDomain.library) == "table"
             and libraryDomain.library
         or {}
@@ -1215,12 +1289,12 @@ local function composeStatus()
     return view
 end
 
-local function focusedOutput()
+function panelUi.focusedOutput()
     local output = noctalia.focusedOutputName()
     return if type(output) == "string" then output else ""
 end
 
-local function providers()
+function panelUi.providers()
     if type(status) == "table" and type(status.providers) == "table" then
         return status.providers
     end
@@ -1250,7 +1324,7 @@ local function providers()
     }
 end
 
-local function entryForOutput(entry, output)
+function panelUi.entryForOutput(entry, output)
     local copied = {}
     if type(entry) == "table" then
         for key, value in pairs(entry) do
@@ -1278,7 +1352,7 @@ local function entryForOutput(entry, output)
     return copied
 end
 
-local function settings()
+function panelUi.settings()
     if type(status) == "table" and type(status.settings) == "table" then
         return status.settings
     end
@@ -1300,43 +1374,43 @@ local function settings()
     }
 end
 
-local function motionBgsData()
+function panelUi.motionBgsData()
     local value = type(status) == "table" and type(status.motionbgs) == "table" and status.motionbgs or {}
     return type(value.status) == "table" and value.status or {},
         type(value.results) == "table" and value.results or { items = {}, selected = {} }
 end
 
-local function wallhavenData()
+function panelUi.wallhavenData()
     local value = type(status) == "table" and type(status.wallhaven) == "table" and status.wallhaven or {}
     return type(value.status) == "table" and value.status or {},
         type(value.results) == "table" and value.results or { items = {}, selected = {}, meta = {} }
 end
 
-local function storageValid()
+function panelUi.storageValid()
     return type(status) == "table" and status.storage_valid == true
 end
 
-local function configSnapshot()
+function panelUi.configSnapshot()
     return type(status) == "table" and type(status.config) == "table" and status.config or {}
 end
 
-local function playlistMap()
-    local value = configSnapshot().playlists
+function panelUi.playlistMap()
+    local value = panelUi.configSnapshot().playlists
     return type(value) == "table" and value or {}
 end
 
-local function pairingMap()
-    local value = configSnapshot().pairings
+function panelUi.pairingMap()
+    local value = panelUi.configSnapshot().pairings
     return type(value) == "table" and value or {}
 end
 
-local function outputConfig(output)
-    local outputs = configSnapshot().outputs
+function panelUi.outputConfig(output)
+    local outputs = panelUi.configSnapshot().outputs
     local value = type(outputs) == "table" and outputs[output] or nil
     return type(value) == "table" and value or { fallback_playlist = "", schedules = {} }
 end
 
-local function outputRuntime(output)
+function panelUi.outputRuntime(output)
     local states = type(status) == "table" and type(status.output_states) == "table" and status.output_states or {}
     local value = states[output]
     return type(value) == "table"
@@ -1344,7 +1418,7 @@ local function outputRuntime(output)
         or { active_playlist = "", active_schedule = "", manual_pin = false, last_transition_at = "" }
 end
 
-local function runState(output, playlistId)
+function panelUi.runState(output, playlistId)
     local runs = type(status) == "table" and type(status.runs) == "table" and status.runs or {}
     local outputRuns = type(runs[output]) == "table" and runs[output] or {}
     local value = outputRuns[playlistId]
@@ -1364,8 +1438,8 @@ end
 
 local playlistIdSortCache = {}
 
-local function sortedPlaylistIds(includeQuickChoice)
-    local playlists = playlistMap()
+function panelUi.sortedPlaylistIds(includeQuickChoice)
+    local playlists = panelUi.playlistMap()
     local cacheKey = if includeQuickChoice == true then "all" else "normal"
     local cached = playlistIdSortCache[cacheKey]
     if type(cached) == "table" and cached.source == playlists then
@@ -1389,17 +1463,17 @@ local function sortedPlaylistIds(includeQuickChoice)
     return ids
 end
 
-local function resolveSelectedPlaylist(outputOverride)
-    local playlists = playlistMap()
+function panelUi.resolveSelectedPlaylist(outputOverride)
+    local playlists = panelUi.playlistMap()
     if type(playlists[selectedPlaylistId]) == "table" and playlists[selectedPlaylistId].quick_choice ~= true then
         return selectedPlaylistId, playlists[selectedPlaylistId]
     end
     local output = tostring(outputOverride or "")
     if output == "" then
-        output = focusedOutput()
+        output = panelUi.focusedOutput()
     end
-    local state = outputRuntime(output)
-    local configured = outputConfig(output)
+    local state = panelUi.outputRuntime(output)
+    local configured = panelUi.outputConfig(output)
     local candidates = {
         tostring(state.active_playlist or ""),
         tostring(configured.fallback_playlist or ""),
@@ -1410,17 +1484,17 @@ local function resolveSelectedPlaylist(outputOverride)
             return id, playlists[id]
         end
     end
-    local ids = sortedPlaylistIds(false)
+    local ids = panelUi.sortedPlaylistIds(false)
     selectedPlaylistId = ids[1] or ""
     return selectedPlaylistId, playlists[selectedPlaylistId]
 end
 
-local function playlistOptions(selectedId)
-    local ids = sortedPlaylistIds(false)
+function panelUi.playlistOptions(selectedId)
+    local ids = panelUi.sortedPlaylistIds(false)
     local labels = {}
     local selectedIndex = 0
     for index, id in ipairs(ids) do
-        local playlist = playlistMap()[id]
+        local playlist = panelUi.playlistMap()[id]
         table.insert(labels, tostring(playlist.name or id))
         if id == selectedId then
             selectedIndex = index - 1
@@ -1429,18 +1503,18 @@ local function playlistOptions(selectedId)
     return labels, ids, selectedIndex
 end
 
-local function paletteInventory()
+function panelUi.paletteInventory()
     local root = type(status) == "table" and type(status.palettes) == "table" and status.palettes or {}
     local values = type(root.palettes) == "table" and root.palettes or {}
     return root, values
 end
 
-local PALETTE_INDEX_SOURCES = { "wallpaper", "builtin", "community", "custom" }
+const.PALETTE_INDEX_SOURCES = { "wallpaper", "builtin", "community", "custom" }
 local paletteEntryIndexes = {}
 
-local function paletteEntryIndex(source)
+function panelUi.paletteEntryIndex(source)
     source = tostring(source or "")
-    local _root, inventory = paletteInventory()
+    local _root, inventory = panelUi.paletteInventory()
     local values = type(inventory[source]) == "table" and inventory[source] or {}
     local cached = paletteEntryIndexes[source]
     if type(cached) ~= "table" then
@@ -1460,22 +1534,22 @@ local function paletteEntryIndex(source)
             ready = false,
         }
         paletteEntryIndexes[source] = cached
-        wakeUpdate()
+        preview.wake()
     end
     return cached
 end
 
-local function paletteNames(source)
-    local cached = paletteEntryIndex(source)
+function panelUi.paletteNames(source)
+    local cached = panelUi.paletteEntryIndex(source)
     return cached.names, cached.ready == true, cached.nameIndex
 end
 
-local function paletteInventoryEntry(source, selection)
-    return paletteEntryIndex(source).byName[tostring(selection or "")]
+function panelUi.paletteInventoryEntry(source, selection)
+    return panelUi.paletteEntryIndex(source).byName[tostring(selection or "")]
 end
 
-local function paletteEntryIndexWork()
-    for _, source in ipairs(PALETTE_INDEX_SOURCES) do
+function panelUi.paletteEntryIndexWork()
+    for _, source in ipairs(const.PALETTE_INDEX_SOURCES) do
         local cached = paletteEntryIndexes[source]
         if type(cached) == "table" and cached.ready ~= true then
             return true
@@ -1484,13 +1558,13 @@ local function paletteEntryIndexWork()
     return false
 end
 
-local function stepPaletteEntryIndexReconciliation()
-    for _, source in ipairs(PALETTE_INDEX_SOURCES) do
+function panelUi.stepPaletteEntryIndexReconciliation()
+    for _, source in ipairs(const.PALETTE_INDEX_SOURCES) do
         local cached = paletteEntryIndexes[source]
         if type(cached) == "table" and cached.ready ~= true then
             local sourceItems = cached.sourceItems
             local first = cached.cursor
-            local last = math.min(#sourceItems, first + PALETTE_INDEX_RECONCILE_BATCH - 1)
+            local last = math.min(#sourceItems, first + const.PALETTE_INDEX_RECONCILE_BATCH - 1)
             for index = first, last do
                 local entry = sourceItems[index]
                 local name = if type(entry) == "table" then tostring(entry.name or "") else tostring(entry or "")
@@ -1523,12 +1597,12 @@ local function stepPaletteEntryIndexReconciliation()
     return false
 end
 
-local function basename(path)
+function panelUi.basename(path)
     local value = tostring(path or "")
     return value:match("([^/]+)$") or value
 end
 
-local function resetEntryDraft()
+function panelUi.resetEntryDraft()
     entryLabelDraft = ""
     entryMediaKindDraft = "static"
     entryMediaSourceDraft = ""
@@ -1536,12 +1610,12 @@ local function resetEntryDraft()
     entryStillPathDraft = ""
     entryThemeModeDraft = "auto"
     entryThemeSourceDraft = "wallpaper"
-    entryThemeSelectionDraft = paletteNames("wallpaper")[1] or "m3-tonal-spot"
+    entryThemeSelectionDraft = panelUi.paletteNames("wallpaper")[1] or "m3-tonal-spot"
     entryAddedAtDraft = ""
 end
 
-local function loadBundleDraft(entry, defaultKind)
-    resetEntryDraft()
+function panelUi.loadBundleDraft(entry, defaultKind)
+    panelUi.resetEntryDraft()
     entryMediaKindDraft = tostring(defaultKind or "static")
     if type(entry) == "table" then
         entryLabelDraft = tostring(entry.label or "")
@@ -1559,7 +1633,7 @@ local function loadBundleDraft(entry, defaultKind)
     end
 end
 
-local function bundleFromDraft(id)
+function panelUi.bundleFromDraft(id)
     local source = noctalia.string.trim(entryMediaSourceDraft)
     local dynamic = entryMediaKindDraft == "video" or entryMediaKindDraft == "workshop"
     local themeMode = tostring(entryThemeModeDraft or "inherit")
@@ -1570,7 +1644,7 @@ local function bundleFromDraft(id)
     end
     local label = noctalia.string.trim(entryLabelDraft)
     if label == "" then
-        label = basename(source)
+        label = panelUi.basename(source)
     end
     return {
         id = tostring(id or ""),
@@ -1590,12 +1664,12 @@ local function bundleFromDraft(id)
     }
 end
 
-local function formatMinute(value)
+function panelUi.formatMinute(value)
     local minute = math.max(0, math.min(1439, math.floor(tonumber(value) or 0)))
     return string.format("%02d:%02d", math.floor(minute / 60), minute % 60)
 end
 
-local function parseMinute(value)
+function panelUi.parseMinute(value)
     local hour, minute = tostring(value or ""):match("^(%d%d?):(%d%d)$")
     hour = tonumber(hour)
     minute = tonumber(minute)
@@ -1605,7 +1679,7 @@ local function parseMinute(value)
     return hour * 60 + minute
 end
 
-local function resetScheduleDraft(playlistId)
+function panelUi.resetScheduleDraft(playlistId)
     editingScheduleId = ""
     scheduleNameDraft = ""
     schedulePlaylistDraft = tostring(playlistId or "")
@@ -1619,18 +1693,18 @@ local function resetScheduleDraft(playlistId)
     scheduleInsertBeforeDraft = ""
 end
 
-local function editScheduleDraft(schedule, defaultPlaylistId)
+function panelUi.editScheduleDraft(schedule, defaultPlaylistId)
     scheduleEditorOpen = true
     if type(schedule) ~= "table" then
-        resetScheduleDraft(if tostring(defaultPlaylistId or "") ~= "" then defaultPlaylistId else selectedPlaylistId)
+        panelUi.resetScheduleDraft(if tostring(defaultPlaylistId or "") ~= "" then defaultPlaylistId else selectedPlaylistId)
         return
     end
     editingScheduleId = tostring(schedule.id or "")
     scheduleInsertBeforeDraft = ""
     scheduleNameDraft = tostring(schedule.name or "")
     schedulePlaylistDraft = tostring(schedule.playlist or selectedPlaylistId)
-    scheduleStartDraft = formatMinute(schedule.start_minute)
-    scheduleEndDraft = formatMinute(schedule.end_minute)
+    scheduleStartDraft = panelUi.formatMinute(schedule.start_minute)
+    scheduleEndDraft = panelUi.formatMinute(schedule.end_minute)
     scheduleEnabledDraft = schedule.enabled ~= false
     scheduleAllDayDraft = schedule.all_day == true
     scheduleDraftError = ""
@@ -1656,7 +1730,7 @@ local function editScheduleDraft(schedule, defaultPlaylistId)
     end
 end
 
-local function rendererOutputs()
+function panelUi.rendererOutputs()
     if
         type(status) == "table"
         and type(status.renderer) == "table"
@@ -1667,19 +1741,19 @@ local function rendererOutputs()
     return {}
 end
 
-local function activeRenderer(requestedOutput)
+function panelUi.activeRenderer(requestedOutput)
     local output = tostring(requestedOutput or "")
     if output == "" then
-        output = focusedOutput()
+        output = panelUi.focusedOutput()
     end
-    local outputs = rendererOutputs()
+    local outputs = panelUi.rendererOutputs()
     local owned = if output ~= "" and type(outputs[output]) == "table" then outputs[output] else nil
     return owned, output
 end
 
-local function genericRendererActionAvailable(action, requestedOutput)
+function panelUi.genericRendererActionAvailable(action, requestedOutput)
     if action == "playback_stop_all" then
-        for _, owned in pairs(rendererOutputs()) do
+        for _, owned in pairs(panelUi.rendererOutputs()) do
             local capabilities = type(owned) == "table" and owned.capabilities or nil
             if type(capabilities) == "table" and capabilities.stop == true then
                 return true
@@ -1688,8 +1762,8 @@ local function genericRendererActionAvailable(action, requestedOutput)
         return false
     end
 
-    local capability = GENERIC_RENDERER_CAPABILITIES[action]
-    local owned = activeRenderer(requestedOutput)
+    local capability = const.GENERIC_RENDERER_CAPABILITIES[action]
+    local owned = panelUi.activeRenderer(requestedOutput)
     local capabilities = type(owned) == "table" and owned.capabilities or nil
     if capability == nil or type(capabilities) ~= "table" or capabilities[capability] ~= true then
         return false
@@ -1706,25 +1780,25 @@ local function genericRendererActionAvailable(action, requestedOutput)
     return true
 end
 
-local function nextSequence()
-    local previous = noctalia.state.get(COMMAND_KEY)
+function panelUi.nextSequence()
+    local previous = noctalia.state.get(const.COMMAND_KEY)
     local previousSequence = if type(previous) == "table" then tonumber(previous.sequence) or 0 else 0
     commandSequence = math.max(commandSequence, previousSequence) + 1
     return commandSequence
 end
 
-local function send(request)
-    request.sequence = nextSequence()
+function panelUi.send(request)
+    request.sequence = panelUi.nextSequence()
     request.producer = "hub-panel"
-    noctalia.state.set(COMMAND_KEY, request)
+    noctalia.state.set(const.COMMAND_KEY, request)
 end
 
-local function nextDragToken(prefix)
+function panelUi.nextDragToken(prefix)
     dragTokenSequence = dragTokenSequence + 1
     return prefix .. tostring(dragTokenSequence)
 end
 
-local function resetLibraryDragTokens()
+function panelUi.resetLibraryDragTokens()
     dragLibraryPairingByToken = {}
     dragLibraryPairingTokenBySignature = {}
 end
@@ -1733,22 +1807,22 @@ end
 -- opaque drag-token index incrementally and swap it only after a complete
 -- generation; neither a state callback nor one update tick walks the entire
 -- project, and an interrupted tick leaves the previous valid index intact.
-local function markDragTokensDirty()
+function panelUi.markDragTokensDirty()
     dragTokenGeneration += 1
     dragTokensDirty = true
     dragReconcile = nil
-    resetLibraryDragTokens()
+    panelUi.resetLibraryDragTokens()
     if isOpen then
         preview.wake()
     end
 end
 
-local function stepDragTokenReconciliation()
+function panelUi.stepDragTokenReconciliation()
     if not dragTokensDirty then
         return true
     end
     if dragReconcile == nil then
-        local configuredOutputs = configSnapshot().outputs
+        local configuredOutputs = panelUi.configSnapshot().outputs
         local configurationState = type(configState) == "table" and configState or {}
         local outputs = {}
         for rawOutput, configuredOutput in pairs(type(configuredOutputs) == "table" and configuredOutputs or {}) do
@@ -1764,8 +1838,8 @@ local function stepDragTokenReconciliation()
             generation = dragTokenGeneration,
             phase = "pairings",
             cursor = nil,
-            pairings = pairingMap(),
-            playlists = playlistMap(),
+            pairings = panelUi.pairingMap(),
+            playlists = panelUi.playlistMap(),
             outputs = outputs,
             pairing_by_token = {},
             pairing_token_by_id = {},
@@ -1782,7 +1856,7 @@ local function stepDragTokenReconciliation()
     end
 
     local state = dragReconcile
-    for _ = 1, DRAG_RECONCILE_BATCH do
+    for _ = 1, const.DRAG_RECONCILE_BATCH do
         if state.generation ~= dragTokenGeneration then
             dragReconcile = nil
             return false
@@ -1796,7 +1870,7 @@ local function stepDragTokenReconciliation()
                 state.cursor = nil
             elseif type(pairing) == "table" then
                 local id = tostring(rawId)
-                local token = dragPairingTokenById[id] or nextDragToken("p")
+                local token = dragPairingTokenById[id] or panelUi.nextDragToken("p")
                 state.pairing_by_token[token] = id
                 state.pairing_token_by_id[id] = token
                 local media = type(pairing.media) == "table" and pairing.media or nil
@@ -1823,7 +1897,7 @@ local function stepDragTokenReconciliation()
                 state.cursor = nil
             elseif type(playlist) == "table" and playlist.quick_choice ~= true then
                 local id = tostring(rawId)
-                local token = dragPlaylistTokenById[id] or nextDragToken("r")
+                local token = dragPlaylistTokenById[id] or panelUi.nextDragToken("r")
                 state.playlist_by_token[token] = id
                 state.playlist_token_by_id[id] = token
             end
@@ -1858,13 +1932,13 @@ local function stepDragTokenReconciliation()
                 state.active_index += 1
                 local entryId = type(entry) == "table" and tostring(entry.id or "") or ""
                 if entryId ~= "" and state.active_entry_tokens[entryId] == nil then
-                    local entryToken = state.previous_entry_tokens[entryId] or nextDragToken("e")
+                    local entryToken = state.previous_entry_tokens[entryId] or panelUi.nextDragToken("e")
                     state.active_entry_tokens[entryId] = entryToken
                     state.entry_by_token[entryToken] = {
                         playlist_id = state.active_id,
                         entry_id = entryId,
                     }
-                    local targetToken = state.previous_target_tokens[entryId] or nextDragToken("d")
+                    local targetToken = state.previous_target_tokens[entryId] or panelUi.nextDragToken("d")
                     state.active_target_tokens[entryId] = targetToken
                     state.target_by_token[targetToken] = {
                         playlist_id = state.active_id,
@@ -1875,7 +1949,7 @@ local function stepDragTokenReconciliation()
                     state.active_previous_id = entryId
                 end
             else
-                local endToken = state.previous_target_tokens[""] or nextDragToken("d")
+                local endToken = state.previous_target_tokens[""] or panelUi.nextDragToken("d")
                 state.active_target_tokens[""] = endToken
                 state.target_by_token[endToken] = {
                     playlist_id = state.active_id,
@@ -1920,13 +1994,13 @@ local function stepDragTokenReconciliation()
                 state.active_index += 1
                 local scheduleId = type(schedule) == "table" and tostring(schedule.id or "") or ""
                 if scheduleId ~= "" and state.active_entry_tokens[scheduleId] == nil then
-                    local entryToken = state.previous_entry_tokens[scheduleId] or nextDragToken("s")
+                    local entryToken = state.previous_entry_tokens[scheduleId] or panelUi.nextDragToken("s")
                     state.active_entry_tokens[scheduleId] = entryToken
                     state.entry_by_token[entryToken] = {
                         schedule_output = state.active_output,
                         schedule_id = scheduleId,
                     }
-                    local targetToken = state.previous_target_tokens[scheduleId] or nextDragToken("q")
+                    local targetToken = state.previous_target_tokens[scheduleId] or panelUi.nextDragToken("q")
                     state.active_target_tokens[scheduleId] = targetToken
                     state.target_by_token[targetToken] = {
                         schedule_output = state.active_output,
@@ -1937,7 +2011,7 @@ local function stepDragTokenReconciliation()
                     state.active_previous_id = scheduleId
                 end
             else
-                local endToken = state.previous_target_tokens[""] or nextDragToken("q")
+                local endToken = state.previous_target_tokens[""] or panelUi.nextDragToken("q")
                 state.active_target_tokens[""] = endToken
                 state.target_by_token[endToken] = {
                     schedule_output = state.active_output,
@@ -1945,7 +2019,7 @@ local function stepDragTokenReconciliation()
                     schedule_placement = "end",
                     schedule_before_id = "",
                 }
-                local defaultToken = state.previous_target_tokens["@default"] or nextDragToken("f")
+                local defaultToken = state.previous_target_tokens["@default"] or panelUi.nextDragToken("f")
                 state.active_target_tokens["@default"] = defaultToken
                 state.target_by_token[defaultToken] = {
                     display_output = state.active_output,
@@ -1983,12 +2057,12 @@ end
 function onPlaylistDrop(payload, value)
     local payloadToken = tostring(payload or "")
     local target = dragTargetByToken[tostring(value or "")]
-    if type(target) ~= "table" or not storageValid() then
+    if type(target) ~= "table" or not panelUi.storageValid() then
         return
     end
 
-    local output = if selectedScreen ~= "" then selectedScreen else focusedOutput()
-    local playlistId, playlist = resolveSelectedPlaylist(output)
+    local output = if selectedScreen ~= "" then selectedScreen else panelUi.focusedOutput()
+    local playlistId, playlist = panelUi.resolveSelectedPlaylist(output)
     if playlistId == "" or target.playlist_id ~= playlistId or type(playlist) ~= "table" then
         return
     end
@@ -1999,7 +2073,7 @@ function onPlaylistDrop(payload, value)
     end
     if type(pairingId) == "table" and type(pairingId.library_bundle) == "table" then
         if tostring(pairingId.pairing_id or "") ~= "" then
-            send({
+            panelUi.send({
                 kind = "playlist_add_pairing",
                 output = output,
                 playlist_id = playlistId,
@@ -2007,18 +2081,18 @@ function onPlaylistDrop(payload, value)
                 before_id = if target.pairing_before_id ~= "" then target.pairing_before_id else nil,
             })
         else
-            send({
+            panelUi.send({
                 kind = "playlist_add_entry",
                 output = output,
                 playlist_id = playlistId,
-                entry = entryForOutput(pairingId.library_bundle, output),
+                entry = panelUi.entryForOutput(pairingId.library_bundle, output),
                 before_id = if target.pairing_before_id ~= "" then target.pairing_before_id else nil,
             })
         end
         return
     end
-    if pairingId ~= nil and type(pairingMap()[pairingId]) == "table" then
-        send({
+    if pairingId ~= nil and type(panelUi.pairingMap()[pairingId]) == "table" then
+        panelUi.send({
             kind = "playlist_add_pairing",
             output = output,
             playlist_id = playlistId,
@@ -2032,7 +2106,7 @@ function onPlaylistDrop(payload, value)
     if type(source) ~= "table" or source.playlist_id ~= playlistId then
         return
     end
-    send({
+    panelUi.send({
         kind = "playlist_place_entry",
         playlist_id = playlistId,
         entry_id = source.entry_id,
@@ -2050,11 +2124,11 @@ function onScheduleDrop(payload, value)
         or tostring(source.schedule_output or "") == ""
         or source.schedule_output ~= target.schedule_output
         or source.schedule_output ~= selectedScreen
-        or not storageValid()
+        or not panelUi.storageValid()
     then
         return
     end
-    send({
+    panelUi.send({
         kind = "schedule_place",
         output = source.schedule_output,
         schedule_id = tostring(source.schedule_id or ""),
@@ -2067,33 +2141,33 @@ function onDisplayPlaylistDrop(payload, value)
     local payloadToken = tostring(payload or "")
     local target = dragTargetByToken[tostring(value or "")]
     local playlistId = dragPlaylistByToken[payloadToken]
-    if type(target) ~= "table" or not storageValid() then
+    if type(target) ~= "table" or not panelUi.storageValid() then
         return
     end
     if playlistId == nil then
         onScheduleDrop(payload, value)
         return
     end
-    if type(playlistMap()[playlistId]) ~= "table" then
+    if type(panelUi.playlistMap()[playlistId]) ~= "table" then
         return
     end
     if target.display_role == "default" and target.display_output == selectedScreen then
         selectedPlaylistId = playlistId
-        send({ kind = "playlist_assign", output = selectedScreen, playlist_id = playlistId })
+        panelUi.send({ kind = "playlist_assign", output = selectedScreen, playlist_id = playlistId })
         return
     end
     if tostring(target.schedule_output or "") ~= selectedScreen then
         return
     end
-    resetScheduleDraft(playlistId)
-    scheduleNameDraft = tostring(playlistMap()[playlistId].name or playlistId)
+    panelUi.resetScheduleDraft(playlistId)
+    scheduleNameDraft = tostring(panelUi.playlistMap()[playlistId].name or playlistId)
     scheduleInsertBeforeDraft = tostring(target.schedule_before_id or "")
     scheduleEditorOpen = true
     render()
 end
 
-local function adaptivePreviewSession()
-    local root = paletteInventory()
+function panelUi.adaptivePreviewSession()
+    local root = panelUi.paletteInventory()
     local instance = tostring(root.instance_id or "")
     if instance ~= "" and instance ~= adaptivePreviewInstance then
         adaptivePreviewInstance = instance
@@ -2102,7 +2176,7 @@ local function adaptivePreviewSession()
     end
 end
 
-local function automaticRepresentativePath(kind, source)
+function panelUi.automaticRepresentativePath(kind, source)
     local root = type(status) == "table" and type(status.library) == "table" and status.library or {}
     local published = type(root.representative_stills) == "table" and root.representative_stills or nil
     if published == nil then
@@ -2120,7 +2194,7 @@ local function automaticRepresentativePath(kind, source)
     return ""
 end
 
-local function adaptivePreviewDescriptor(bundle, pairingId)
+function panelUi.adaptivePreviewDescriptor(bundle, pairingId)
     local theme = type(bundle) == "table" and type(bundle.theme) == "table" and bundle.theme or {}
     local scheme = tostring(theme.selection or "")
     if tostring(theme.source or "") ~= "wallpaper" or scheme == "" then
@@ -2163,7 +2237,7 @@ local function adaptivePreviewDescriptor(bundle, pairingId)
                 mediaSource,
                 scheme,
             }, "|"),
-            path = automaticRepresentativePath(mediaKind, mediaSource),
+            path = panelUi.automaticRepresentativePath(mediaKind, mediaSource),
             pairing_id = tostring(pairingId or ""),
             scheme = scheme,
             media_kind = mediaKind,
@@ -2173,12 +2247,12 @@ local function adaptivePreviewDescriptor(bundle, pairingId)
     return nil
 end
 
-local function requestPairingAdaptivePreview(bundle, pairingId)
+function panelUi.requestPairingAdaptivePreview(bundle, pairingId)
     if pairingEditorOpen ~= true and playlistEntryEditorOpen ~= true then
         return false
     end
-    adaptivePreviewSession()
-    local descriptor = adaptivePreviewDescriptor(bundle, pairingId)
+    panelUi.adaptivePreviewSession()
+    local descriptor = panelUi.adaptivePreviewDescriptor(bundle, pairingId)
     if descriptor == nil or adaptivePreviewKeys[descriptor.signature] ~= nil then
         return false
     end
@@ -2197,21 +2271,21 @@ local function requestPairingAdaptivePreview(bundle, pairingId)
         request.kind = "pairing_prepare_still"
         request.media_kind = descriptor.media_kind
         request.media_source = descriptor.media_source
-        request.output = if selectedScreen ~= "" then selectedScreen else focusedOutput()
+        request.output = if selectedScreen ~= "" then selectedScreen else panelUi.focusedOutput()
     elseif descriptor.pairing_id ~= "" then
         request.pairing_id = descriptor.pairing_id
     end
-    send(request)
+    panelUi.send(request)
     return true
 end
 
-local function requestAutomaticStillPreparation(kind, source)
+function panelUi.requestAutomaticStillPreparation(kind, source)
     if
         (pairingEditorOpen ~= true and playlistEntryEditorOpen ~= true)
         or entryStillModeDraft ~= "automatic"
         or (kind ~= "video" and kind ~= "workshop")
         or source == ""
-        or automaticRepresentativePath(kind, source) ~= ""
+        or panelUi.automaticRepresentativePath(kind, source) ~= ""
     then
         return false
     end
@@ -2222,45 +2296,45 @@ local function requestAutomaticStillPreparation(kind, source)
     adaptivePreviewSequence = if adaptivePreviewSequence >= 2147483646 then 1 else adaptivePreviewSequence + 1
     local key = "panel-pairing-still-" .. tostring(adaptivePreviewSequence)
     adaptivePreviewKeys[signature] = key
-    send({
+    panelUi.send({
         kind = "pairing_prepare_still",
         key = key,
         media_kind = kind,
         media_source = source,
-        output = if selectedScreen ~= "" then selectedScreen else focusedOutput(),
+        output = if selectedScreen ~= "" then selectedScreen else panelUi.focusedOutput(),
         capture_only = true,
     })
     return true
 end
 
-local function clearAutomaticStillPreparation(kind, source)
+function panelUi.clearAutomaticStillPreparation(kind, source)
     adaptivePreviewKeys[
         "prepare\0" .. tostring(kind or "") .. "\0" .. noctalia.string.trim(tostring(source or ""))
     ] = nil
 end
 
-local function retryPairingAdaptivePreview(bundle, pairingId)
+function panelUi.retryPairingAdaptivePreview(bundle, pairingId)
     if pairingEditorOpen ~= true and playlistEntryEditorOpen ~= true then
         return false
     end
-    adaptivePreviewSession()
-    local descriptor = adaptivePreviewDescriptor(bundle, pairingId)
+    panelUi.adaptivePreviewSession()
+    local descriptor = panelUi.adaptivePreviewDescriptor(bundle, pairingId)
     if descriptor == nil then
         return false
     end
     adaptivePreviewKeys[descriptor.signature] = nil
     adaptivePreviewStates[descriptor.signature] = nil
-    return requestPairingAdaptivePreview(bundle, pairingId)
+    return panelUi.requestPairingAdaptivePreview(bundle, pairingId)
 end
 
-local function adaptivePreviewForBundle(bundle, pairingId)
-    adaptivePreviewSession()
-    local descriptor = adaptivePreviewDescriptor(bundle, pairingId)
+function panelUi.adaptivePreviewForBundle(bundle, pairingId)
+    panelUi.adaptivePreviewSession()
+    local descriptor = panelUi.adaptivePreviewDescriptor(bundle, pairingId)
     if descriptor == nil then
         return nil, "unavailable", ""
     end
     local key = adaptivePreviewKeys[descriptor.signature]
-    local root = paletteInventory()
+    local root = panelUi.paletteInventory()
     local current = type(root.preview) == "table" and root.preview or {}
     if key ~= nil and tostring(current.key or "") == key then
         local state = tostring(current.state or "unavailable")
@@ -2278,7 +2352,7 @@ local function adaptivePreviewForBundle(bundle, pairingId)
     return nil, "unavailable", ""
 end
 
-local function beginPairingEditor(kind, pairing)
+function panelUi.beginPairingEditor(kind, pairing)
     if closePlaylistEntryEditor ~= nil then
         closePlaylistEntryEditor()
     end
@@ -2290,7 +2364,7 @@ local function beginPairingEditor(kind, pairing)
     pendingResetPairingId = ""
     pairingStillPickerPage = 1
     pairingManualStillOpen = false
-    loadBundleDraft(pairing, kind)
+    panelUi.loadBundleDraft(pairing, kind)
     entryMediaKindDraft = kind
     if kind == "static" then
         entryStillModeDraft = "selected"
@@ -2298,15 +2372,15 @@ local function beginPairingEditor(kind, pairing)
     preview.cancel()
     activePage = "library"
     activeSubpage = if kind == "video" then "videos" elseif kind == "workshop" then "workshops" else "images"
-    clearAutomaticStillPreparation(kind, entryMediaSourceDraft)
-    local requestedPalette = requestPairingAdaptivePreview(bundleFromDraft(editingPairingId), editingPairingId)
+    panelUi.clearAutomaticStillPreparation(kind, entryMediaSourceDraft)
+    local requestedPalette = panelUi.requestPairingAdaptivePreview(panelUi.bundleFromDraft(editingPairingId), editingPairingId)
     if not requestedPalette then
-        requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))
+        panelUi.requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))
     end
     render()
 end
 
-local function closePairingEditor()
+function panelUi.closePairingEditor()
     local hadEditorState = pairingEditorOpen == true or editingPairingId ~= ""
     pairingEditorOpen = false
     editingPairingId = ""
@@ -2314,12 +2388,12 @@ local function closePairingEditor()
     pairingStillPickerPage = 1
     pairingManualStillOpen = false
     if hadEditorState then
-        resetEntryDraft()
+        panelUi.resetEntryDraft()
     end
 end
 
-local function beginPlaylistEntryEditor(entry, playlistId, entryIndex)
-    closePairingEditor()
+function panelUi.beginPlaylistEntryEditor(entry, playlistId, entryIndex)
+    panelUi.closePairingEditor()
     local media = type(entry) == "table" and type(entry.media) == "table" and entry.media or nil
     local kind = if media == nil then "static" else tostring(media.kind or "video")
     kind = if kind == "video" or kind == "workshop" then kind else "static"
@@ -2333,18 +2407,18 @@ local function beginPlaylistEntryEditor(entry, playlistId, entryIndex)
     playlistEntrySourcePage = 1
     pairingStillPickerPage = 1
     pairingManualStillOpen = false
-    loadBundleDraft(entry, kind)
+    panelUi.loadBundleDraft(entry, kind)
     entryMediaKindDraft = kind
     if kind == "static" then
         entryStillModeDraft = "selected"
     end
-    clearAutomaticStillPreparation(kind, entryMediaSourceDraft)
-    local requestedPalette = requestPairingAdaptivePreview(
-        bundleFromDraft(editingPlaylistEntryId),
+    panelUi.clearAutomaticStillPreparation(kind, entryMediaSourceDraft)
+    local requestedPalette = panelUi.requestPairingAdaptivePreview(
+        panelUi.bundleFromDraft(editingPlaylistEntryId),
         editingPlaylistEntryPairingId
     )
     if not requestedPalette then
-        requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))
+        panelUi.requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))
     end
     render()
 end
@@ -2361,11 +2435,11 @@ closePlaylistEntryEditor = function()
     pairingStillPickerPage = 1
     pairingManualStillOpen = false
     if hadEditorState then
-        resetEntryDraft()
+        panelUi.resetEntryDraft()
     end
 end
 
-local function preferredPairingForLibraryEntry(existing, candidate)
+function panelUi.preferredPairingForLibraryEntry(existing, candidate)
     if type(candidate) ~= "table" then
         return existing
     end
@@ -2380,7 +2454,7 @@ local function preferredPairingForLibraryEntry(existing, candidate)
     return if tostring(candidate.id or "") < tostring(existing.id or "") then candidate else existing
 end
 
-local function libraryPairingKey(kind, source)
+function panelUi.libraryPairingKey(kind, source)
     kind = tostring(kind or "")
     source = tostring(source or "")
     if (kind ~= "static" and kind ~= "video" and kind ~= "workshop") or source == "" then
@@ -2389,8 +2463,8 @@ local function libraryPairingKey(kind, source)
     return kind .. "\0" .. source
 end
 
-local function indexedLibraryPairings()
-    local pairings = pairingMap()
+function panelUi.indexedLibraryPairings()
+    local pairings = panelUi.pairingMap()
     local state = type(configState) == "table" and configState or {}
     local instance = tostring(state.instance_id or "")
     local revision = tonumber(state.revision)
@@ -2408,19 +2482,18 @@ local function indexedLibraryPairings()
     -- frame ticks. Keep serving the last complete snapshot until that atomic
     -- replacement commits instead of walking every pairing during a render.
     if not dragTokensDirty then
-        markDragTokensDirty()
+        panelUi.markDragTokensDirty()
     end
     return libraryPairingCache.index
 end
 
-local function matchingPairingForLibraryEntry(entry)
+function panelUi.matchingPairingForLibraryEntry(entry)
     local kind = tostring(type(entry) == "table" and entry.kind or "")
     local source = tostring(type(entry) == "table" and entry.source or "")
-    local key = libraryPairingKey(kind, source)
-    return if key ~= nil then indexedLibraryPairings()[key] else nil
+    local key = panelUi.libraryPairingKey(kind, source)
+    return if key ~= nil then panelUi.indexedLibraryPairings()[key] else nil
 end
 
-local panelUi = {}
 
 panelUi.workshopIndexCache = {
     source = nil,
@@ -2445,7 +2518,7 @@ function panelUi.workshopIndex()
             ready = false,
         }
         panelUi.workshopIndexCache = cached
-        wakeUpdate()
+        preview.wake()
     end
     return cached.index
 end
@@ -2461,7 +2534,7 @@ function panelUi.stepWorkshopIndexReconciliation()
     end
     local sourceItems = cached.sourceItems
     local first = cached.cursor
-    local last = math.min(#sourceItems, first + WORKSHOP_INDEX_RECONCILE_BATCH - 1)
+    local last = math.min(#sourceItems, first + const.WORKSHOP_INDEX_RECONCILE_BATCH - 1)
     for index = first, last do
         local workshop = sourceItems[index]
         if type(workshop) == "table" then
@@ -2482,21 +2555,21 @@ function panelUi.stepWorkshopIndexReconciliation()
     return false
 end
 
-local function openLibraryEntryPairing(entry, libraryItem)
+function panelUi.openLibraryEntryPairing(entry, libraryItem)
     local kind = tostring(type(entry) == "table" and entry.kind or "")
     kind = if kind == "video" or kind == "workshop" then kind else "static"
-    local existing = matchingPairingForLibraryEntry(entry)
+    local existing = panelUi.matchingPairingForLibraryEntry(entry)
     if type(existing) == "table" and existing.customized == true then
-        beginPairingEditor(kind, existing)
+        panelUi.beginPairingEditor(kind, existing)
         return
     end
     local defaults = panelUi.virtualLibraryPairing(entry, libraryItem, nil)
     defaults.id = type(existing) == "table" and tostring(existing.id or "") or ""
-    beginPairingEditor(kind, defaults)
+    panelUi.beginPairingEditor(kind, defaults)
 end
 
-local function actionLabel(action)
-    for _, entry in ipairs(ACTIONS) do
+function panelUi.actionLabel(action)
+    for _, entry in ipairs(const.ACTIONS) do
         if entry.id == action then
             return noctalia.tr(entry.label)
         end
@@ -2504,20 +2577,20 @@ local function actionLabel(action)
     return tostring(action or "?")
 end
 
-local function actionAvailable(action, requestedOutput)
+function panelUi.actionAvailable(action, requestedOutput)
     if action == "motionbgs_open" then
-        local current = providers()
+        local current = panelUi.providers()
         return type(current.motionbgs) == "table" and current.motionbgs.browser_available == true
     end
-    if not storageValid() then
+    if not panelUi.storageValid() then
         return false
     end
-    local current = providers()
+    local current = panelUi.providers()
     local wEngine = type(current.w_engine) == "table" and current.w_engine or {}
     local mpvpaper = type(current.mpvpaper) == "table" and current.mpvpaper or {}
     local output = tostring(requestedOutput or "")
     if output == "" then
-        output = focusedOutput()
+        output = panelUi.focusedOutput()
     end
     if action == "no_action" then
         return true
@@ -2525,8 +2598,8 @@ local function actionAvailable(action, requestedOutput)
         return current.noctalia_cli == true
     elseif action == "wallhaven_site" then
         return type(current.wallhaven) == "table" and current.wallhaven.site_available == true
-    elseif GENERIC_RENDERER_CAPABILITIES[action] ~= nil or action == "playback_stop_all" then
-        return genericRendererActionAvailable(action, output)
+    elseif const.GENERIC_RENDERER_CAPABILITIES[action] ~= nil or action == "playback_stop_all" then
+        return panelUi.genericRendererActionAvailable(action, output)
     elseif action == "steam_launch" then
         return wEngine.steam_available == true
     elseif action == "steam_workshop" then
@@ -2542,20 +2615,20 @@ local function actionAvailable(action, requestedOutput)
         return wEngine.allowed == true
             and (
                 internalId:match("^%d+$") ~= nil
-                or tostring(settings().workshop_id or ""):match("^%d+$") ~= nil
+                or tostring(panelUi.settings().workshop_id or ""):match("^%d+$") ~= nil
             )
     elseif action == "video_capture" or action == "video_capture_pair" then
-        return tostring(settings().video_source or "") ~= ""
+        return tostring(panelUi.settings().video_source or "") ~= ""
     elseif action == "video_apply_pair" then
-        return mpvpaper.apply_available == true and tostring(settings().video_source or "") ~= ""
+        return mpvpaper.apply_available == true and tostring(panelUi.settings().video_source or "") ~= ""
     elseif action == "workshop_apply_pair" then
-        return wEngine.apply_available == true and tostring(settings().workshop_id or ""):match("^%d+$") ~= nil
+        return wEngine.apply_available == true and tostring(panelUi.settings().workshop_id or ""):match("^%d+$") ~= nil
     elseif action == "cycle_add_static" then
         return current.noctalia_cli == true and output ~= ""
     elseif action == "cycle_add_video" then
-        return tostring(settings().video_source or "") ~= ""
+        return tostring(panelUi.settings().video_source or "") ~= ""
     elseif action == "cycle_add_workshop" then
-        return tostring(settings().workshop_id or ""):match("^%d+$") ~= nil
+        return tostring(panelUi.settings().workshop_id or ""):match("^%d+$") ~= nil
     elseif
         action == "cycle_start"
         or action == "cycle_stop"
@@ -2567,27 +2640,27 @@ local function actionAvailable(action, requestedOutput)
         or action == "cycle_remove_last"
         or action == "cycle_clear"
     then
-        local playlistId, playlist = resolveSelectedPlaylist()
+        local playlistId, playlist = panelUi.resolveSelectedPlaylist()
         local entries = type(playlist) == "table" and type(playlist.entries) == "table" and playlist.entries or {}
         if action == "cycle_next" or action == "cycle_previous" or action == "cycle_random" then
-            local state = runState(output, playlistId)
+            local state = panelUi.runState(output, playlistId)
             if state.paused == true then
                 return false
             end
         end
         return #entries > 0
     elseif action == "manual_pair" then
-        return output ~= "" and tostring(settings().manual_pair_file or "") ~= ""
+        return output ~= "" and tostring(panelUi.settings().manual_pair_file or "") ~= ""
     end
     return false
 end
 
-local function runAction(action, requestedOutput)
+function panelUi.runAction(action, requestedOutput)
     local output = tostring(requestedOutput or "")
     if output == "" then
-        output = focusedOutput()
+        output = panelUi.focusedOutput()
     end
-    send({ kind = "action", action = action, output = output })
+    panelUi.send({ kind = "action", action = action, output = output })
 end
 
 -- Shared presentation helpers.
@@ -2607,7 +2680,7 @@ end
 function panelUi.providerItems(value, page, pageSize)
     local source = type(value) == "table" and value or {}
     local total = math.min(#source, 48)
-    local size = math.max(1, math.floor(tonumber(pageSize) or PROVIDER_RESULT_CHUNK))
+    local size = math.max(1, math.floor(tonumber(pageSize) or const.PROVIDER_RESULT_CHUNK))
     local pages = math.max(1, math.ceil(total / size))
     local current = math.min(pages, math.max(1, math.floor(tonumber(page) or 1)))
     local first = (current - 1) * size + 1
@@ -2696,7 +2769,7 @@ function panelUi.downloadLabel(state, quality)
 end
 
 function panelUi.configuredRoot(key)
-    local path = tostring(settings()[key] or "")
+    local path = tostring(panelUi.settings()[key] or "")
     if path == "" or path:sub(1, 1) ~= "/" or path:find("[%c]") ~= nil then
         return "", false
     end
@@ -2753,11 +2826,11 @@ function panelUi.card(children)
 end
 
 function panelUi.backendSetupPointerPath()
-    return backendSetupDetails().pointer_path
+    return panelUi.backendSetupDetails().pointer_path
 end
 
 function panelUi.backendSetupCommands()
-    return backendSetupDetails().commands
+    return panelUi.backendSetupDetails().commands
 end
 
 function panelUi.backendSetupCard()
@@ -2783,6 +2856,23 @@ function panelUi.backendSetupCard()
             onChange = function(_value) end,
         }),
         ui.label({
+            text = noctalia.tr("panel.backend_setup.directory_label"),
+            fontSize = 9,
+            fontWeight = "bold",
+        }),
+        ui.input({
+            key = "backend-setup-directory",
+            value = backendInstallDirDraft,
+            placeholder = const.BACKEND_DEFAULT_INSTALL_DIR,
+            onChange = function(value)
+                backendInstallDirDraft = tostring(value or "")
+            end,
+            onSubmit = function(value)
+                backendInstallDirDraft = tostring(value or "")
+                render()
+            end,
+        }),
+        ui.label({
             text = noctalia.tr("panel.backend_setup.command_label"),
             fontSize = 9,
             fontWeight = "bold",
@@ -2796,9 +2886,33 @@ function panelUi.backendSetupCard()
         }),
         ui.row({ gap = 8, align = "center" }, {
             ui.button({
+                text = noctalia.tr("panel.backend_setup.install"),
+                glyph = "terminal-2",
+                variant = "primary",
+                controlSize = "sm",
+                enabled = panelUi.backendSetupDetails().terminal_command ~= "",
+                onClick = function()
+                    local installDirectory = panelUi.backendInstallDirectory()
+                    local terminalCommand = panelUi.backendSetupDetails().terminal_command
+                    if installDirectory == "" or terminalCommand == "" then
+                        backendSetupCopyFeedback = noctalia.tr("panel.backend_setup.directory_invalid")
+                        render()
+                        return
+                    end
+                    -- Link first: the terminal is detached, so this is the only
+                    -- point where the chosen directory is still known here.
+                    local linked = panelUi.writeBackendPointer(installDirectory)
+                    backendSetupCopyFeedback = if not noctalia.runInTerminal(terminalCommand)
+                        then noctalia.tr("panel.backend_setup.terminal_failed")
+                        elseif linked then noctalia.tr("panel.backend_setup.installing")
+                        else noctalia.tr("panel.backend_setup.installing_unlinked")
+                    render()
+                end,
+            }),
+            ui.button({
                 text = noctalia.tr("panel.backend_setup.copy"),
                 glyph = "copy",
-                variant = "primary",
+                variant = "ghost",
                 controlSize = "sm",
                 onClick = function()
                     backendSetupCopyFeedback = if noctalia.copyToClipboard(commands, "text/plain;charset=utf-8")
@@ -2935,14 +3049,14 @@ end
 
 function panelUi.actionButton(action, glyph, variant, grow)
     return ui.button({
-        text = actionLabel(action),
+        text = panelUi.actionLabel(action),
         glyph = glyph,
         variant = variant or "ghost",
         controlSize = "sm",
-        enabled = actionAvailable(action),
+        enabled = panelUi.actionAvailable(action),
         flexGrow = grow == true and 1 or 0,
         onClick = function()
-            runAction(action)
+            panelUi.runAction(action)
         end,
     })
 end
@@ -2950,18 +3064,18 @@ end
 function panelUi.iconActionButton(action, glyph, output, variant)
     return ui.button({
         glyph = glyph,
-        tooltip = actionLabel(action),
+        tooltip = panelUi.actionLabel(action),
         variant = variant or "ghost",
         controlSize = "sm",
-        enabled = actionAvailable(action, output),
+        enabled = panelUi.actionAvailable(action, output),
         onClick = function()
-            runAction(action, output)
+            panelUi.runAction(action, output)
         end,
     })
 end
 
 function panelUi.compactRendererControls(output)
-    local owned = activeRenderer(output)
+    local owned = panelUi.activeRenderer(output)
     local backend = if type(owned) == "table" then tostring(owned.backend or "") else ""
     local state = if type(owned) == "table" then tostring(owned.state or "") else ""
     local muted = type(owned) == "table" and owned.muted == true
@@ -3026,8 +3140,8 @@ function panelUi.gestureOptions(button)
     local labels = {}
     local values = {}
     local selectedIndex = 0
-    for _, entry in ipairs(ACTIONS) do
-        local available = actionAvailable(entry.id)
+    for _, entry in ipairs(const.ACTIONS) do
+        local available = panelUi.actionAvailable(entry.id)
         if available or entry.id == configured then
             local label = noctalia.tr(entry.label)
             if not available and entry.id == configured then
@@ -3051,12 +3165,12 @@ function panelUi.gestureRow(button, label)
             key = "gesture-" .. button,
             options = labels,
             selectedIndex = selectedIndex,
-            enabled = storageValid(),
+            enabled = panelUi.storageValid(),
             flexGrow = 1,
             onChange = function(index)
                 local action = values[math.floor(tonumber(index) or 0) + 1]
                 if action ~= nil then
-                    send({ kind = "set_mapping", button = button, action = action })
+                    panelUi.send({ kind = "set_mapping", button = button, action = action })
                 end
             end,
         }),
@@ -3079,8 +3193,8 @@ function panelUi.shortcutsSection()
     })
 end
 
-local function paletteInventorySection()
-    local paletteStatus = paletteInventory()
+function panelUi.paletteInventorySection()
+    local paletteStatus = panelUi.paletteInventory()
     local counts = type(paletteStatus.counts) == "table" and paletteStatus.counts or {}
     local cache = type(paletteStatus.cache) == "table" and paletteStatus.cache or {}
     local total = (tonumber(counts.wallpaper) or 0)
@@ -3122,9 +3236,9 @@ local function paletteInventorySection()
                 glyph = "refresh",
                 variant = "ghost",
                 controlSize = "sm",
-                enabled = storageValid() and paletteStatus.refreshing ~= true,
+                enabled = panelUi.storageValid() and paletteStatus.refreshing ~= true,
                 onClick = function()
-                    send({ kind = "palettes_refresh", force = true })
+                    panelUi.send({ kind = "palettes_refresh", force = true })
                 end,
             }),
         }),
@@ -3158,18 +3272,18 @@ local function paletteInventorySection()
     return panelUi.card(children)
 end
 
-local function wallhavenSection()
-    local providerStatus, results = wallhavenData()
+function panelUi.wallhavenSection()
+    local providerStatus, results = panelUi.wallhavenData()
     local installedItems = panelUi.providerInstallIndex().wallhaven
     local sourceItems = type(results.items) == "table" and results.items or {}
     local items, itemCount, localPage, firstItem, lastItem = panelUi.providerItems(
         sourceItems,
         providerResultPages.wallhaven,
-        PROVIDER_RESULT_CHUNK
+        const.PROVIDER_RESULT_CHUNK
     )
     local meta = type(results.meta) == "table" and results.meta or {}
     local activeFilters = type(results.filters) == "table" and results.filters or {}
-    local ready = providerStatus.available == true and storageValid()
+    local ready = providerStatus.available == true and panelUi.storageValid()
     local busy = providerStatus.busy == true
     preview.plan(
         "wallhaven",
@@ -3204,7 +3318,7 @@ local function wallhavenSection()
     end
     local colorLabels = { noctalia.tr("panel.wallhaven.color_any") }
     local colorIndex = 0
-    for index, value in ipairs(WALLHAVEN_COLOR_VALUES) do
+    for index, value in ipairs(const.WALLHAVEN_COLOR_VALUES) do
         table.insert(colorLabels, "#" .. value)
         if value == wallhavenColorDraft then
             colorIndex = index
@@ -3299,7 +3413,7 @@ local function wallhavenSection()
         wallhavenPageInputRevision += 1
         providerResultPages.wallhaven = 1
         preview.cancel()
-        send(request)
+        panelUi.send(request)
     end
     local children = {
         panelUi.sectionHeader(
@@ -3345,7 +3459,7 @@ local function wallhavenSection()
                     wallhavenPageInputRevision += 1
                     providerResultPages.wallhaven = 1
                     preview.cancel()
-                    send({ kind = "wallhaven_clear" })
+                    panelUi.send({ kind = "wallhaven_clear" })
                 end,
             }),
         }),
@@ -3443,7 +3557,7 @@ local function wallhavenSection()
                 selectedIndex = colorIndex,
                 flexGrow = 1,
                 onChange = function(index)
-                    wallhavenColorDraft = WALLHAVEN_COLOR_VALUES[math.floor(tonumber(index) or 0)] or ""
+                    wallhavenColorDraft = const.WALLHAVEN_COLOR_VALUES[math.floor(tonumber(index) or 0)] or ""
                     render()
                 end,
             }),
@@ -3548,7 +3662,7 @@ local function wallhavenSection()
             children,
             items,
             #items,
-            BROWSER_GRID_COLUMNS,
+            const.BROWSER_GRID_COLUMNS,
             function(item)
                 local resultItem = item
                 local itemId = tostring(item.id or ""):lower()
@@ -3596,7 +3710,7 @@ local function wallhavenSection()
                         controlSize = "sm",
                         enabled = ready and not busy and not installed,
                         onClick = function()
-                            send({ kind = "wallhaven_download", id = tostring(resultItem.id or "") })
+                            panelUi.send({ kind = "wallhaven_download", id = tostring(resultItem.id or "") })
                         end,
                     }),
                 })
@@ -3606,7 +3720,7 @@ local function wallhavenSection()
             children,
             itemCount,
             localPage,
-            PROVIDER_RESULT_CHUNK,
+            const.PROVIDER_RESULT_CHUNK,
             function(value)
                 providerResultPages.wallhaven = value
             end
@@ -3615,22 +3729,22 @@ local function wallhavenSection()
     return panelUi.card(children)
 end
 
-local function motionBgsSection()
-    local provider = type(providers().motionbgs) == "table" and providers().motionbgs or {}
-    local motionStatus, results = motionBgsData()
+function panelUi.motionBgsSection()
+    local provider = type(panelUi.providers().motionbgs) == "table" and panelUi.providers().motionbgs or {}
+    local motionStatus, results = panelUi.motionBgsData()
     local installedItems = panelUi.providerInstallIndex().motionbgs
     local queuedDownloads, queuedDownloadCount = panelUi.motionQueueIndex(motionStatus)
     local sourceItems = type(results.items) == "table" and results.items or {}
     local items, itemCount, localPage, firstItem, lastItem = panelUi.providerItems(
         sourceItems,
         providerResultPages.motionbgs,
-        PROVIDER_RESULT_CHUNK
+        const.PROVIDER_RESULT_CHUNK
     )
     local meta = type(results.meta) == "table" and results.meta or {}
     local integrationReady = provider.integration_available == true
         and motionStatus.available == true
-        and storageValid()
-    local motionEnabled = settings().use_motionbgs ~= false
+        and panelUi.storageValid()
+    local motionEnabled = panelUi.settings().use_motionbgs ~= false
     local helperReady = motionStatus.binary_compatible == true
     local busy = motionStatus.busy == true
     local queueDepth = math.max(0, math.floor(tonumber(motionStatus.queue_depth) or 0))
@@ -3644,7 +3758,7 @@ local function motionBgsSection()
             .. ":"
             .. tostring(recentDownload.quality or ""):lower()
         else ""
-    local quality = tostring(settings().motionbgs_quality or "hd")
+    local quality = tostring(panelUi.settings().motionbgs_quality or "hd")
     preview.plan(
         "motionbgs",
         "motionbgs:"
@@ -3792,7 +3906,7 @@ local function motionBgsSection()
         motionPageInputRevision += 1
         providerResultPages.motionbgs = 1
         preview.cancel()
-        send({
+        panelUi.send({
             kind = "motionbgs_search",
             mode = mode,
             query = query,
@@ -3823,7 +3937,7 @@ local function motionBgsSection()
             variant = "ghost",
             controlSize = "sm",
             onClick = function()
-                send({ kind = "motionbgs_helper_open" })
+                panelUi.send({ kind = "motionbgs_helper_open" })
             end,
         }))
         table.insert(helperStatusChildren, ui.button({
@@ -3833,7 +3947,7 @@ local function motionBgsSection()
             controlSize = "sm",
             enabled = motionEnabled and not busy,
             onClick = function()
-                send({ kind = "motionbgs_probe" })
+                panelUi.send({ kind = "motionbgs_probe" })
             end,
         }))
     end
@@ -3898,7 +4012,7 @@ local function motionBgsSection()
                     motionPageInputRevision += 1
                     providerResultPages.motionbgs = 1
                     preview.cancel()
-                    send({ kind = "motionbgs_clear" })
+                    panelUi.send({ kind = "motionbgs_clear" })
                 end,
             }),
         }),
@@ -3988,7 +4102,7 @@ local function motionBgsSection()
             children,
             items,
             #items,
-            BROWSER_GRID_COLUMNS,
+            const.BROWSER_GRID_COLUMNS,
             function(item)
                 local slug = tostring(item.slug or "")
                 local function downloadButton(requestedQuality)
@@ -4017,7 +4131,7 @@ local function motionBgsSection()
                             and not active
                             and not queued,
                         onClick = function()
-                            send({ kind = "motionbgs_download", slug = slug, quality = requestedQuality })
+                            panelUi.send({ kind = "motionbgs_download", slug = slug, quality = requestedQuality })
                         end,
                     })
                 end
@@ -4058,7 +4172,7 @@ local function motionBgsSection()
             children,
             itemCount,
             localPage,
-            PROVIDER_RESULT_CHUNK,
+            const.PROVIDER_RESULT_CHUNK,
             function(value)
                 providerResultPages.motionbgs = value
             end
@@ -4069,7 +4183,7 @@ local function motionBgsSection()
 end
 
 function panelUi.libraryTargetOutput()
-    return if selectedScreen ~= "" then selectedScreen else focusedOutput()
+    return if selectedScreen ~= "" then selectedScreen else panelUi.focusedOutput()
 end
 
 function panelUi.virtualLibraryPairing(entry, libraryItem, existing)
@@ -4084,14 +4198,14 @@ function panelUi.virtualLibraryPairing(entry, libraryItem, existing)
 
     local kind = tostring(type(entry) == "table" and entry.kind or "static")
     local source = tostring(type(entry) == "table" and entry.source or "")
-    local scheme = tostring(settings().color_scheme or "")
+    local scheme = tostring(panelUi.settings().color_scheme or "")
     if scheme == "" then
-        scheme = paletteNames("wallpaper")[1] or "m3-tonal-spot"
+        scheme = panelUi.paletteNames("wallpaper")[1] or "m3-tonal-spot"
     end
-    local useAdaptiveColors = settings().sync_colors ~= false
+    local useAdaptiveColors = panelUi.settings().sync_colors ~= false
     return {
         id = "library-entry",
-        label = tostring(type(entry) == "table" and entry.label or basename(source)):sub(1, 160),
+        label = tostring(type(entry) == "table" and entry.label or panelUi.basename(source)):sub(1, 160),
         media = if kind == "static" then nil else { kind = kind, source = source },
         still = if kind == "static"
             then { mode = "selected", path = source }
@@ -4117,7 +4231,7 @@ function panelUi.libraryPreviewPath(entry, libraryItem, bundle, output)
         path = tostring(libraryItem.preview or "")
     end
     if path == "" then
-        local withOutput = entryForOutput(entry, output)
+        local withOutput = panelUi.entryForOutput(entry, output)
         path = tostring(withOutput.still_path or "")
     end
     return path
@@ -4174,7 +4288,7 @@ function panelUi.libraryCard(item)
     local entry = type(item) == "table" and item.entry or {}
     local metadata = type(item) == "table" and item.metadata or {}
     local kind = tostring(entry.kind or "static")
-    local existing = type(item) == "table" and item.pairing or matchingPairingForLibraryEntry(entry)
+    local existing = type(item) == "table" and item.pairing or panelUi.matchingPairingForLibraryEntry(entry)
     local customized = type(existing) == "table" and existing.customized == true
     local output = panelUi.libraryTargetOutput()
     local bundle = panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)
@@ -4187,13 +4301,13 @@ function panelUi.libraryCard(item)
     local managedDeleteArmed = managed and pendingDeleteItemId == itemId
     local pairingResetArmed = customized and pendingResetPairingId == profileId
     local destructiveActionArmed = managedDeleteArmed
-    local currentProviders = providers()
+    local currentProviders = panelUi.providers()
     local canApply = if kind == "static"
         then currentProviders.noctalia_cli == true
         elseif kind == "video" then type(currentProviders.mpvpaper) == "table"
             and currentProviders.mpvpaper.apply_available == true
         else type(currentProviders.w_engine) == "table" and currentProviders.w_engine.apply_available == true
-    local playlistId = resolveSelectedPlaylist(output)
+    local playlistId = panelUi.resolveSelectedPlaylist(output)
     local still = type(bundle.still) == "table" and bundle.still or {}
     local stillText = if kind == "static"
         then noctalia.tr("panel.library.still_source")
@@ -4203,7 +4317,7 @@ function panelUi.libraryCard(item)
         else noctalia.tr("panel.library.still_automatic")
     local sourceDetail = if kind == "workshop"
         then noctalia.tr("panel.library.workshop_id", { id = tostring(entry.source or "") })
-        else basename(entry.source)
+        else panelUi.basename(entry.source)
     local ownership = if metadata.managed == true
         then noctalia.tr("panel.library.managed")
         elseif tostring(metadata.ownership or "") == "steam" then noctalia.tr("panel.library.steam_owned")
@@ -4214,9 +4328,9 @@ function panelUi.libraryCard(item)
             tooltip = noctalia.tr("panel.library.apply"),
             variant = "primary",
             controlSize = "sm",
-            enabled = canApply and storageValid() and output ~= "",
+            enabled = canApply and panelUi.storageValid() and output ~= "",
             onClick = function()
-                send({ kind = "apply_entry", output = output, entry = entryForOutput(bundle, output) })
+                panelUi.send({ kind = "apply_entry", output = output, entry = panelUi.entryForOutput(bundle, output) })
             end,
         }),
         ui.button({
@@ -4224,21 +4338,21 @@ function panelUi.libraryCard(item)
             tooltip = noctalia.tr("panel.library.add"),
             variant = "ghost",
             controlSize = "sm",
-            enabled = storageValid() and output ~= "",
+            enabled = panelUi.storageValid() and output ~= "",
             onClick = function()
                 if pairingId ~= "" then
-                    send({
+                    panelUi.send({
                         kind = "playlist_add_pairing",
                         output = output,
                         playlist_id = playlistId,
                         pairing_id = pairingId,
                     })
                 else
-                    send({
+                    panelUi.send({
                         kind = "playlist_add_entry",
                         output = output,
                         playlist_id = playlistId,
-                        entry = entryForOutput(bundle, output),
+                        entry = panelUi.entryForOutput(bundle, output),
                     })
                 end
             end,
@@ -4250,10 +4364,10 @@ function panelUi.libraryCard(item)
                 else noctalia.tr("panel.pairings.new"),
             variant = "ghost",
             controlSize = "sm",
-            enabled = storageValid(),
+            enabled = panelUi.storageValid(),
             onClick = function()
-                local editableEntry = entryForOutput(entry, output)
-                openLibraryEntryPairing(editableEntry, metadata)
+                local editableEntry = panelUi.entryForOutput(entry, output)
+                panelUi.openLibraryEntryPairing(editableEntry, metadata)
             end,
         }),
     }
@@ -4263,12 +4377,12 @@ function panelUi.libraryCard(item)
             tooltip = noctalia.tr("panel.pairings.reset"),
             variant = if pairingResetArmed then "primary" else "ghost",
             controlSize = "sm",
-            enabled = storageValid(),
+            enabled = panelUi.storageValid(),
             onClick = function()
                 if pendingResetPairingId == profileId then
                     pendingResetPairingId = ""
                     defaultBundle.id = profileId
-                    send({ kind = "pairing_reset", pairing = defaultBundle })
+                    panelUi.send({ kind = "pairing_reset", pairing = defaultBundle })
                 else
                     pendingResetPairingId = profileId
                     pendingDeleteItemId = ""
@@ -4283,11 +4397,11 @@ function panelUi.libraryCard(item)
             tooltip = noctalia.tr("panel.library.delete_managed"),
             variant = if managedDeleteArmed then "destructive" else "ghost",
             controlSize = "sm",
-            enabled = storageValid(),
+            enabled = panelUi.storageValid(),
             onClick = function()
                 if pendingDeleteItemId == itemId then
                     pendingDeleteItemId = ""
-                    send({ kind = "library_delete", item_id = itemId })
+                    panelUi.send({ kind = "library_delete", item_id = itemId })
                 else
                     pendingDeleteItemId = itemId
                     pendingResetPairingId = ""
@@ -4300,7 +4414,7 @@ function panelUi.libraryCard(item)
     local children = {
         panelUi.libraryThumbnail(kind, previewPath, customized),
         ui.label({
-            text = tostring(entry.label or basename(entry.source)),
+            text = tostring(entry.label or panelUi.basename(entry.source)),
             fontSize = 11,
             fontWeight = "bold",
             maxWidth = 216,
@@ -4320,7 +4434,7 @@ function panelUi.libraryCard(item)
         table.insert(children, ui.label({
             text = if managedDeleteArmed
                 then noctalia.tr("panel.library.delete_managed_confirm", {
-                    name = tostring(entry.label or basename(entry.source)),
+                    name = tostring(entry.label or panelUi.basename(entry.source)),
                 })
                 else noctalia.tr("panel.pairings.confirm_reset"),
             fontSize = 8,
@@ -4368,7 +4482,7 @@ function panelUi.libraryItems(kind, offset, limit)
         local existingIndex = signatures[signature]
         if existingIndex ~= nil then
             if type(pairing) == "table" and type(items[existingIndex]) == "table" then
-                items[existingIndex].pairing = preferredPairingForLibraryEntry(items[existingIndex].pairing, pairing)
+                items[existingIndex].pairing = panelUi.preferredPairingForLibraryEntry(items[existingIndex].pairing, pairing)
             end
             return
         end
@@ -4385,15 +4499,15 @@ function panelUi.libraryItems(kind, offset, limit)
                     label = tostring(sourceItem.title or ("Workshop " .. tostring(sourceItem.id or ""))),
                     added_at = tostring(currentLibrary.scanned_at or ""),
                 }
-                add(entry, sourceItem, matchingPairingForLibraryEntry(entry))
+                add(entry, sourceItem, panelUi.matchingPairingForLibraryEntry(entry))
             else
                 local entry = {
                     kind = kind,
                     source = tostring(sourceItem.path or ""),
-                    label = tostring(sourceItem.name or basename(sourceItem.path)),
+                    label = tostring(sourceItem.name or panelUi.basename(sourceItem.path)),
                     added_at = tostring(currentLibrary.scanned_at or ""),
                 }
-                add(entry, sourceItem, matchingPairingForLibraryEntry(entry))
+                add(entry, sourceItem, panelUi.matchingPairingForLibraryEntry(entry))
             end
         end
     end
@@ -4407,13 +4521,13 @@ function panelUi.libraryDragSignature(entry)
 end
 
 function panelUi.appendLibraryGrid(children, items, visible)
-    panelUi.appendExplicitGrid(children, items, visible, BROWSER_GRID_COLUMNS, function(item)
+    panelUi.appendExplicitGrid(children, items, visible, const.BROWSER_GRID_COLUMNS, function(item)
         return panelUi.libraryCard(item)
     end)
 end
 
 function panelUi.mediumSettingsSection(kind)
-    local configuration = settings()
+    local configuration = panelUi.settings()
     local imageReady, imageRoot = panelUi.locationReady("image")
     local videoReady, videoRoot = panelUi.locationReady("video")
     local dataDirectory = tostring(noctalia.pluginDataDir() or ""):gsub("/+$", "")
@@ -4433,7 +4547,7 @@ function panelUi.mediumSettingsSection(kind)
         end
         addPath("movie", noctalia.tr("panel.storage.video_root"), videoRoot, videoReady)
         addPath("folder", noctalia.tr("panel.medium_settings.motionbgs_library"), managed, videoReady)
-        local motionStatus = motionBgsData()
+        local motionStatus = panelUi.motionBgsData()
         local helperPath = tostring(type(motionStatus) == "table" and motionStatus.binary_path or "")
         if helperPath == "" then
             helperPath = tostring(configuration.backend_binary_path or "")
@@ -4561,25 +4675,25 @@ function panelUi.mediumSettingsSection(kind)
     return ui.column({ gap = 7, padding = 10, radius = 10, fill = "surface_variant/0.16", align = "stretch" }, children)
 end
 
-local function librarySection(mediaFilter, editorNode)
+function panelUi.librarySection(mediaFilter, editorNode)
     local kind = if mediaFilter == "videos" then "video" elseif mediaFilter == "workshops" then "workshop" else "static"
-    local configuration = settings()
+    local configuration = panelUi.settings()
     local page = if kind == "video"
         then libraryPageVideos
         elseif kind == "workshop" then libraryPageWorkshops
         else libraryPageStills
     local items, currentLibrary, total = panelUi.libraryItems(
         kind,
-        (page - 1) * LIBRARY_PAGE_SIZE,
-        LIBRARY_PAGE_SIZE
+        (page - 1) * const.LIBRARY_PAGE_SIZE,
+        const.LIBRARY_PAGE_SIZE
     )
-    local pages = math.max(1, math.ceil(total / LIBRARY_PAGE_SIZE))
+    local pages = math.max(1, math.ceil(total / const.LIBRARY_PAGE_SIZE))
     if page > pages then
         page = pages
         items, currentLibrary, total = panelUi.libraryItems(
             kind,
-            (page - 1) * LIBRARY_PAGE_SIZE,
-            LIBRARY_PAGE_SIZE
+            (page - 1) * const.LIBRARY_PAGE_SIZE,
+            const.LIBRARY_PAGE_SIZE
         )
     end
     local countLabel = if kind == "video"
@@ -4607,8 +4721,8 @@ local function librarySection(mediaFilter, editorNode)
                 variant = "ghost",
                 controlSize = "sm",
                 onClick = function()
-                    resetLibraryVisibility()
-                    send({ kind = "library_refresh" })
+                    panelUi.resetLibraryVisibility()
+                    panelUi.send({ kind = "library_refresh" })
                 end,
             }),
         }),
@@ -4628,7 +4742,7 @@ local function librarySection(mediaFilter, editorNode)
         table.insert(children, ui.label({ text = emptyText, fontSize = 10, color = "on_surface_variant", maxLines = 3 }))
     else
         panelUi.appendLibraryGrid(children, items, #items)
-        panelUi.appendPageControls(children, total, page, LIBRARY_PAGE_SIZE, function(value)
+        panelUi.appendPageControls(children, total, page, const.LIBRARY_PAGE_SIZE, function(value)
             if kind == "video" then
                 libraryPageVideos = value
             elseif kind == "workshop" then
@@ -4650,16 +4764,16 @@ local function librarySection(mediaFilter, editorNode)
 end
 
 -- Playlist, entry, and schedule editing.
-local function playlistActionButton(action, glyph, label, playlistId, output, enabled, primary)
+function panelUi.playlistActionButton(action, glyph, label, playlistId, output, enabled, primary)
     return ui.button({
         text = label,
         glyph = glyph,
         variant = if primary == true then "primary" else "ghost",
         controlSize = "sm",
-        enabled = enabled == true and storageValid() and output ~= "" and playlistId ~= "",
+        enabled = enabled == true and panelUi.storageValid() and output ~= "" and playlistId ~= "",
         flexGrow = 1,
         onClick = function()
-            send({
+            panelUi.send({
                 kind = "playlist_action",
                 output = output,
                 playlist_id = playlistId,
@@ -4670,7 +4784,7 @@ local function playlistActionButton(action, glyph, label, playlistId, output, en
     })
 end
 
-local function playlistEntryPreview(kind, stillPath, active)
+function panelUi.playlistEntryPreview(kind, stillPath, active)
     local path = tostring(stillPath or "")
     if path:sub(1, 1) == "/" and path:find("[%c]") == nil and noctalia.fileExists(path) then
         return ui.image({
@@ -4723,23 +4837,23 @@ function panelUi.playlistEntryVisualState(entry, output)
         end
     end
     if previewPath == "" then
-        previewPath = tostring(entryForOutput({ kind = kind, source = source }, output).still_path or "")
+        previewPath = tostring(panelUi.entryForOutput({ kind = kind, source = source }, output).still_path or "")
     end
     return previewPath, sourceAvailable
 end
 
-local function validSwatchColor(value)
+function panelUi.validSwatchColor(value)
     local color = tostring(value or "")
     return if color:match("^#%x%x%x%x%x%x$") ~= nil then color else nil
 end
 
-local function normalizedPreviewMode(preview, modeName)
+function panelUi.normalizedPreviewMode(preview, modeName)
     local mode = type(preview) == "table" and type(preview[modeName]) == "table" and preview[modeName] or nil
-    local surface = type(mode) == "table" and validSwatchColor(mode.surface) or nil
+    local surface = type(mode) == "table" and panelUi.validSwatchColor(mode.surface) or nil
     local accents = {}
     for index = 1, 4 do
         local color = type(mode) == "table" and type(mode.accents) == "table"
-                and validSwatchColor(mode.accents[index])
+                and panelUi.validSwatchColor(mode.accents[index])
             or nil
         if color ~= nil then
             table.insert(accents, color)
@@ -4751,20 +4865,20 @@ local function normalizedPreviewMode(preview, modeName)
     return { surface = surface, accents = accents }
 end
 
-local function palettePreviewForBundle(bundle, pairingId)
+function panelUi.palettePreviewForBundle(bundle, pairingId)
     local theme = type(bundle) == "table" and type(bundle.theme) == "table" and bundle.theme or {}
     local source = tostring(theme.source or "inherit")
     if source == "wallpaper" then
-        return adaptivePreviewForBundle(bundle, pairingId)
+        return panelUi.adaptivePreviewForBundle(bundle, pairingId)
     elseif source == "builtin" or source == "community" or source == "custom" then
-        local entry = paletteInventoryEntry(source, theme.selection)
+        local entry = panelUi.paletteInventoryEntry(source, theme.selection)
         local preview = type(entry) == "table" and type(entry.preview) == "table" and entry.preview or nil
         return preview, if preview ~= nil then "ready" else "unavailable", ""
     end
     return nil, "unavailable", ""
 end
 
-local function paletteModeSwatch(modeName, mode)
+function panelUi.paletteModeSwatch(modeName, mode)
     local colors = {
         ui.box({ width = 28, height = 15, radius = 4, fill = mode.surface, border = "outline/0.4", borderWidth = 1 }),
     }
@@ -4785,12 +4899,12 @@ local function paletteModeSwatch(modeName, mode)
     })
 end
 
-local function pairingPaletteSwatch(bundle, pairingId, onRefresh)
+function panelUi.pairingPaletteSwatch(bundle, pairingId, onRefresh)
     local theme = type(bundle) == "table" and type(bundle.theme) == "table" and bundle.theme or {}
-    local preview, state, errorMessage = palettePreviewForBundle(bundle, pairingId)
+    local preview, state, errorMessage = panelUi.palettePreviewForBundle(bundle, pairingId)
     local mode = tostring(theme.mode or "inherit")
-    local dark = normalizedPreviewMode(preview, "dark")
-    local light = normalizedPreviewMode(preview, "light")
+    local dark = panelUi.normalizedPreviewMode(preview, "dark")
+    local light = panelUi.normalizedPreviewMode(preview, "light")
     local children = {
         ui.row({ gap = 5, align = "center" }, {
             ui.label({
@@ -4805,7 +4919,7 @@ local function pairingPaletteSwatch(bundle, pairingId, onRefresh)
                     tooltip = noctalia.tr("panel.pairings.palette_preview_wallpaper"),
                     variant = "ghost",
                     controlSize = "sm",
-                    enabled = storageValid(),
+                    enabled = panelUi.storageValid(),
                     onClick = onRefresh,
                 })
                 else ui.spacer({ width = 1 }),
@@ -4846,15 +4960,15 @@ local function pairingPaletteSwatch(bundle, pairingId, onRefresh)
             color = "on_surface_variant",
         }))
         if dark ~= nil then
-            table.insert(children, paletteModeSwatch("dark", dark))
+            table.insert(children, panelUi.paletteModeSwatch("dark", dark))
         end
         if light ~= nil then
-            table.insert(children, paletteModeSwatch("light", light))
+            table.insert(children, panelUi.paletteModeSwatch("light", light))
         end
     elseif mode == "dark" and dark ~= nil then
-        table.insert(children, paletteModeSwatch("dark", dark))
+        table.insert(children, panelUi.paletteModeSwatch("dark", dark))
     elseif mode == "light" and light ~= nil then
-        table.insert(children, paletteModeSwatch("light", light))
+        table.insert(children, panelUi.paletteModeSwatch("light", light))
     else
         table.insert(children, ui.label({
             text = noctalia.tr("panel.pairings.palette_preview_unavailable"),
@@ -4879,8 +4993,8 @@ end
 -- current desktop theme is the pairing's predicted palette. Merely rendering
 -- a drawer never launches palette extraction work.
 function panelUi.compactPaletteSwatch(bundle, pairingId)
-    local preview = palettePreviewForBundle(bundle, pairingId)
-    local colors = normalizedPreviewMode(preview, "dark") or normalizedPreviewMode(preview, "light")
+    local preview = panelUi.palettePreviewForBundle(bundle, pairingId)
+    local colors = panelUi.normalizedPreviewMode(preview, "dark") or panelUi.normalizedPreviewMode(preview, "light")
     local boxes = {}
     if type(colors) == "table" then
         table.insert(boxes, ui.box({ width = 20, height = 13, radius = 3, fill = colors.surface }))
@@ -4905,7 +5019,7 @@ function panelUi.compactPaletteSwatch(bundle, pairingId)
     })
 end
 
-local function pairingKindLabel(kind)
+function panelUi.pairingKindLabel(kind)
     if kind == "video" then
         return noctalia.tr("panel.playlists.entry.media_video")
     elseif kind == "workshop" then
@@ -4934,7 +5048,7 @@ function panelUi.ensurePairingStillChoiceReconciliation()
             ready = false,
         }
         panelUi.pairingStillChoiceCache = choiceCache
-        wakeUpdate()
+        preview.wake()
     end
     return choiceCache
 end
@@ -4950,7 +5064,7 @@ function panelUi.stepPairingStillChoiceReconciliation()
     end
     local sourceItems = choiceCache.sourceItems
     local first = choiceCache.cursor
-    local last = math.min(#sourceItems, first + STILL_CHOICE_RECONCILE_BATCH - 1)
+    local last = math.min(#sourceItems, first + const.STILL_CHOICE_RECONCILE_BATCH - 1)
     for index = first, last do
         local entry = sourceItems[index]
         if type(entry) == "table" then
@@ -4992,12 +5106,12 @@ function panelUi.pairingStillChoices(page, pageSize)
     return choices, #eligible, current, true
 end
 
-local function pairingEditor(kind, entryContext)
+function panelUi.pairingEditor(kind, entryContext)
     local editingPlaylistEntry = type(entryContext) == "table"
     local draftId = if editingPlaylistEntry then editingPlaylistEntryId else editingPairingId
     local previewPairingId = if editingPlaylistEntry then editingPlaylistEntryPairingId else editingPairingId
     local function currentBundle()
-        local bundle = bundleFromDraft(draftId)
+        local bundle = panelUi.bundleFromDraft(draftId)
         if editingPlaylistEntry and editingPlaylistEntryPairingId ~= "" then
             bundle.pairing_id = editingPlaylistEntryPairingId
         end
@@ -5014,10 +5128,10 @@ local function pairingEditor(kind, entryContext)
         or (stillPath:sub(1, 1) == "/" and stillPath:find("[%c]") == nil)
     local label = noctalia.string.trim(entryLabelDraft)
     if label == "" then
-        label = basename(source)
+        label = panelUi.basename(source)
     end
     local labelValid = label ~= "" and label:find("[%c]") == nil
-    local automaticStillReady = dynamic and automaticRepresentativePath(kind, source) ~= ""
+    local automaticStillReady = dynamic and panelUi.automaticRepresentativePath(kind, source) ~= ""
 
     local themeModeValues = { "inherit", "auto", "dark", "light" }
     local themeModeLabels = {
@@ -5049,9 +5163,9 @@ local function pairingEditor(kind, entryContext)
     local selectionNamesReady = true
     local selectionNameIndex = {}
     if entryThemeSourceDraft ~= "inherit" then
-        selectionNames, selectionNamesReady, selectionNameIndex = paletteNames(entryThemeSourceDraft)
+        selectionNames, selectionNamesReady, selectionNameIndex = panelUi.paletteNames(entryThemeSourceDraft)
     end
-    local paletteStatus = paletteInventory()
+    local paletteStatus = panelUi.paletteInventory()
     local selectedPalettePosition = selectionNameIndex[entryThemeSelectionDraft]
     local selectionIndex = if selectedPalettePosition ~= nil then selectedPalettePosition - 1 else 0
     local selectionFound = selectedPalettePosition ~= nil
@@ -5070,7 +5184,7 @@ local function pairingEditor(kind, entryContext)
                     fontSize = 12,
                     fontWeight = "bold",
                 }),
-                ui.label({ text = pairingKindLabel(kind), fontSize = 9, color = "on_surface_variant" }),
+                ui.label({ text = panelUi.pairingKindLabel(kind), fontSize = 9, color = "on_surface_variant" }),
             }),
         }),
         ui.input({
@@ -5103,12 +5217,12 @@ local function pairingEditor(kind, entryContext)
             selectedIndex = if entryStillModeDraft == "selected" then 1 else 0,
             onChange = function(index)
                 entryStillModeDraft = if math.floor(tonumber(index) or 0) == 1 then "selected" else "automatic"
-                local requestedPalette = requestPairingAdaptivePreview(
+                local requestedPalette = panelUi.requestPairingAdaptivePreview(
                     currentBundle(),
                     previewPairingId
                 )
                 if entryStillModeDraft == "automatic" and not requestedPalette then
-                    requestAutomaticStillPreparation(kind, source)
+                    panelUi.requestAutomaticStillPreparation(kind, source)
                 end
                 render()
             end,
@@ -5160,7 +5274,7 @@ local function pairingEditor(kind, entryContext)
                             radius = 7,
                         }),
                         ui.label({
-                            text = tostring(choice.name or basename(choicePath)),
+                            text = tostring(choice.name or panelUi.basename(choicePath)),
                             fontSize = 9,
                             fontWeight = "bold",
                             maxWidth = 164,
@@ -5177,7 +5291,7 @@ local function pairingEditor(kind, entryContext)
                             onClick = function()
                                 entryStillPathDraft = choicePath
                                 pairingManualStillOpen = false
-                                requestPairingAdaptivePreview(currentBundle(), previewPairingId)
+                                panelUi.requestPairingAdaptivePreview(currentBundle(), previewPairingId)
                                 render()
                             end,
                         }),
@@ -5191,7 +5305,7 @@ local function pairingEditor(kind, entryContext)
                 ui.label({
                     text = if stillPath == ""
                         then noctalia.tr("panel.pairings.still_none")
-                        else noctalia.tr("panel.pairings.still_current", { name = basename(stillPath) }),
+                        else noctalia.tr("panel.pairings.still_current", { name = panelUi.basename(stillPath) }),
                     fontSize = 9,
                     color = "on_surface_variant",
                     flexGrow = 1,
@@ -5222,7 +5336,7 @@ local function pairingEditor(kind, entryContext)
                         end,
                         onSubmit = function(value)
                             entryStillPathDraft = tostring(value or "")
-                            requestPairingAdaptivePreview(currentBundle(), previewPairingId)
+                            panelUi.requestPairingAdaptivePreview(currentBundle(), previewPairingId)
                             render()
                         end,
                     }),
@@ -5232,7 +5346,7 @@ local function pairingEditor(kind, entryContext)
                         variant = "ghost",
                         controlSize = "sm",
                         onClick = function()
-                            requestPairingAdaptivePreview(currentBundle(), previewPairingId)
+                            panelUi.requestPairingAdaptivePreview(currentBundle(), previewPairingId)
                             render()
                         end,
                     }),
@@ -5271,9 +5385,9 @@ local function pairingEditor(kind, entryContext)
                     entryThemeSelectionDraft = ""
                 elseif entryThemeSourceDraft == "inherit" then
                     entryThemeSourceDraft = "wallpaper"
-                    entryThemeSelectionDraft = paletteNames("wallpaper")[1] or "m3-tonal-spot"
+                    entryThemeSelectionDraft = panelUi.paletteNames("wallpaper")[1] or "m3-tonal-spot"
                 end
-                requestPairingAdaptivePreview(currentBundle(), previewPairingId)
+                panelUi.requestPairingAdaptivePreview(currentBundle(), previewPairingId)
                 render()
             end,
         }),
@@ -5291,10 +5405,10 @@ local function pairingEditor(kind, entryContext)
                     if entryThemeModeDraft == "inherit" then
                         entryThemeModeDraft = "auto"
                     end
-                    local nextNames, nextNamesReady = paletteNames(entryThemeSourceDraft)
+                    local nextNames, nextNamesReady = panelUi.paletteNames(entryThemeSourceDraft)
                     entryThemeSelectionDraft = if nextNamesReady then nextNames[1] or "" else ""
                 end
-                requestPairingAdaptivePreview(currentBundle(), previewPairingId)
+                panelUi.requestPairingAdaptivePreview(currentBundle(), previewPairingId)
                 render()
             end,
         }),
@@ -5314,7 +5428,7 @@ local function pairingEditor(kind, entryContext)
                 local name = selectionNames[math.floor(tonumber(index) or 0) + 1]
                 if name ~= nil then
                     entryThemeSelectionDraft = tostring(name)
-                    requestPairingAdaptivePreview(currentBundle(), previewPairingId)
+                    panelUi.requestPairingAdaptivePreview(currentBundle(), previewPairingId)
                     render()
                 end
             end,
@@ -5333,11 +5447,11 @@ local function pairingEditor(kind, entryContext)
             }))
         end
     end
-    table.insert(children, pairingPaletteSwatch(
+    table.insert(children, panelUi.pairingPaletteSwatch(
         currentBundle(),
         previewPairingId,
         function()
-            retryPairingAdaptivePreview(currentBundle(), previewPairingId)
+            panelUi.retryPairingAdaptivePreview(currentBundle(), previewPairingId)
             render()
         end
     ))
@@ -5357,7 +5471,7 @@ local function pairingEditor(kind, entryContext)
             glyph = "device-floppy",
             variant = "primary",
             controlSize = "sm",
-            enabled = storageValid()
+            enabled = panelUi.storageValid()
                 and labelValid
                 and sourceValid
                 and stillValid
@@ -5366,7 +5480,7 @@ local function pairingEditor(kind, entryContext)
             flexGrow = 1,
             onClick = function()
                 if editingPlaylistEntry then
-                    send({
+                    panelUi.send({
                         kind = "playlist_replace_entry",
                         playlist_id = editingPlaylistEntryPlaylistId,
                         entry_id = editingPlaylistEntryId,
@@ -5374,8 +5488,8 @@ local function pairingEditor(kind, entryContext)
                     })
                     closePlaylistEntryEditor()
                 else
-                    send({ kind = "pairing_save", pairing = currentBundle() })
-                    closePairingEditor()
+                    panelUi.send({ kind = "pairing_save", pairing = currentBundle() })
+                    panelUi.closePairingEditor()
                 end
                 render()
             end,
@@ -5389,7 +5503,7 @@ local function pairingEditor(kind, entryContext)
                 if editingPlaylistEntry then
                     closePlaylistEntryEditor()
                 else
-                    closePairingEditor()
+                    panelUi.closePairingEditor()
                 end
                 render()
             end,
@@ -5416,8 +5530,8 @@ end
 function panelUi.playlistPairingLibrary(playlistId, output)
     local items = {}
     local total = 0
-    local offset = (playlistLibraryPage - 1) * LIBRARY_PAGE_SIZE
-    local remaining = LIBRARY_PAGE_SIZE
+    local offset = (playlistLibraryPage - 1) * const.LIBRARY_PAGE_SIZE
+    local remaining = const.LIBRARY_PAGE_SIZE
     for _, kind in ipairs({ "static", "video", "workshop" }) do
         if playlistLibraryFilter == "all" or playlistLibraryFilter == kind then
             local _, _, kindTotal = panelUi.libraryItems(kind, 0, 0)
@@ -5430,10 +5544,10 @@ function panelUi.playlistPairingLibrary(playlistId, output)
             end
             total += kindTotal
             offset = math.max(0, offset - kindTotal)
-            remaining = math.max(0, LIBRARY_PAGE_SIZE - #items)
+            remaining = math.max(0, const.LIBRARY_PAGE_SIZE - #items)
         end
     end
-    local pages = math.max(1, math.ceil(total / LIBRARY_PAGE_SIZE))
+    local pages = math.max(1, math.ceil(total / const.LIBRARY_PAGE_SIZE))
     if playlistLibraryPage > pages then
         playlistLibraryPage = pages
         return panelUi.playlistPairingLibrary(playlistId, output)
@@ -5453,7 +5567,7 @@ function panelUi.playlistPairingLibrary(playlistId, output)
                 controlSize = "sm",
                 onClick = function()
                     playlistLibraryPage = 1
-                    send({ kind = "library_refresh" })
+                    panelUi.send({ kind = "library_refresh" })
                 end,
             }),
         }),
@@ -5492,7 +5606,7 @@ function panelUi.playlistPairingLibrary(playlistId, output)
             color = "on_surface_variant",
         }))
     else
-        panelUi.appendExplicitGrid(children, items, #items, PLAYLIST_LIBRARY_COLUMNS, function(item)
+        panelUi.appendExplicitGrid(children, items, #items, const.PLAYLIST_LIBRARY_COLUMNS, function(item)
             local kind = tostring(type(item) == "table" and item.kind or "static")
             local entry = type(item) == "table" and item.entry or {}
             local metadata = type(item) == "table" and item.metadata or {}
@@ -5504,7 +5618,7 @@ function panelUi.playlistPairingLibrary(playlistId, output)
             local signature = panelUi.libraryDragSignature(entry)
             local dragToken = dragLibraryPairingTokenBySignature[signature]
             if dragToken == nil then
-                dragToken = nextDragToken("l")
+                dragToken = panelUi.nextDragToken("l")
                 dragLibraryPairingTokenBySignature[signature] = dragToken
             end
             dragLibraryPairingByToken[dragToken] = {
@@ -5512,7 +5626,7 @@ function panelUi.playlistPairingLibrary(playlistId, output)
                 library_bundle = bundle,
                 pairing_id = pairingId,
             }
-            local canAdd = storageValid() and playlistId ~= ""
+            local canAdd = panelUi.storageValid() and playlistId ~= ""
             return ui.column({
                 key = "playlist-library-card-" .. dragToken,
                 width = 232,
@@ -5530,13 +5644,13 @@ function panelUi.playlistPairingLibrary(playlistId, output)
                     customized
                 ),
                 ui.label({
-                    text = tostring(entry.label or basename(source)),
+                    text = tostring(entry.label or panelUi.basename(source)),
                     fontSize = 10,
                     fontWeight = "bold",
                     maxLines = 1,
                 }),
                 ui.label({
-                    text = pairingKindLabel(kind) .. " · " .. source,
+                    text = panelUi.pairingKindLabel(kind) .. " · " .. source,
                     fontSize = 8,
                     color = "on_surface_variant",
                     maxLines = 2,
@@ -5564,7 +5678,7 @@ function panelUi.playlistPairingLibrary(playlistId, output)
                         variant = "ghost",
                         controlSize = "sm",
                         onClick = function()
-                            openLibraryEntryPairing(entry, metadata)
+                            panelUi.openLibraryEntryPairing(entry, metadata)
                         end,
                     }),
                     ui.button({
@@ -5575,18 +5689,18 @@ function panelUi.playlistPairingLibrary(playlistId, output)
                         enabled = canAdd,
                         onClick = function()
                             if pairingId ~= "" then
-                                send({
+                                panelUi.send({
                                     kind = "playlist_add_pairing",
                                     output = output,
                                     playlist_id = playlistId,
                                     pairing_id = pairingId,
                                 })
                             else
-                                send({
+                                panelUi.send({
                                     kind = "playlist_add_entry",
                                     output = output,
                                     playlist_id = playlistId,
-                                    entry = entryForOutput(bundle, output),
+                                    entry = panelUi.entryForOutput(bundle, output),
                                 })
                             end
                         end,
@@ -5598,7 +5712,7 @@ function panelUi.playlistPairingLibrary(playlistId, output)
             children,
             total,
             playlistLibraryPage,
-            LIBRARY_PAGE_SIZE,
+            const.LIBRARY_PAGE_SIZE,
             function(value)
                 playlistLibraryPage = value
             end
@@ -5625,34 +5739,34 @@ function panelUi.selectPlaylistEntrySource(item)
     local customized = type(existing) == "table" and existing.customized == true
     local bundle = panelUi.virtualLibraryPairing(entry, metadata, if customized then existing else nil)
     local preservedAddedAt = entryAddedAtDraft
-    loadBundleDraft(bundle, kind)
+    panelUi.loadBundleDraft(bundle, kind)
     entryAddedAtDraft = preservedAddedAt
     entryMediaKindDraft = kind
     editingPlaylistEntryPairingId = type(existing) == "table" and tostring(existing.id or "") or ""
     pairingStillPickerPage = 1
     pairingManualStillOpen = false
     pairingEditorRevision += 1
-    clearAutomaticStillPreparation(kind, entryMediaSourceDraft)
-    local requestedPalette = requestPairingAdaptivePreview(
-        bundleFromDraft(editingPlaylistEntryId),
+    panelUi.clearAutomaticStillPreparation(kind, entryMediaSourceDraft)
+    local requestedPalette = panelUi.requestPairingAdaptivePreview(
+        panelUi.bundleFromDraft(editingPlaylistEntryId),
         editingPlaylistEntryPairingId
     )
     if not requestedPalette then
-        requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))
+        panelUi.requestAutomaticStillPreparation(kind, noctalia.string.trim(entryMediaSourceDraft))
     end
     render()
 end
 
 function panelUi.playlistEntrySourcePicker(output)
     local kind = playlistEntrySourceKind
-    local offset = (playlistEntrySourcePage - 1) * ENTRY_SOURCE_PAGE_SIZE
+    local offset = (playlistEntrySourcePage - 1) * const.ENTRY_SOURCE_PAGE_SIZE
     local items = {}
     local total = 0
     local sourceReady = true
     if kind == "static" then
         local choices, choiceCount, choicePage, choicesReady = panelUi.pairingStillChoices(
             playlistEntrySourcePage,
-            ENTRY_SOURCE_PAGE_SIZE
+            const.ENTRY_SOURCE_PAGE_SIZE
         )
         total = choiceCount
         sourceReady = choicesReady
@@ -5662,21 +5776,21 @@ function panelUi.playlistEntrySourcePicker(output)
             local entry = {
                 kind = "static",
                 source = tostring(sourceItem.path or ""),
-                label = tostring(sourceItem.name or basename(sourceItem.path)),
+                label = tostring(sourceItem.name or panelUi.basename(sourceItem.path)),
                 added_at = tostring(currentLibrary.scanned_at or ""),
             }
             table.insert(items, {
                 entry = entry,
                 metadata = sourceItem,
-                pairing = matchingPairingForLibraryEntry(entry),
+                pairing = panelUi.matchingPairingForLibraryEntry(entry),
             })
         end
     else
-        local pageItems, _library, kindTotal = panelUi.libraryItems(kind, offset, ENTRY_SOURCE_PAGE_SIZE)
+        local pageItems, _library, kindTotal = panelUi.libraryItems(kind, offset, const.ENTRY_SOURCE_PAGE_SIZE)
         items = pageItems
         total = kindTotal
     end
-    local pages = math.max(1, math.ceil(total / ENTRY_SOURCE_PAGE_SIZE))
+    local pages = math.max(1, math.ceil(total / const.ENTRY_SOURCE_PAGE_SIZE))
     if playlistEntrySourcePage > pages then
         playlistEntrySourcePage = pages
         return panelUi.playlistEntrySourcePicker(output)
@@ -5730,7 +5844,7 @@ function panelUi.playlistEntrySourcePicker(output)
             maxLines = 2,
         }))
     else
-        panelUi.appendExplicitGrid(children, items, #items, PLAYLIST_LIBRARY_COLUMNS, function(item)
+        panelUi.appendExplicitGrid(children, items, #items, const.PLAYLIST_LIBRARY_COLUMNS, function(item)
             item.kind = kind
             local entry = type(item.entry) == "table" and item.entry or {}
             local metadata = type(item.metadata) == "table" and item.metadata or {}
@@ -5757,7 +5871,7 @@ function panelUi.playlistEntrySourcePicker(output)
                     customized
                 ),
                 ui.label({
-                    text = tostring(entry.label or basename(source)),
+                    text = tostring(entry.label or panelUi.basename(source)),
                     fontSize = 10,
                     fontWeight = "bold",
                     maxLines = 1,
@@ -5781,7 +5895,7 @@ function panelUi.playlistEntrySourcePicker(output)
             children,
             total,
             playlistEntrySourcePage,
-            ENTRY_SOURCE_PAGE_SIZE,
+            const.ENTRY_SOURCE_PAGE_SIZE,
             function(value)
                 playlistEntrySourcePage = value
             end
@@ -5810,11 +5924,11 @@ function panelUi.playlistEntryEditor(playlistId, output)
         align = "stretch",
     }, {
         panelUi.playlistEntrySourcePicker(output),
-        pairingEditor(entryMediaKindDraft, { playlist_id = playlistId }),
+        panelUi.pairingEditor(entryMediaKindDraft, { playlist_id = playlistId }),
     })
 end
 
-local function playlistInsertionZone(playlistId, beforeId)
+function panelUi.playlistInsertionZone(playlistId, beforeId)
     local playlistTokens = dragTargetTokenByPlaylist[playlistId]
     local token = type(playlistTokens) == "table" and playlistTokens[tostring(beforeId or "")] or nil
     if token == nil then
@@ -5826,7 +5940,7 @@ local function playlistInsertionZone(playlistId, beforeId)
         value = token,
         onDrop = "onPlaylistDrop",
         direction = "row",
-        enabled = storageValid() and playlistId ~= "",
+        enabled = panelUi.storageValid() and playlistId ~= "",
         height = 3,
         radius = 2,
         fill = "primary/0.28",
@@ -5835,7 +5949,7 @@ local function playlistInsertionZone(playlistId, beforeId)
     })
 end
 
-local function scheduleSelectionSummary(schedule)
+function panelUi.scheduleSelectionSummary(schedule)
     local dayNames = {
         noctalia.tr("panel.schedules.day_sun"),
         noctalia.tr("panel.schedules.day_mon"),
@@ -5883,8 +5997,8 @@ local function scheduleSelectionSummary(schedule)
     return months, if #selectedDays > 0 then table.concat(selectedDays, ", ") else "—"
 end
 
-local function scheduleEditor(output, playlistId)
-    local labels, ids, selectedIndex = playlistOptions(schedulePlaylistDraft)
+function panelUi.scheduleEditor(output, playlistId)
+    local labels, ids, selectedIndex = panelUi.playlistOptions(schedulePlaylistDraft)
     local days = {
         noctalia.tr("panel.schedules.day_sun"),
         noctalia.tr("panel.schedules.day_mon"),
@@ -6063,7 +6177,7 @@ local function scheduleEditor(output, playlistId)
                 glyph = "device-floppy",
                 variant = "primary",
                 controlSize = "sm",
-                enabled = storageValid()
+                enabled = panelUi.storageValid()
                     and output ~= ""
                     and #ids > 0
                     and noctalia.string.trim(scheduleNameDraft) ~= "",
@@ -6081,8 +6195,8 @@ local function scheduleEditor(output, playlistId)
                             table.insert(selectedMonths, index)
                         end
                     end
-                    local startMinute = if scheduleAllDayDraft then 0 else parseMinute(scheduleStartDraft)
-                    local endMinute = if scheduleAllDayDraft then 0 else parseMinute(scheduleEndDraft)
+                    local startMinute = if scheduleAllDayDraft then 0 else panelUi.parseMinute(scheduleStartDraft)
+                    local endMinute = if scheduleAllDayDraft then 0 else panelUi.parseMinute(scheduleEndDraft)
                     if #weekdays == 0 then
                         scheduleDraftError = noctalia.tr("panel.schedules.validation_weekday")
                         render()
@@ -6097,7 +6211,7 @@ local function scheduleEditor(output, playlistId)
                         render()
                     else
                         scheduleDraftError = ""
-                        send({
+                        panelUi.send({
                             kind = "schedule_save",
                             output = output,
                             before_id = if editingScheduleId == "" and scheduleInsertBeforeDraft ~= ""
@@ -6116,7 +6230,7 @@ local function scheduleEditor(output, playlistId)
                             },
                         })
                         scheduleEditorOpen = false
-                        resetScheduleDraft(playlistId)
+                        panelUi.resetScheduleDraft(playlistId)
                         render()
                     end
                 end,
@@ -6128,7 +6242,7 @@ local function scheduleEditor(output, playlistId)
                 controlSize = "sm",
                 onClick = function()
                     scheduleEditorOpen = false
-                    resetScheduleDraft(playlistId)
+                    panelUi.resetScheduleDraft(playlistId)
                     render()
                 end,
             }),
@@ -6143,7 +6257,7 @@ local function scheduleEditor(output, playlistId)
     return ui.column({ gap = 7, padding = 9, radius = 9, fill = "surface_variant/0.2", align = "stretch" }, children)
 end
 
-local function scheduleInsertionZone(output, beforeId)
+function panelUi.scheduleInsertionZone(output, beforeId)
     local namespace = "@schedule:" .. output
     local tokens = dragTargetTokenByPlaylist[namespace]
     local token = type(tokens) == "table" and tokens[tostring(beforeId or "")] or nil
@@ -6156,7 +6270,7 @@ local function scheduleInsertionZone(output, beforeId)
         value = token,
         onDrop = "onDisplayPlaylistDrop",
         direction = "row",
-        enabled = storageValid() and output ~= "",
+        enabled = panelUi.storageValid() and output ~= "",
         height = 3,
         radius = 2,
         fill = "primary/0.28",
@@ -6177,7 +6291,7 @@ function panelUi.defaultPlaylistDropZone(output)
         value = token,
         onDrop = "onDisplayPlaylistDrop",
         direction = "row",
-        enabled = storageValid() and output ~= "",
+        enabled = panelUi.storageValid() and output ~= "",
         height = 5,
         radius = 3,
         fill = "primary/0.35",
@@ -6186,12 +6300,12 @@ function panelUi.defaultPlaylistDropZone(output)
     })
 end
 
-local function schedulesSection(output, playlistId)
-    local configuredOutput = outputConfig(output)
+function panelUi.schedulesSection(output, playlistId)
+    local configuredOutput = panelUi.outputConfig(output)
     local schedules = type(configuredOutput.schedules) == "table" and configuredOutput.schedules or {}
-    local state = outputRuntime(output)
+    local state = panelUi.outputRuntime(output)
     local fallbackId = tostring(configuredOutput.fallback_playlist or "")
-    local fallback = playlistMap()[fallbackId]
+    local fallback = panelUi.playlistMap()[fallbackId]
     local fallbackName = if type(fallback) == "table"
         then tostring(fallback.name or fallbackId)
         else noctalia.tr("panel.screens.no_default")
@@ -6208,9 +6322,9 @@ local function schedulesSection(output, playlistId)
                 glyph = "calendar-time",
                 variant = if state.manual_pin == true then "primary" else "ghost",
                 controlSize = "sm",
-                enabled = state.manual_pin == true and storageValid(),
+                enabled = state.manual_pin == true and panelUi.storageValid(),
                 onClick = function()
-                    send({ kind = "schedule_resume", output = output })
+                    panelUi.send({ kind = "schedule_resume", output = output })
                 end,
             }),
         }),
@@ -6273,17 +6387,17 @@ local function schedulesSection(output, playlistId)
         local scheduleId = tostring(schedule.id or "")
         local scheduleTokens = dragEntryTokenByPlaylist["@schedule:" .. output]
         local dragToken = type(scheduleTokens) == "table" and scheduleTokens[scheduleId] or nil
-        local scheduledPlaylist = playlistMap()[tostring(schedule.playlist or "")]
+        local scheduledPlaylist = panelUi.playlistMap()[tostring(schedule.playlist or "")]
         local scheduledPlaylistName = if type(scheduledPlaylist) == "table"
             then tostring(scheduledPlaylist.name or schedule.playlist)
             else tostring(schedule.playlist or noctalia.tr("panel.playlists.no_playlists"))
         local window = if schedule.all_day == true
             then noctalia.tr("panel.schedules.all_day")
-            else formatMinute(schedule.start_minute) .. "–" .. formatMinute(schedule.end_minute)
-        local months, days = scheduleSelectionSummary(schedule)
-        table.insert(children, scheduleInsertionZone(output, scheduleId))
+            else panelUi.formatMinute(schedule.start_minute) .. "–" .. panelUi.formatMinute(schedule.end_minute)
+        local months, days = panelUi.scheduleSelectionSummary(schedule)
+        table.insert(children, panelUi.scheduleInsertionZone(output, scheduleId))
         if scheduleEditorOpen and editingScheduleId == "" and scheduleInsertBeforeDraft == scheduleId then
-            table.insert(children, scheduleEditor(output, playlistId))
+            table.insert(children, panelUi.scheduleEditor(output, playlistId))
             scheduleEditorPositioned = true
         end
         local rowChildren = {}
@@ -6292,7 +6406,7 @@ local function schedulesSection(output, playlistId)
                 key = "schedule-grip-" .. dragToken,
                 dragType = "wio-schedule",
                 payload = dragToken,
-                enabled = storageValid(),
+                enabled = panelUi.storageValid(),
                 previewAncestor = 1,
                 liftFromLayout = true,
                 width = 24,
@@ -6333,7 +6447,7 @@ local function schedulesSection(output, playlistId)
             variant = "ghost",
             controlSize = "sm",
             onClick = function()
-                editScheduleDraft(scheduleEntry)
+                panelUi.editScheduleDraft(scheduleEntry)
                 render()
             end,
         }))
@@ -6343,7 +6457,7 @@ local function schedulesSection(output, playlistId)
             variant = "ghost",
             controlSize = "sm",
             onClick = function()
-                send({
+                panelUi.send({
                     kind = "schedule_delete",
                     output = output,
                     schedule_id = scheduleId,
@@ -6355,10 +6469,10 @@ local function schedulesSection(output, playlistId)
             ui.row({ gap = 6, align = "center", padding = 7, radius = 8, fill = "surface_variant/0.22" }, rowChildren)
         )
     end
-    table.insert(children, scheduleInsertionZone(output, ""))
+    table.insert(children, panelUi.scheduleInsertionZone(output, ""))
     if scheduleEditorOpen then
         if not scheduleEditorPositioned then
-            table.insert(children, scheduleEditor(output, playlistId))
+            table.insert(children, panelUi.scheduleEditor(output, playlistId))
         end
     else
         table.insert(
@@ -6368,9 +6482,9 @@ local function schedulesSection(output, playlistId)
                 glyph = "calendar-plus",
                 variant = "ghost",
                 controlSize = "sm",
-                enabled = output ~= "" and playlistId ~= "" and storageValid(),
+                enabled = output ~= "" and playlistId ~= "" and panelUi.storageValid(),
                 onClick = function()
-                    editScheduleDraft(nil, playlistId)
+                    panelUi.editScheduleDraft(nil, playlistId)
                     render()
                 end,
             })
@@ -6380,8 +6494,8 @@ local function schedulesSection(output, playlistId)
 end
 
 function panelUi.displayPlaylistLibrary(output)
-    local ids = sortedPlaylistIds(false)
-    local currentFallback = tostring(outputConfig(output).fallback_playlist or "")
+    local ids = panelUi.sortedPlaylistIds(false)
+    local currentFallback = tostring(panelUi.outputConfig(output).fallback_playlist or "")
     local children = {
         ui.label({
             text = noctalia.tr("panel.screens.playlist_library"),
@@ -6403,7 +6517,7 @@ function panelUi.displayPlaylistLibrary(output)
         }))
     else
         panelUi.appendExplicitGrid(children, ids, displayPlaylistVisible, 2, function(playlistId)
-            local playlist = playlistMap()[playlistId]
+            local playlist = panelUi.playlistMap()[playlistId]
             local entries = type(playlist) == "table" and type(playlist.entries) == "table" and playlist.entries or {}
             local first = entries[1]
             local previewPath = ""
@@ -6425,7 +6539,7 @@ function panelUi.displayPlaylistLibrary(output)
                 align = "stretch",
             }, {
                 ui.row({ gap = 7, align = "center" }, {
-                    playlistEntryPreview(firstKind, previewPath, currentFallback == playlistId),
+                    panelUi.playlistEntryPreview(firstKind, previewPath, currentFallback == playlistId),
                     ui.column({ gap = 1, flexGrow = 1 }, {
                         ui.label({
                             text = tostring(type(playlist) == "table" and playlist.name or playlistId),
@@ -6457,7 +6571,7 @@ function panelUi.displayPlaylistLibrary(output)
                             key = "display-playlist-grip-" .. dragToken,
                             dragType = "wio-playlist",
                             payload = dragToken,
-                            enabled = storageValid(),
+                            enabled = panelUi.storageValid(),
                             previewAncestor = 2,
                             liftFromLayout = true,
                             width = 28,
@@ -6474,10 +6588,10 @@ function panelUi.displayPlaylistLibrary(output)
                         tooltip = noctalia.tr("panel.screens.set_default"),
                         variant = if currentFallback == playlistId then "primary" else "ghost",
                         controlSize = "sm",
-                        enabled = storageValid(),
+                        enabled = panelUi.storageValid(),
                         onClick = function()
                             selectedPlaylistId = playlistId
-                            send({ kind = "playlist_assign", output = output, playlist_id = playlistId })
+                            panelUi.send({ kind = "playlist_assign", output = output, playlist_id = playlistId })
                         end,
                     }),
                     ui.button({
@@ -6485,9 +6599,9 @@ function panelUi.displayPlaylistLibrary(output)
                         tooltip = noctalia.tr("panel.screens.add_schedule"),
                         variant = "ghost",
                         controlSize = "sm",
-                        enabled = storageValid(),
+                        enabled = panelUi.storageValid(),
                         onClick = function()
-                            resetScheduleDraft(playlistId)
+                            panelUi.resetScheduleDraft(playlistId)
                             scheduleNameDraft = tostring(type(playlist) == "table" and playlist.name or playlistId)
                             scheduleEditorOpen = true
                             render()
@@ -6500,7 +6614,7 @@ function panelUi.displayPlaylistLibrary(output)
             children,
             #ids,
             displayPlaylistVisible,
-            PAIRING_CARD_CHUNK,
+            const.PAIRING_CARD_CHUNK,
             function(value)
                 displayPlaylistVisible = value
             end
@@ -6518,16 +6632,16 @@ function panelUi.displayPlaylistLibrary(output)
     }, children)
 end
 
-local function playlistsSection(outputOverride)
+function panelUi.playlistsSection(outputOverride)
     local output = tostring(outputOverride or "")
     if output == "" then
-        output = focusedOutput()
+        output = panelUi.focusedOutput()
     end
-    local playlistId, playlist = resolveSelectedPlaylist(output)
-    local labels, ids, selectedIndex = playlistOptions(playlistId)
+    local playlistId, playlist = panelUi.resolveSelectedPlaylist(output)
+    local labels, ids, selectedIndex = panelUi.playlistOptions(playlistId)
     local playlistLabels = if #labels > 0 then labels else { noctalia.tr("panel.playlists.no_playlists") }
     local entries = type(playlist) == "table" and type(playlist.entries) == "table" and playlist.entries or {}
-    local state = runState(output, playlistId)
+    local state = panelUi.runState(output, playlistId)
     local intervalSeconds = math.max(60, math.floor(tonumber(type(playlist) == "table" and playlist.interval_seconds) or 900))
     local intervalMinutes = math.max(1, math.floor(intervalSeconds / 60))
     local order = tostring(type(playlist) == "table" and playlist.order or "rotate")
@@ -6561,7 +6675,7 @@ local function playlistsSection(outputOverride)
                     playlistIntervalDraft = ""
                     playlistEntryPage = 1
                     scheduleEditorOpen = false
-                    resetScheduleDraft(selectedPlaylistId)
+                    panelUi.resetScheduleDraft(selectedPlaylistId)
                     render()
                 end,
             }),
@@ -6582,7 +6696,7 @@ local function playlistsSection(outputOverride)
                 glyph = "plus",
                 variant = "primary",
                 controlSize = "sm",
-                enabled = storageValid() and noctalia.string.trim(newPlaylistNameDraft) ~= "",
+                enabled = panelUi.storageValid() and noctalia.string.trim(newPlaylistNameDraft) ~= "",
                 onClick = function()
                     local request = {
                         kind = "playlist_create",
@@ -6591,7 +6705,7 @@ local function playlistsSection(outputOverride)
                     if output ~= "" then
                         request.output = output
                     end
-                    send(request)
+                    panelUi.send(request)
                     newPlaylistNameDraft = ""
                 end,
             }),
@@ -6613,9 +6727,9 @@ local function playlistsSection(outputOverride)
                 glyph = "edit",
                 variant = "ghost",
                 controlSize = "sm",
-                enabled = storageValid() and playlistId ~= "" and noctalia.string.trim(nameValue) ~= "",
+                enabled = panelUi.storageValid() and playlistId ~= "" and noctalia.string.trim(nameValue) ~= "",
                 onClick = function()
-                    send({ kind = "playlist_rename", playlist_id = playlistId, name = noctalia.string.trim(nameValue) })
+                    panelUi.send({ kind = "playlist_rename", playlist_id = playlistId, name = noctalia.string.trim(nameValue) })
                     playlistNameDraft = ""
                 end,
             }),
@@ -6626,10 +6740,10 @@ local function playlistsSection(outputOverride)
                 glyph = "copy",
                 variant = "ghost",
                 controlSize = "sm",
-                enabled = storageValid() and playlistId ~= "",
+                enabled = panelUi.storageValid() and playlistId ~= "",
                 flexGrow = 1,
                 onClick = function()
-                    send({
+                    panelUi.send({
                         kind = "playlist_duplicate",
                         playlist_id = playlistId,
                         name = noctalia.tr("panel.playlists.copy_name", {
@@ -6650,12 +6764,12 @@ local function playlistsSection(outputOverride)
                 glyph = if pendingDeletePlaylistId == playlistId and playlistId ~= "" then "alert-triangle" else "trash",
                 variant = "ghost",
                 controlSize = "sm",
-                enabled = storageValid() and playlistId ~= "",
+                enabled = panelUi.storageValid() and playlistId ~= "",
                 flexGrow = 1,
                 onClick = function()
                     if pendingDeletePlaylistId == playlistId then
                         pendingDeletePlaylistId = ""
-                        send({ kind = "playlist_delete", playlist_id = playlistId })
+                        panelUi.send({ kind = "playlist_delete", playlist_id = playlistId })
                     else
                         pendingDeletePlaylistId = playlistId
                         render()
@@ -6752,7 +6866,7 @@ local function playlistsSection(outputOverride)
                     selectedIndex = if order == "shuffle" then 1 else 0,
                     flexGrow = 1,
                     onChange = function(index)
-                        send({
+                        panelUi.send({
                             kind = "playlist_options",
                             playlist_id = playlistId,
                             interval_seconds = intervalSeconds,
@@ -6771,7 +6885,7 @@ local function playlistsSection(outputOverride)
                             math.min(43200, math.floor(tonumber(intervalValue) or intervalMinutes))
                         )
                         playlistIntervalDraft = tostring(minutes)
-                        send({
+                        panelUi.send({
                             kind = "playlist_options",
                             playlist_id = playlistId,
                             interval_seconds = minutes * 60,
@@ -6797,7 +6911,7 @@ local function playlistsSection(outputOverride)
     table.insert(
         children,
         ui.row({ gap = 5, align = "center" }, {
-            playlistActionButton(
+            panelUi.playlistActionButton(
                 "previous",
                 "player-skip-back",
                 noctalia.tr("panel.playlists.previous"),
@@ -6806,7 +6920,7 @@ local function playlistsSection(outputOverride)
                 #entries > 0 and state.paused ~= true,
                 false
             ),
-            playlistActionButton(
+            panelUi.playlistActionButton(
                 "start",
                 "player-play",
                 noctalia.tr("panel.playlists.start"),
@@ -6815,7 +6929,7 @@ local function playlistsSection(outputOverride)
                 #entries > 0 and state.running ~= true,
                 true
             ),
-            playlistActionButton(
+            panelUi.playlistActionButton(
                 "pause",
                 "player-pause",
                 noctalia.tr("panel.playlists.pause"),
@@ -6829,7 +6943,7 @@ local function playlistsSection(outputOverride)
     table.insert(
         children,
         ui.row({ gap = 5, align = "center" }, {
-            playlistActionButton(
+            panelUi.playlistActionButton(
                 "resume",
                 "player-track-next",
                 noctalia.tr("panel.playlists.resume"),
@@ -6838,7 +6952,7 @@ local function playlistsSection(outputOverride)
                 state.paused == true,
                 false
             ),
-            playlistActionButton(
+            panelUi.playlistActionButton(
                 "stop",
                 "player-stop",
                 noctalia.tr("panel.playlists.stop"),
@@ -6852,7 +6966,7 @@ local function playlistsSection(outputOverride)
     table.insert(
         children,
         ui.row({ gap = 5, align = "center" }, {
-            playlistActionButton(
+            panelUi.playlistActionButton(
                 "random",
                 "arrows-shuffle",
                 noctalia.tr("panel.playlists.random"),
@@ -6861,7 +6975,7 @@ local function playlistsSection(outputOverride)
                 #entries > 0 and state.paused ~= true,
                 false
             ),
-            playlistActionButton(
+            panelUi.playlistActionButton(
                 "next",
                 "player-skip-forward",
                 noctalia.tr("panel.playlists.next"),
@@ -6898,14 +7012,14 @@ local function playlistsSection(outputOverride)
             closePlaylistEntryEditor()
             editingThisPlaylist = false
         end
-        local playlistPageCount = math.max(1, math.ceil(#entries / PLAYLIST_ENTRY_CHUNK))
+        local playlistPageCount = math.max(1, math.ceil(#entries / const.PLAYLIST_ENTRY_CHUNK))
         playlistEntryPage = math.max(1, math.min(playlistPageCount, math.floor(playlistEntryPage)))
         local playlistFirstEntry = if editingThisPlaylist
             then editingPlaylistEntryIndex
-            else (playlistEntryPage - 1) * PLAYLIST_ENTRY_CHUNK + 1
+            else (playlistEntryPage - 1) * const.PLAYLIST_ENTRY_CHUNK + 1
         local playlistLastEntry = if editingThisPlaylist
             then editingPlaylistEntryIndex
-            else math.min(#entries, playlistFirstEntry + PLAYLIST_ENTRY_CHUNK - 1)
+            else math.min(#entries, playlistFirstEntry + const.PLAYLIST_ENTRY_CHUNK - 1)
         for index = playlistFirstEntry, playlistLastEntry do
             local entry = entries[index]
             local currentEntry = entry
@@ -6929,7 +7043,7 @@ local function playlistsSection(outputOverride)
                     key = "playlist-entry-grip-" .. dragToken,
                     dragType = "wio-entry",
                     payload = dragToken,
-                    enabled = storageValid(),
+                    enabled = panelUi.storageValid(),
                     previewAncestor = 1,
                     liftFromLayout = true,
                     width = 24,
@@ -6943,10 +7057,10 @@ local function playlistsSection(outputOverride)
             end
             table.insert(cardChildren, ui.column({ gap = 5, flexGrow = 1, align = "stretch" }, {
                 ui.row({ gap = 6, align = "center" }, {
-                    playlistEntryPreview(kind, previewPath, active),
+                    panelUi.playlistEntryPreview(kind, previewPath, active),
                     ui.column({ gap = 1, flexGrow = 1 }, {
                         ui.label({
-                            text = tostring(index) .. ". " .. tostring(entry.label or basename(source)),
+                            text = tostring(index) .. ". " .. tostring(entry.label or panelUi.basename(source)),
                             fontSize = 10,
                             fontWeight = "bold",
                             maxLines = 1,
@@ -6983,9 +7097,9 @@ local function playlistsSection(outputOverride)
                         tooltip = noctalia.tr("panel.playlists.apply"),
                         variant = "ghost",
                         controlSize = "sm",
-                        enabled = output ~= "" and storageValid(),
+                        enabled = output ~= "" and panelUi.storageValid(),
                         onClick = function()
-                            send({
+                            panelUi.send({
                                 kind = "playlist_apply_entry",
                                 output = output,
                                 playlist_id = playlistId,
@@ -7000,13 +7114,13 @@ local function playlistsSection(outputOverride)
                             then "primary"
                             else "ghost",
                         controlSize = "sm",
-                        enabled = storageValid(),
+                        enabled = panelUi.storageValid(),
                         onClick = function()
                             if editingThisPlaylist and editingPlaylistEntryId == entryId then
                                 closePlaylistEntryEditor()
                                 render()
                             else
-                                beginPlaylistEntryEditor(currentEntry, playlistId, index)
+                                panelUi.beginPlaylistEntryEditor(currentEntry, playlistId, index)
                             end
                         end,
                     }),
@@ -7019,7 +7133,7 @@ local function playlistsSection(outputOverride)
                             if editingPlaylistEntryId == tostring(currentEntry.id or "") then
                                 closePlaylistEntryEditor()
                             end
-                            send({
+                            panelUi.send({
                                 kind = "playlist_remove_entry",
                                 playlist_id = playlistId,
                                 entry_id = tostring(currentEntry.id or ""),
@@ -7029,7 +7143,7 @@ local function playlistsSection(outputOverride)
                 }),
             }))
             if not editingThisPlaylist then
-                table.insert(children, playlistInsertionZone(playlistId, entryId))
+                table.insert(children, panelUi.playlistInsertionZone(playlistId, entryId))
             end
             table.insert(children, ui.row({
                 key = "playlist-entry-card-" .. entryId,
@@ -7048,7 +7162,7 @@ local function playlistsSection(outputOverride)
                 children,
                 #entries,
                 playlistEntryPage,
-                PLAYLIST_ENTRY_CHUNK,
+                const.PLAYLIST_ENTRY_CHUNK,
                 function(value)
                     playlistEntryPage = value
                 end
@@ -7056,13 +7170,13 @@ local function playlistsSection(outputOverride)
         end
     end
     if not editingThisPlaylist then
-        table.insert(children, playlistInsertionZone(playlistId, ""))
+        table.insert(children, panelUi.playlistInsertionZone(playlistId, ""))
     end
     return panelUi.card(children)
 end
 
-local function diagnosticsSection()
-    local current = providers()
+function panelUi.diagnosticsSection()
+    local current = panelUi.providers()
     local probeText = if current.probing == true
         then noctalia.tr("diagnostics.probing")
         elseif current.probe_ok == true then noctalia.tr(
@@ -7070,7 +7184,7 @@ local function diagnosticsSection()
             { time = tostring(current.probed_at or "") }
         )
         else noctalia.tr("diagnostics.probe_error", { error = tostring(current.probe_error or "") })
-    local storageText = if storageValid()
+    local storageText = if panelUi.storageValid()
         then noctalia.tr("diagnostics.storage_ok")
         else noctalia.tr("diagnostics.storage_error", {
             config = tostring(type(status) == "table" and status.config_error or ""),
@@ -7100,7 +7214,7 @@ local function diagnosticsSection()
         ui.label({
             text = storageText,
             fontSize = 10,
-            color = if storageValid() then "primary" else "error",
+            color = if panelUi.storageValid() then "primary" else "error",
             maxLines = 5,
         }),
         ui.label({ text = probeText, fontSize = 10, color = "on_surface_variant", maxLines = 5 }),
@@ -7210,7 +7324,7 @@ local function diagnosticsSection()
             variant = "ghost",
             enabled = current.probing ~= true,
             onClick = function()
-                send({ kind = "probe" })
+                panelUi.send({ kind = "probe" })
             end,
         })
     )
@@ -7255,7 +7369,7 @@ function panelPages.screenNames()
             add(output.name or output.connector)
         end
     end
-    local configured = configSnapshot().outputs
+    local configured = panelUi.configSnapshot().outputs
     for output in pairs(type(configured) == "table" and configured or {}) do
         add(output)
     end
@@ -7268,7 +7382,7 @@ function panelPages.ensureSelectedScreen()
     if selectedScreen ~= "" and seen[selectedScreen] then
         return selectedScreen
     end
-    local focused = focusedOutput()
+    local focused = panelUi.focusedOutput()
     selectedScreen = if focused ~= "" and seen[focused] then focused else names[1] or ""
     return selectedScreen
 end
@@ -7278,7 +7392,7 @@ function panelPages.selectPage(page)
     activePage = if panelPages.validPages[page] then page else "main"
     if activePage == "playlists" then
         activeSubpage = ""
-        resolveSelectedPlaylist(panelPages.ensureSelectedScreen())
+        panelUi.resolveSelectedPlaylist(panelPages.ensureSelectedScreen())
     elseif activePage == "library" then
         activeSubpage = if panelPages.validLibrarySubpages[activeSubpage] then activeSubpage else "images"
     elseif activePage == "shops" then
@@ -7286,7 +7400,7 @@ function panelPages.selectPage(page)
     else
         activeSubpage = ""
     end
-    closePairingEditor()
+    panelUi.closePairingEditor()
     closePlaylistEntryEditor()
     scheduleEditorOpen = false
     render()
@@ -7299,7 +7413,7 @@ function panelPages.selectLibraryPage(subpage)
     preview.cancel()
     activePage = "library"
     activeSubpage = subpage
-    closePairingEditor()
+    panelUi.closePairingEditor()
     closePlaylistEntryEditor()
     scheduleEditorOpen = false
     render()
@@ -7315,14 +7429,14 @@ function panelPages.selectShopPage(subpage)
     preview.cancel()
     activePage = "shops"
     activeSubpage = subpage
-    closePairingEditor()
+    panelUi.closePairingEditor()
     closePlaylistEntryEditor()
     scheduleEditorOpen = false
     render()
 end
 
 function panelPages.selectPlaylistPage(playlistId)
-    if type(playlistMap()[playlistId]) ~= "table" or playlistMap()[playlistId].quick_choice == true then
+    if type(panelUi.playlistMap()[playlistId]) ~= "table" or panelUi.playlistMap()[playlistId].quick_choice == true then
         return
     end
     preview.cancel()
@@ -7330,10 +7444,10 @@ function panelPages.selectPlaylistPage(playlistId)
     playlistNameDraft = ""
     playlistIntervalDraft = ""
     playlistEntryPage = 1
-    closePairingEditor()
+    panelUi.closePairingEditor()
     closePlaylistEntryEditor()
     scheduleEditorOpen = false
-    resetScheduleDraft(playlistId)
+    panelUi.resetScheduleDraft(playlistId)
     activePage = "playlists"
     activeSubpage = ""
     render()
@@ -7348,16 +7462,16 @@ function panelPages.selectScreenPage(output)
     selectedScreen = output
     screenIntervalDraft = ""
     screenOrderDraft = ""
-    closePairingEditor()
+    panelUi.closePairingEditor()
     closePlaylistEntryEditor()
     scheduleEditorOpen = false
-    local configured = outputConfig(output)
+    local configured = panelUi.outputConfig(output)
     local fallback = tostring(configured.fallback_playlist or "")
-    selectedPlaylistId = if type(playlistMap()[fallback]) == "table"
-        and playlistMap()[fallback].quick_choice ~= true
+    selectedPlaylistId = if type(panelUi.playlistMap()[fallback]) == "table"
+        and panelUi.playlistMap()[fallback].quick_choice ~= true
         then fallback
-        else sortedPlaylistIds(false)[1] or ""
-    resetScheduleDraft(selectedPlaylistId)
+        else panelUi.sortedPlaylistIds(false)[1] or ""
+    panelUi.resetScheduleDraft(selectedPlaylistId)
     activePage = "main"
     activeSubpage = "display"
     render()
@@ -7445,15 +7559,15 @@ function panelPages.navigationColumn()
         ))
     end
     table.insert(children, panelPages.navigationButton("playlists", "panel.nav.playlists", "playlist"))
-    local playlistIds = sortedPlaylistIds(false)
-    local playlistPages = math.max(1, math.ceil(#playlistIds / PLAYLIST_NAV_PAGE_SIZE))
+    local playlistIds = panelUi.sortedPlaylistIds(false)
+    local playlistPages = math.max(1, math.ceil(#playlistIds / const.PLAYLIST_NAV_PAGE_SIZE))
     playlistNavigationPage = math.min(playlistPages, math.max(1, playlistNavigationPage))
-    local firstPlaylist = (playlistNavigationPage - 1) * PLAYLIST_NAV_PAGE_SIZE + 1
-    local lastPlaylist = math.min(#playlistIds, firstPlaylist + PLAYLIST_NAV_PAGE_SIZE - 1)
+    local firstPlaylist = (playlistNavigationPage - 1) * const.PLAYLIST_NAV_PAGE_SIZE + 1
+    local lastPlaylist = math.min(#playlistIds, firstPlaylist + const.PLAYLIST_NAV_PAGE_SIZE - 1)
     for index = firstPlaylist, lastPlaylist do
         local playlistId = playlistIds[index]
         local id = playlistId
-        local playlist = playlistMap()[id]
+        local playlist = panelUi.playlistMap()[id]
         table.insert(
             children,
             panelPages.insetNavigationButton(
@@ -7629,7 +7743,7 @@ function panelPages.homeSection()
             }),
             ui.label({
                 text = if type(pair) == "table"
-                    then tostring(pair.provider or "") .. " · " .. basename(stillPath)
+                    then tostring(pair.provider or "") .. " · " .. panelUi.basename(stillPath)
                     else noctalia.tr("panel.home.choose_library"),
                 fontSize = 9,
                 color = "on_surface_variant",
@@ -7688,22 +7802,22 @@ function panelPages.homeSection()
 end
 
 function panelPages.selectedScreenPlaylist(output)
-    local configured = outputConfig(output)
+    local configured = panelUi.outputConfig(output)
     local fallback = tostring(configured.fallback_playlist or "")
-    if type(playlistMap()[fallback]) == "table" and playlistMap()[fallback].quick_choice ~= true then
+    if type(panelUi.playlistMap()[fallback]) == "table" and panelUi.playlistMap()[fallback].quick_choice ~= true then
         return fallback
     end
-    if type(playlistMap()[selectedPlaylistId]) == "table" and playlistMap()[selectedPlaylistId].quick_choice ~= true then
+    if type(panelUi.playlistMap()[selectedPlaylistId]) == "table" and panelUi.playlistMap()[selectedPlaylistId].quick_choice ~= true then
         return selectedPlaylistId
     end
-    return sortedPlaylistIds(false)[1] or ""
+    return panelUi.sortedPlaylistIds(false)[1] or ""
 end
 
 function panelPages.effectiveScreenPlayback(output, playlist)
-    local configured = outputConfig(output)
+    local configured = panelUi.outputConfig(output)
     local configuredOrder = tostring(configured.order or "")
     local playlistOrder = tostring(type(playlist) == "table" and playlist.order or "")
-    local globalOrder = tostring(settings().cycle_order or "")
+    local globalOrder = tostring(panelUi.settings().cycle_order or "")
     local order = if configuredOrder == "shuffle"
         then "shuffle"
         elseif configuredOrder == "rotate" then "rotate"
@@ -7714,7 +7828,7 @@ function panelPages.effectiveScreenPlayback(output, playlist)
 
     local configuredInterval = tonumber(configured.interval_seconds)
     local playlistInterval = tonumber(type(playlist) == "table" and playlist.interval_seconds or nil)
-    local globalInterval = math.floor((tonumber(settings().cycle_interval_minutes) or 15) * 60)
+    local globalInterval = math.floor((tonumber(panelUi.settings().cycle_interval_minutes) or 15) * 60)
     local intervalSeconds = configuredInterval or playlistInterval or globalInterval
     intervalSeconds = math.max(60, math.min(30 * 24 * 60 * 60, math.floor(intervalSeconds)))
     local inherited = configured.order == nil and configured.interval_seconds == nil
@@ -7741,12 +7855,12 @@ function panelPages.screenPlaybackSection(output, playlist)
                 glyph = "link",
                 variant = if inherited then "primary" else "ghost",
                 controlSize = "sm",
-                enabled = output ~= "" and storageValid(),
+                enabled = output ~= "" and panelUi.storageValid(),
                 onClick = function()
                     if not inherited then
                         screenIntervalDraft = ""
                         screenOrderDraft = ""
-                        send({ kind = "output_options", output = output, inherit = true })
+                        panelUi.send({ kind = "output_options", output = output, inherit = true })
                     end
                 end,
             }),
@@ -7755,12 +7869,12 @@ function panelPages.screenPlaybackSection(output, playlist)
                 glyph = "settings",
                 variant = if inherited then "ghost" else "primary",
                 controlSize = "sm",
-                enabled = output ~= "" and storageValid(),
+                enabled = output ~= "" and panelUi.storageValid(),
                 onClick = function()
                     if inherited then
                         screenIntervalDraft = ""
                         screenOrderDraft = ""
-                        send({
+                        panelUi.send({
                             kind = "output_options",
                             output = output,
                             interval_seconds = intervalSeconds,
@@ -7817,7 +7931,7 @@ function panelPages.screenPlaybackSection(output, playlist)
             glyph = "device-floppy",
             variant = "ghost",
             controlSize = "sm",
-            enabled = not inherited and storageValid(),
+            enabled = not inherited and panelUi.storageValid(),
             onClick = function()
                 local currentIntervalValue = if screenIntervalDraft ~= ""
                     then screenIntervalDraft
@@ -7828,7 +7942,7 @@ function panelPages.screenPlaybackSection(output, playlist)
                 )
                 screenIntervalDraft = tostring(minutes)
                 screenOrderDraft = selectedOrder
-                send({
+                panelUi.send({
                     kind = "output_options",
                     output = output,
                     interval_seconds = minutes * 60,
@@ -7845,8 +7959,8 @@ function panelPages.engineDraft(output)
     if type(cached) == "table" then
         return cached
     end
-    local configuration = settings()
-    local engines = type(outputConfig(output).engines) == "table" and outputConfig(output).engines or {}
+    local configuration = panelUi.settings()
+    local engines = type(panelUi.outputConfig(output).engines) == "table" and panelUi.outputConfig(output).engines or {}
     local video = type(engines.video) == "table" and engines.video or {}
     local workshop = type(engines.workshop) == "table" and engines.workshop or {}
     local flags = type(workshop.flags) == "table" and workshop.flags or {}
@@ -8092,14 +8206,14 @@ function panelPages.engineSettingsSection(output)
         glyph = "device-floppy",
         variant = "primary",
         controlSize = "sm",
-        enabled = storageValid() and output ~= "",
+        enabled = panelUi.storageValid() and output ~= "",
         onClick = function()
             workshop.fps = math.max(5, math.min(144, math.floor(tonumber(workshop.fps) or 30)))
             workshop.volume = math.max(0, math.min(100, math.floor(tonumber(workshop.volume) or 0)))
             if flags.no_fullscreen_pause and flags.fullscreen_pause_only_active then
                 flags.fullscreen_pause_only_active = false
             end
-            send({ kind = "output_engines", output = output, engines = draft })
+            panelUi.send({ kind = "output_engines", output = output, engines = draft })
             panelPages.engineDrafts[output] = nil
         end,
     }))
@@ -8114,7 +8228,7 @@ function panelPages.screensSection()
         })
     end
     local playlistId = panelPages.selectedScreenPlaylist(output)
-    local playlist = playlistMap()[playlistId]
+    local playlist = panelUi.playlistMap()[playlistId]
     local children = {
         panelUi.sectionHeader("device-desktop", noctalia.tr("panel.nav.screens"), output),
         ui.label({
@@ -8139,7 +8253,7 @@ function panelPages.screensSection()
         }),
         panelUi.displayPlaylistLibrary(output),
         ui.separator(),
-        schedulesSection(output, playlistId),
+        panelUi.schedulesSection(output, playlistId),
     }
     return panelUi.card(children)
 end
@@ -8151,25 +8265,25 @@ function panelPages.activePageSections()
         if not panelUi.locationReady(requiredRoot) then
             return { panelPages.locationRequiredSection(requiredRoot, nil) }
         end
-        local editor = if pairingEditorOpen and pairingEditorKind == kind then pairingEditor(kind) else nil
-        return { librarySection(if kind == "video" then "videos" elseif kind == "workshop" then "workshops" else "stills", editor) }
+        local editor = if pairingEditorOpen and pairingEditorKind == kind then panelUi.pairingEditor(kind) else nil
+        return { panelUi.librarySection(if kind == "video" then "videos" elseif kind == "workshop" then "workshops" else "stills", editor) }
     elseif activePage == "shops" then
         if activeSubpage == "motionbgs" then
             if not panelUi.locationReady("video") then
                 return { panelPages.locationRequiredSection("video", "motionbgs_open") }
             end
-            return { motionBgsSection() }
+            return { panelUi.motionBgsSection() }
         elseif activeSubpage == "steam" then
             return { panelPages.steamShopSection() }
         end
         if not panelUi.locationReady("image") then
             return { panelPages.locationRequiredSection("image", "wallhaven_site") }
         end
-        return { wallhavenSection() }
+        return { panelUi.wallhavenSection() }
     elseif activePage == "playlists" then
-        return { playlistsSection(panelPages.ensureSelectedScreen()) }
+        return { panelUi.playlistsSection(panelPages.ensureSelectedScreen()) }
     elseif activePage == "diagnostics" then
-        return { diagnosticsSection() }
+        return { panelUi.diagnosticsSection() }
     end
     if activeSubpage == "display" then
         local output = panelPages.ensureSelectedScreen()
@@ -8238,7 +8352,7 @@ function onOpen(_context)
     scheduleEditorOpen = false
     screenIntervalDraft = ""
     screenOrderDraft = ""
-    resetPanelVisibility()
+    panelUi.resetPanelVisibility()
     reloadSharedState()
     activePage = if panelPages.validPages[activePage] then activePage else "main"
     if activePage == "library" and not panelPages.validLibrarySubpages[activeSubpage] then
@@ -8247,7 +8361,7 @@ function onOpen(_context)
         activeSubpage = "wallhaven"
     end
     panelPages.ensureSelectedScreen()
-    resetScheduleDraft(selectedPlaylistId)
+    panelUi.resetScheduleDraft(selectedPlaylistId)
     isOpen = true
     render()
 end
@@ -8272,12 +8386,17 @@ function update()
     if isOpen and preview.retryDue() then
         preview.retry()
     end
+    -- Drain a pending render before stepping, never after. Finishing a preview
+    -- RPC decodes a response and revalidates the visible plan, and a full page
+    -- render rebuilds every card; doing both in one callback overran Noctalia's
+    -- CPU budget. A render this step requests is picked up on the next tick,
+    -- which preview.settle() keeps at ACTIVE_POLL_MS while renderPending is set.
+    if preview.takeRender() then
+        panelPages.renderNow()
+    end
     local _, redraw = preview.step()
     if redraw then
         preview.requestRender()
-    end
-    if preview.takeRender() then
-        panelPages.renderNow()
     end
     local stillChoiceWork = isOpen
         and (
@@ -8290,7 +8409,7 @@ function update()
         )
         and panelUi.pairingStillChoiceWork()
     local workshopIndexWork = isOpen and panelUi.workshopIndexWork()
-    local paletteIndexWork = isOpen and paletteEntryIndexWork()
+    local paletteIndexWork = isOpen and panelUi.paletteEntryIndexWork()
     preview.settle(isOpen and (dragTokensDirty or stillChoiceWork or workshopIndexWork or paletteIndexWork))
 end
 
@@ -8299,7 +8418,7 @@ function onFrameTick(_deltaMs)
     -- Provider RPC completion and every full UI render run only from update().
     preview.refreshClock()
     if isOpen and dragTokensDirty then
-        if stepDragTokenReconciliation() then
+        if panelUi.stepDragTokenReconciliation() then
             render()
         end
     end
@@ -8320,8 +8439,8 @@ function onFrameTick(_deltaMs)
     if workshopIndexWork and panelUi.stepWorkshopIndexReconciliation() then
         render()
     end
-    local paletteIndexWork = isOpen and paletteEntryIndexWork()
-    if paletteIndexWork and stepPaletteEntryIndexReconciliation() then
+    local paletteIndexWork = isOpen and panelUi.paletteEntryIndexWork()
+    if paletteIndexWork and panelUi.stepPaletteEntryIndexReconciliation() then
         render()
     end
     preview.settle(isOpen and (dragTokensDirty or stillChoiceWork or workshopIndexWork or paletteIndexWork))
@@ -8329,25 +8448,25 @@ end
 
 function onIpc(event, payload)
     if event == "probe" then
-        send({ kind = "probe" })
+        panelUi.send({ kind = "probe" })
     elseif event == "capture-video" then
-        runAction("video_capture")
+        panelUi.runAction("video_capture")
     elseif event == "capture-video-pair" then
-        runAction("video_capture_pair")
+        panelUi.runAction("video_capture_pair")
     elseif event == "capture-backing" then
-        runAction("capture_backing")
+        panelUi.runAction("capture_backing")
     elseif event == "capture-w-engine" then
-        runAction("capture_current")
+        panelUi.runAction("capture_current")
     elseif event == "capture-w-engine-pair" then
-        runAction("capture_pair")
+        panelUi.runAction("capture_pair")
     elseif event == "pair-manual" then
-        runAction("manual_pair")
+        panelUi.runAction("manual_pair")
     else
         noctalia.log("wall-in-one panel: unknown IPC event '" .. tostring(event) .. "'")
     end
 end
 
-local function adoptLifecycle(nextStatus)
+function panelUi.adoptLifecycle(nextStatus)
     if type(nextStatus) ~= "table" then
         return false
     end
@@ -8370,7 +8489,7 @@ local function adoptLifecycle(nextStatus)
     return true
 end
 
-local function adoptDomain(current, candidate)
+function panelUi.adoptDomain(current, candidate)
     if type(candidate) ~= "table" or tonumber(candidate.protocol) ~= 1 then
         return current, false
     end
@@ -8397,8 +8516,8 @@ local function adoptDomain(current, candidate)
 end
 
 refreshPanelState = function()
-    status = composeStatus()
-    resolveSelectedPlaylist(if selectedScreen ~= "" then selectedScreen else nil)
+    status = panelUi.composeStatus()
+    panelUi.resolveSelectedPlaylist(if selectedScreen ~= "" then selectedScreen else nil)
     if isOpen then
         render()
     end
@@ -8406,36 +8525,36 @@ end
 
 reloadSharedState = function()
     preview.setBackendStatus(noctalia.state.get(preview.backendStatusKey))
-    lifecycleStatus = noctalia.state.get(STATUS_KEY)
-    configState = noctalia.state.get(CONFIG_STATE_KEY)
-    runtimeState = noctalia.state.get(RUNTIME_STATE_KEY)
-    libraryState = noctalia.state.get(LIBRARY_STATE_KEY)
-    rendererState = noctalia.state.get(RENDERER_STATUS_KEY)
-    motionBgsState = noctalia.state.get(MOTIONBGS_STATUS_KEY)
-    motionBgsResultsState = noctalia.state.get(MOTIONBGS_RESULTS_KEY)
+    lifecycleStatus = noctalia.state.get(const.STATUS_KEY)
+    configState = noctalia.state.get(const.CONFIG_STATE_KEY)
+    runtimeState = noctalia.state.get(const.RUNTIME_STATE_KEY)
+    libraryState = noctalia.state.get(const.LIBRARY_STATE_KEY)
+    rendererState = noctalia.state.get(const.RENDERER_STATUS_KEY)
+    motionBgsState = noctalia.state.get(const.MOTIONBGS_STATUS_KEY)
+    motionBgsResultsState = noctalia.state.get(const.MOTIONBGS_RESULTS_KEY)
     providerResultEpochs.motionbgs += 1
-    palettesState = noctalia.state.get(PALETTES_STATUS_KEY)
-    wallhavenState = noctalia.state.get(WALLHAVEN_STATUS_KEY)
-    wallhavenResultsState = noctalia.state.get(WALLHAVEN_RESULTS_KEY)
+    palettesState = noctalia.state.get(const.PALETTES_STATUS_KEY)
+    wallhavenState = noctalia.state.get(const.WALLHAVEN_STATUS_KEY)
+    wallhavenResultsState = noctalia.state.get(const.WALLHAVEN_RESULTS_KEY)
     providerResultEpochs.wallhaven += 1
-    status = composeStatus()
-    resolveSelectedPlaylist(if selectedScreen ~= "" then selectedScreen else nil)
-    markDragTokensDirty()
+    status = panelUi.composeStatus()
+    panelUi.resolveSelectedPlaylist(if selectedScreen ~= "" then selectedScreen else nil)
+    panelUi.markDragTokensDirty()
 end
 
 preview.initializeScheduler()
-noctalia.state.watch(STATUS_KEY, function(nextStatus)
-    if adoptLifecycle(nextStatus) then
+noctalia.state.watch(const.STATUS_KEY, function(nextStatus)
+    if panelUi.adoptLifecycle(nextStatus) then
         -- A service instance change can race the domain callbacks. Re-read the
         -- persistent slots; composeStatus accepts only the matching instance.
         local previousConfigRevision = type(configState) == "table" and tonumber(configState.revision) or -1
-        configState = noctalia.state.get(CONFIG_STATE_KEY)
+        configState = noctalia.state.get(const.CONFIG_STATE_KEY)
         if type(configState) == "table" and tonumber(configState.revision) ~= previousConfigRevision then
             closePlaylistEntryEditor()
-            markDragTokensDirty()
+            panelUi.markDragTokensDirty()
         end
-        runtimeState = noctalia.state.get(RUNTIME_STATE_KEY)
-        libraryState = noctalia.state.get(LIBRARY_STATE_KEY)
+        runtimeState = noctalia.state.get(const.RUNTIME_STATE_KEY)
+        libraryState = noctalia.state.get(const.LIBRARY_STATE_KEY)
         refreshPanelState()
     end
 end)
@@ -8443,25 +8562,25 @@ end)
 -- each revision here, then let the following STATUS_KEY event coalesce those
 -- changes into one panel rebuild. Its callback also re-reads all three slots,
 -- so a delayed domain callback cannot leave the rendered view behind.
-noctalia.state.watch(CONFIG_STATE_KEY, function(nextState)
-    local adopted, changed = adoptDomain(configState, nextState)
+noctalia.state.watch(const.CONFIG_STATE_KEY, function(nextState)
+    local adopted, changed = panelUi.adoptDomain(configState, nextState)
     configState = adopted
     if changed then
         closePlaylistEntryEditor()
-        markDragTokensDirty()
+        panelUi.markDragTokensDirty()
     end
 end)
-noctalia.state.watch(RUNTIME_STATE_KEY, function(nextState)
-    runtimeState = adoptDomain(runtimeState, nextState)
+noctalia.state.watch(const.RUNTIME_STATE_KEY, function(nextState)
+    runtimeState = panelUi.adoptDomain(runtimeState, nextState)
 end)
-noctalia.state.watch(LIBRARY_STATE_KEY, function(nextState)
-    local adopted, changed = adoptDomain(libraryState, nextState)
+noctalia.state.watch(const.LIBRARY_STATE_KEY, function(nextState)
+    local adopted, changed = panelUi.adoptDomain(libraryState, nextState)
     libraryState = adopted
     if changed then
-        resetLibraryDragTokens()
+        panelUi.resetLibraryDragTokens()
     end
 end)
-noctalia.state.watch(RENDERER_STATUS_KEY, function(nextState)
+noctalia.state.watch(const.RENDERER_STATUS_KEY, function(nextState)
     rendererState = nextState
     refreshPanelState()
 end)
@@ -8470,32 +8589,32 @@ noctalia.state.watch(preview.backendStatusKey, function(nextState)
         render()
     end
 end)
-noctalia.state.watch(MOTIONBGS_STATUS_KEY, function(nextState)
+noctalia.state.watch(const.MOTIONBGS_STATUS_KEY, function(nextState)
     motionBgsState = nextState
     if type(nextState) ~= "table" or nextState.available ~= true then
         preview.cancel()
     end
     refreshPanelState()
 end)
-noctalia.state.watch(MOTIONBGS_RESULTS_KEY, function(nextState)
+noctalia.state.watch(const.MOTIONBGS_RESULTS_KEY, function(nextState)
     preview.cancel()
     motionBgsResultsState = nextState
     providerResultEpochs.motionbgs += 1
     providerResultPages.motionbgs = 1
     refreshPanelState()
 end)
-noctalia.state.watch(PALETTES_STATUS_KEY, function(nextState)
+noctalia.state.watch(const.PALETTES_STATUS_KEY, function(nextState)
     palettesState = nextState
     refreshPanelState()
 end)
-noctalia.state.watch(WALLHAVEN_STATUS_KEY, function(nextState)
+noctalia.state.watch(const.WALLHAVEN_STATUS_KEY, function(nextState)
     wallhavenState = nextState
     if type(nextState) ~= "table" or nextState.available ~= true then
         preview.cancel()
     end
     refreshPanelState()
 end)
-noctalia.state.watch(WALLHAVEN_RESULTS_KEY, function(nextState)
+noctalia.state.watch(const.WALLHAVEN_RESULTS_KEY, function(nextState)
     preview.cancel()
     wallhavenResultsState = nextState
     providerResultEpochs.wallhaven += 1

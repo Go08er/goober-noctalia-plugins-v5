@@ -32,6 +32,7 @@ local MAX_LIBRARY_ITEMS = 512
 local MAX_PALETTE_ITEMS = 512
 local MAX_WORKSHOP_ROOTS = 8
 local VALIDATION_BATCH = 8
+local CLEANUP_BATCH = 8
 local PROBE_TIMEOUT_MS = 5000
 local RPC_OPERATION_BUDGET_MS = 45000
 local RPC_TIMEOUT_MS = 55000
@@ -67,6 +68,8 @@ local pendingOperation = nil
 local pendingPaletteOperation = nil
 local lastDispatchedAction = ""
 local completedTransport = nil
+local decodedTransport = nil
+local pendingCleanupPaths = {}
 local validation = nil
 local nextDiscoveryAtMs = 0
 
@@ -293,6 +296,23 @@ local function completeNonce(nonce, action, libraryValue)
     publishStatus()
 end
 
+-- Returns whether it did any work, not whether work remains, so the tick that
+-- unlinks the final batch still ends there instead of going on to decode a
+-- response in the same callback.
+local function drainPageCleanup(limit)
+    local budget = math.max(0, math.floor(tonumber(limit) or 0))
+    local worked = false
+    while budget > 0 and #pendingCleanupPaths > 0 do
+        local path = table.remove(pendingCleanupPaths)
+        if noctalia.fileExists(path) then
+            noctalia.removeFile(path)
+        end
+        worked = true
+        budget -= 1
+    end
+    return worked
+end
+
 local function cleanupOperationFiles(operation, keepResponse)
     if type(operation) ~= "table" then
         return
@@ -305,12 +325,16 @@ local function cleanupOperationFiles(operation, keepResponse)
     if keepResponse ~= true and validAbsolutePath(operation.response_path) and noctalia.fileExists(operation.response_path) then
         noctalia.removeFile(operation.response_path)
     end
+    -- Queue the page files rather than unlinking them here. A cancelled paged
+    -- operation can name dozens, and one stat plus one unlink each is unbounded
+    -- syscall work inside a callback metered at 12ms of thread CPU. The name
+    -- checks stay here because they are pure string work and because they must
+    -- see the transport directory this operation actually used.
     for _, path in ipairs(type(operation.page_paths) == "table" and operation.page_paths or {}) do
         if directChildOf(path, transportDirectory)
             and ownedPageName(path:sub(#transportDirectory + 2))
-            and noctalia.fileExists(path)
         then
-            noctalia.removeFile(path)
+            table.insert(pendingCleanupPaths, path)
         end
     end
     operation.page_paths = {}
@@ -1145,6 +1169,11 @@ local function stepValidation()
         end
         context.current_page = page.items
         context.current_item = 1
+        -- Decoding a page is the single most expensive thing this callback
+        -- does, so it gets a tick to itself. Normalizing entries in the same
+        -- tick pushed 'update' past its CPU budget on a page-heavy scan, and
+        -- Noctalia disables a plugin that overruns repeatedly.
+        return true
     end
 
     local budget = VALIDATION_BATCH
@@ -1165,6 +1194,36 @@ local function stepValidation()
         context.current_item = 1
         context.page_index += 1
     end
+    return true
+end
+
+-- Second half of processCompletedTransport, deliberately on its own tick.
+-- Reading and decoding a response envelope and then validating every page
+-- descriptor it names is two expensive passes, and running both in one
+-- callback overran Noctalia's per-callback CPU budget on a real library scan.
+local function processDecodedTransport()
+    local decoded = decodedTransport
+    decodedTransport = nil
+    if type(decoded) ~= "table" then
+        return false
+    end
+    local operation = decoded.operation
+    if type(operation) ~= "table" or operation.cancelled == true or operation.generation ~= operationGeneration then
+        cleanupOperationFiles(operation, false)
+        if activeOperation == operation then
+            activeOperation = nil
+        end
+        publishStatus()
+        pump()
+        return true
+    end
+    local started, validationKind, validationMessage = beginValidation(operation, decoded.payload)
+    if not started then
+        failNonce(operation.nonce, operation.action, validationKind, validationMessage)
+        finishOperation(operation)
+        return true
+    end
+    publishStatus()
     return true
 end
 
@@ -1191,13 +1250,7 @@ local function processCompletedTransport()
         finishOperation(operation)
         return true
     end
-    local started, validationKind, validationMessage = beginValidation(operation, payload)
-    if not started then
-        failNonce(operation.nonce, operation.action, validationKind, validationMessage)
-        finishOperation(operation)
-        return true
-    end
-    publishStatus()
+    decodedTransport = { operation = operation, payload = payload }
     return true
 end
 
@@ -1331,7 +1384,9 @@ end
 
 local function cancelCurrent(message)
     operationGeneration += 1
-    local processAlreadyReturned = validation ~= nil or completedTransport ~= nil
+    local processAlreadyReturned = validation ~= nil
+        or completedTransport ~= nil
+        or decodedTransport ~= nil
     if type(activeOperation) == "table" then
         activeOperation.cancelled = true
         failNonce(activeOperation.nonce, activeOperation.action, "cancelled", message)
@@ -1352,6 +1407,7 @@ local function cancelCurrent(message)
     pendingOperation = nil
     pendingPaletteOperation = nil
     completedTransport = nil
+    decodedTransport = nil
     validation = nil
 end
 
@@ -1436,8 +1492,21 @@ local function handlePaletteCommand(command)
 end
 
 function update()
-    noctalia.setUpdateInterval(if completedTransport ~= nil or validation ~= nil then 100 else 1000)
+    noctalia.setUpdateInterval(
+        if completedTransport ~= nil
+                or decodedTransport ~= nil
+                or validation ~= nil
+                or #pendingCleanupPaths > 0
+            then 100
+            else 1000
+    )
+    if drainPageCleanup(CLEANUP_BATCH) then
+        return
+    end
     if processCompletedTransport() then
+        return
+    end
+    if processDecodedTransport() then
         return
     end
     stepValidation()
@@ -1478,8 +1547,12 @@ function onExit(_signal, _reason)
     probeBusy = false
     cancelCurrent("Wall-in-One backend service stopped")
     cleanupOperationFiles(activeOperation, false)
+    -- Nothing runs after onExit, so the queue is flushed here rather than left
+    -- for an update tick that will never come. onExit's budget is 25ms.
+    drainPageCleanup(#pendingCleanupPaths)
     activeOperation = nil
     completedTransport = nil
+    decodedTransport = nil
     status.ready = false
     status.available = false
     status.busy = false
