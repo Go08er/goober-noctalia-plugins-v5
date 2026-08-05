@@ -13,9 +13,12 @@ local COMMAND_KEY = "wall_in_one_motionbgs_command_v1"
 local COMMAND_ACK_KEY = "wall_in_one_motionbgs_command_ack_v1"
 local STATUS_KEY = "wall_in_one_motionbgs_status_v1"
 local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"
+local BACKEND_STATUS_KEY = "wall_in_one_backend_status_v1"
 local BASE_URL = "https://motionbgs.com"
 local INSTALL_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/wall-in-one-backend"
 local BINARY_NAME = "wall-in-one-backend"
+local BACKEND_POINTER_NAME = "backend-path"
+local MAX_BACKEND_POINTER_BYTES = 4097
 local PROBE_PROTOCOL = "WIO-MBGS-PROBE1"
 local RPC_PROTOCOL = "WIO-MBGS-RPC1"
 local MAX_NONCE = 9007199254740991
@@ -56,6 +59,7 @@ local rpcDirectory = ""
 local cacheDirectory = ""
 local launcherPath = ""
 local binaryCommand = ""
+local binaryProtocolMode = "unified"
 
 local status = {
     schema = SCHEMA,
@@ -556,20 +560,65 @@ local function initializeStorage()
     return true
 end
 
+local function validatedExecutable(path, sourceLabel)
+    if not validAbsolutePath(path) then
+        return "", sourceLabel .. " is not a safe absolute path"
+    end
+    local info = noctalia.fileInfo(path)
+    if type(info) ~= "table" or info.isDir == true or (tonumber(info.size) or 0) <= 0 then
+        return "", sourceLabel .. " is not a readable non-empty regular file"
+    end
+    if noctalia.commandExists(path) ~= true then
+        return "", sourceLabel .. " is not executable"
+    end
+    return path, ""
+end
+
+local function pointerBinary()
+    local pluginDataDirectory = noctalia.pluginDataDir()
+    if not validAbsolutePath(pluginDataDirectory) then
+        return "", false, "Backend pointer storage is unavailable"
+    end
+    local pointerPath = pluginDataDirectory:gsub("/+$", "") .. "/" .. BACKEND_POINTER_NAME
+    if not noctalia.fileExists(pointerPath) then
+        return "", false, ""
+    end
+    local raw = readBoundedRegularFile(pointerPath, MAX_BACKEND_POINTER_BYTES)
+    if type(raw) ~= "string" then
+        return "", true, "Backend pointer is not a bounded non-empty regular file"
+    end
+    if raw:sub(-1) == "\n" then
+        raw = raw:sub(1, -2)
+    end
+    if raw == "" or raw:find("[\r\n]") ~= nil then
+        return "", true, "Backend pointer must contain exactly one path line"
+    end
+    local selected, reason = validatedExecutable(raw, "Backend pointer target")
+    return selected, true, reason
+end
+
 local function configuredBinary()
     local configured = settingString("backend_binary_path", "")
     if configured ~= "" then
-        local expanded = noctalia.expandPath(configured)
-        local info = validAbsolutePath(expanded) and noctalia.fileInfo(expanded) or nil
-        if type(info) == "table" and info.isDir ~= true and (tonumber(info.size) or 0) > 0 then
-            return expanded, "configured", ""
-        end
-        return "", "configured", "Configured MotionBGS helper path is not a readable regular file"
+        local selected, reason = validatedExecutable(noctalia.expandPath(configured), "Configured Wall-in-One backend path")
+        return selected, "configured", reason
+    end
+    local pointed, pointerPresent, pointerError = pointerBinary()
+    if pointerPresent then
+        return pointed, "pointer", pointerError
+    end
+    -- Compatibility-only fallback for users who selected the retired
+    -- MotionBGS-only helper before 0.8.  It never becomes the generic backend
+    -- for library, palette, preview, or Wallhaven work.
+    local legacy = settingString("motionbgs_binary_path", "")
+    if legacy ~= "" then
+        local selected, reason = validatedExecutable(noctalia.expandPath(legacy), "Legacy MotionBGS helper path")
+        return selected, "legacy-configured", reason
     end
     if noctalia.commandExists(BINARY_NAME) then
         return BINARY_NAME, "path", ""
     end
-    return "", "path", "Install wall-in-one-backend or select its absolute path"
+    return "", "path", "Install wall-in-one-backend with the in-app setup commands"
 end
 
 local function cleanupOperationFiles(operation)
@@ -685,6 +734,7 @@ local function startProbe(_force, commandNonce)
     status.binary_protocol = 0
     status.binary_path = ""
     status.binary_source = ""
+    binaryProtocolMode = "unified"
     if not settingBool("use_motionbgs", true) then
         publishProbeFailure(requestedNonce, "disabled", "MotionBGS integration is disabled")
         return
@@ -704,6 +754,7 @@ local function startProbe(_force, commandNonce)
         return
     end
     binaryCommand = selected
+    binaryProtocolMode = if source == "legacy-configured" then "legacy" else "unified"
     status.binary_available = true
     status.binary_path = selected
     status.probe_state = "probing"
@@ -713,6 +764,8 @@ local function startProbe(_force, commandNonce)
     local command = "exec bash "
         .. shellQuote(launcherPath)
         .. " probe "
+        .. shellQuote(binaryProtocolMode)
+        .. " "
         .. shellQuote(binaryCommand)
     local started = noctalia.runAsync(command, function(result)
         if generation ~= probeGeneration then
@@ -1271,6 +1324,8 @@ local function launchOperation(operation)
     local command = "exec bash "
         .. shellQuote(launcherPath)
         .. " rpc "
+        .. shellQuote(binaryProtocolMode)
+        .. " "
         .. shellQuote(binaryCommand)
         .. " "
         .. shellQuote(operation.request_path)
@@ -1484,5 +1539,17 @@ initializeStorage()
 resetResults(0)
 publishStatus()
 noctalia.state.watch(COMMAND_KEY, handleCommand)
+noctalia.state.watch(BACKEND_STATUS_KEY, function(backendState)
+    if type(backendState) == "table"
+        and backendState.available == true
+        and (status.binary_compatible ~= true or status.binary_source == "legacy-configured")
+        and not probeBusy
+    then
+        -- The generic backend service retries pointer discovery while it is
+        -- missing.  Its ready transition wakes this isolated runtime so the
+        -- setup card can disappear without closing and reopening the panel.
+        startProbe(true)
+    end
+end)
 handleCommand(noctalia.state.get(COMMAND_KEY))
 startProbe(false)

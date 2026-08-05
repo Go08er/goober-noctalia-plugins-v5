@@ -68,14 +68,22 @@ All notable staging changes will be recorded here.
   same backend. Keep private bounded caches at their stable plugin-data paths.
 - Replace the visible MotionBGS-only program setting with one advanced
   **Wall-in-One backend program** path and fixed `wall-in-one-backend` PATH
-  fallback. Retain `motionbgs_binary_path` only as an invisible migration key;
-  runtime code does not read the retired key.
-- Document a checksum-verified release download plus explicit `chmod`/install
-  flow with HTTPS-only bounded redirects. Wall-in-One never downloads, updates,
-  or executes newly downloaded code automatically. A missing backend degrades
-  library/external-palette refresh, provider previews, and integrated provider
-  shops without disabling host-coupled renderer, wallpaper/palette application,
-  adaptive previews, configured playlists, or direct-site controls.
+  fallback. Retain `motionbgs_binary_path` as an invisible, MotionBGS-only
+  compatibility fallback for the pre-0.8 standalone helper; it cannot select
+  the generic backend used by library, palette, preview, or Wallhaven work.
+- Add a five-command Home setup card and matching documentation for the external
+  backend: download raw content pinned to the full repository commit, verify the
+  tracked SHA-256 digest before `chmod`, atomically write the regular-file
+  `pluginDataDir()/backend-path` pointer, and finish with the backend self-test.
+  Resolve an explicit advanced path first, the automatic pointer second, and
+  the fixed PATH name last; automatically discover a pointer installed while
+  the backend is missing and move an active legacy MotionBGS bridge onto that
+  shared backend. Wall-in-One only copies the commands and never downloads,
+  updates, or executes them.
+  A missing backend still degrades library/external-palette refresh, provider
+  previews, and integrated shops without disabling host-coupled renderer,
+  wallpaper/palette application, adaptive previews, configured playlists, or
+  direct-site controls.
 - Record the process boundary explicitly: Noctalia host APIs, IPC dispatch,
   adaptive `noctalia theme` preview/source hashing, exact-PID renderer
   ownership, and UI stay in Luau. Schedule resolution remains a small

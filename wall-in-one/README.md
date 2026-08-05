@@ -191,48 +191,43 @@ The graphical entry editor's state callback performs only a fixed scalar
 projection; full normalization and persistence are serialized on later service
 updates through a bounded queue.
 
-Install the one-shot Python 3.11+ executable from this repository's top-level
-[`wall-in-one-backend/`](../wall-in-one-backend/) directory as
-`wall-in-one-backend` on `PATH`, or select its absolute path with the advanced
-**Wall-in-One backend program** setting. Wall-in-One never downloads, updates,
-or executes newly downloaded code automatically.
+Install the one-shot Python 3.11+ executable in any user-owned directory, then
+let Wall-in-One discover it. Resolution has three explicit tiers: the advanced
+**Wall-in-One backend program** setting wins, followed by the regular-file
+pointer at `pluginDataDir()/backend-path`, followed by the fixed
+`wall-in-one-backend` name on Noctalia's `PATH`. The pointer contains one
+absolute executable path; the documented installer creates it as a regular
+file rather than a symlink. Wall-in-One never downloads, updates, or grants
+execute permission to code automatically.
 
-For a checkout you already trust, verify the tracked digest before installing:
-
-```bash
-cd /path/to/goober-noctalia-plugins-v5
-(cd wall-in-one-backend && sha256sum -c wall-in-one-backend.sha256)
-install -Dm755 wall-in-one-backend/wall-in-one-backend \
-  "$HOME/.local/bin/wall-in-one-backend"
-wall-in-one-backend self-test
-wall-in-one-backend probe --protocol 1
-```
-
-Once a 0.8 release publishes the executable and sibling checksum assets,
-download them as data, verify them, and only then grant execute permission.
-These commands are not a claim that those release assets already exist:
+The setup card in **Home** copies the same five commands with its exact
+`pluginDataDir()` path. In a terminal, first enter the directory where the
+backend should remain, then run the commands. The example below uses
+Noctalia's default XDG state location; when Noctalia runs under a custom state
+root, use the pointer destination shown by the setup card. Every expansion that
+may contain spaces is quoted.
 
 ```bash
-version='0.8.0'
-base="https://github.com/Go08er/goober-noctalia-plugins-v5/releases/download/wall-in-one-v${version}"
-tmp="$(mktemp -d)" || exit 1
-curl --fail --location --max-redirs 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  --output "$tmp/wall-in-one-backend" "$base/wall-in-one-backend"
-curl --fail --location --max-redirs 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  --output "$tmp/wall-in-one-backend.sha256" "$base/wall-in-one-backend.sha256"
-(cd "$tmp" && sha256sum -c wall-in-one-backend.sha256) || exit 1
-chmod 0755 "$tmp/wall-in-one-backend"
-install -Dm0755 "$tmp/wall-in-one-backend" \
-  "$HOME/.local/bin/wall-in-one-backend"
-rm -rf -- "$tmp"
-wall-in-one-backend self-test
+installed=0; install_dir="$(pwd -P)" || install_dir=; backend="$install_dir/wall-in-one-backend"; pointer_dir="${XDG_STATE_HOME:-$HOME/.local/state}/noctalia/plugins/data/goober/wall-in-one"; expected='49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a'; base='https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391/wall-in-one-backend'; stage=; test -n "$install_dir" && stage="$(mktemp -d --tmpdir="$install_dir" .wall-in-one-backend.XXXXXX)"
+test -n "$stage" && curl --disable --fail --silent --show-error --location --max-redirs 0 --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 1048576 --output "$stage/wall-in-one-backend" "$base/wall-in-one-backend" && curl --disable --fail --silent --show-error --location --max-redirs 0 --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 4096 --output "$stage/wall-in-one-backend.sha256" "$base/wall-in-one-backend.sha256"
+test -n "$stage" && { checksum_line="$(<"$stage/wall-in-one-backend.sha256")"; test "$checksum_line" = "$expected  wall-in-one-backend" && test "$(wc -l < "$stage/wall-in-one-backend.sha256")" = 1 && (cd "$stage" && sha256sum -c -- wall-in-one-backend.sha256 && : > .verified); }
+test -n "$stage" && test -f "$stage/.verified" && chmod 0755 -- "$stage/wall-in-one-backend" && mv -fT -- "$stage/wall-in-one-backend" "$backend" && rm -f -- "$stage/wall-in-one-backend.sha256" "$stage/.verified" && rmdir -- "$stage" && mkdir -p -- "$pointer_dir" && pointer_tmp="$(mktemp --tmpdir="$pointer_dir" .backend-path.XXXXXX)" && printf '%s\n' "$backend" > "$pointer_tmp" && chmod 0600 -- "$pointer_tmp" && mv -fT -- "$pointer_tmp" "$pointer_dir/backend-path" && installed=1
+test "$installed" = 1 && ./wall-in-one-backend self-test
 ```
 
-The checksum detects corruption or replacement relative to the downloaded
-checksum. Because both files come from the same release host, verify the release
-tag/account through a separately trusted GitHub view when provenance matters.
-Ensure `$HOME/.local/bin` is in the environment inherited by Noctalia, or use
-the advanced absolute-path setting.
+The second command downloads both files as non-executable data. The third must
+report `OK` and creates its private `.verified` marker only after both the
+tracked digest line and payload pass; the fourth refuses to `chmod` without
+that marker even when the whole block was pasted at once. Both the pinned
+program and this documented digest are served from the
+same GitHub account, so the checksum detects corruption or unexpected content
+but is not an independent proof of provenance. Verify the account and full
+commit through a separately trusted GitHub view when that distinction matters.
+The same-directory renames atomically replace both the executable and pointer.
+While the backend is unresolved, the bridges automatically discover a newly
+valid pointer without a Noctalia restart; a ready backend is not process-probed
+forever for optional manual pointer changes. An explicit configured path
+remains the intentional override; PATH is the final fallback.
 
 The schema-1 executable advertises `library.scan`, `palettes.inventory`,
 `preview.sync`, and all four `wallhaven.*` actions; each thin bridge checks the
@@ -360,12 +355,16 @@ derived/private locations, and defaults. Engine playback settings live on the
 combined page for each display nested beneath **Home**, not on one global
 settings wall.
 
-Leave **Wall-in-One backend program** empty to detect the fixed
-`wall-in-one-backend` name on `PATH`, or select an absolute executable path.
-Wall-in-One does not accept an arbitrary shell command in this setting. The
-retired `motionbgs_binary_path` key remains invisible so old Noctalia
-configuration does not produce an unknown-setting warning. Runtime code never
-reads it; `backend_binary_path` and the fixed PATH command are authoritative.
+Set **Wall-in-One backend program** to an absolute executable path to override
+automatic discovery. When it is empty, Wall-in-One checks the regular-file
+`pluginDataDir()/backend-path` pointer and then the fixed `wall-in-one-backend`
+name on `PATH`. Wall-in-One does not accept an arbitrary shell command in this
+setting. The retired `motionbgs_binary_path` key remains invisible so old
+Noctalia configuration does not produce an unknown-setting warning. It is a
+MotionBGS-only compatibility fallback after the explicit setting and automatic
+pointer but before `PATH`, allowing the pre-0.8 standalone helper to keep
+working; it never selects the generic backend used by library, palette,
+preview, or Wallhaven operations.
 
 MotionBGS defaults are HD, 48 results, 30-minute metadata TTL, and 256 MiB
 maximum download; bounds are 1–48 results, 5–1,440 minutes, and 16–512 MiB.

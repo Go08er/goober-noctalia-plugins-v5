@@ -13,6 +13,7 @@ local RPC_SCHEMA = 1
 local COMMAND_KEY = "wall_in_one_wallhaven_command_v1"
 local STATUS_KEY = "wall_in_one_wallhaven_status_v1"
 local RESULTS_KEY = "wall_in_one_wallhaven_results_v1"
+local BACKEND_STATUS_KEY = "wall_in_one_backend_status_v1"
 local API_ORIGIN = "https://wallhaven.cc"
 local SITE_ORIGIN = "https://wallhaven.cc"
 local SHORT_ORIGIN = "https://whvn.cc"
@@ -20,6 +21,8 @@ local CDN_ORIGIN = "https://w.wallhaven.cc"
 local THUMB_ORIGIN = "https://th.wallhaven.cc"
 local INSTALL_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/wall-in-one-backend"
 local BINARY_NAME = "wall-in-one-backend"
+local BACKEND_POINTER_NAME = "backend-path"
+local MAX_BACKEND_POINTER_BYTES = 4097
 local PROBE_PROTOCOL = "WIO-BACKEND-PROBE1"
 local RPC_PROTOCOL = "WIO-BACKEND-RPC1"
 local GUARD_CONTENT = "WIO-BACKEND-GUARD1\n"
@@ -258,20 +261,57 @@ local function managedDirectory()
     return if validAbsolutePath(directory) then directory else ""
 end
 
+local function validatedExecutable(path, sourceLabel)
+    if not validAbsolutePath(path) then
+        return "", sourceLabel .. " is not a safe absolute path"
+    end
+    local info = noctalia.fileInfo(path)
+    if type(info) ~= "table" or info.isDir == true or (tonumber(info.size) or 0) <= 0 then
+        return "", sourceLabel .. " is not a readable non-empty regular file"
+    end
+    if noctalia.commandExists(path) ~= true then
+        return "", sourceLabel .. " is not executable"
+    end
+    return path, ""
+end
+
+local function pointerBinary()
+    local pluginDataDirectory = noctalia.pluginDataDir()
+    if not validAbsolutePath(pluginDataDirectory) then
+        return "", false, "Backend pointer storage is unavailable"
+    end
+    local pointerPath = pluginDataDirectory:gsub("/+$", "") .. "/" .. BACKEND_POINTER_NAME
+    if not noctalia.fileExists(pointerPath) then
+        return "", false, ""
+    end
+    local raw = readBoundedRegularFile(pointerPath, MAX_BACKEND_POINTER_BYTES)
+    if type(raw) ~= "string" then
+        return "", true, "Backend pointer is not a bounded non-empty regular file"
+    end
+    if raw:sub(-1) == "\n" then
+        raw = raw:sub(1, -2)
+    end
+    if raw == "" or raw:find("[\r\n]") ~= nil then
+        return "", true, "Backend pointer must contain exactly one path line"
+    end
+    local selected, reason = validatedExecutable(raw, "Backend pointer target")
+    return selected, true, reason
+end
+
 local function configuredBinary()
     local configured = settingString("backend_binary_path", "")
     if configured ~= "" then
-        local expanded = noctalia.expandPath(configured)
-        local info = validAbsolutePath(expanded) and noctalia.fileInfo(expanded) or nil
-        if type(info) == "table" and info.isDir ~= true and (tonumber(info.size) or 0) > 0 then
-            return expanded, "configured", ""
-        end
-        return "", "configured", "Configured Wall-in-One backend path is not a readable regular file"
+        local selected, reason = validatedExecutable(noctalia.expandPath(configured), "Configured Wall-in-One backend path")
+        return selected, "configured", reason
+    end
+    local pointed, pointerPresent, pointerError = pointerBinary()
+    if pointerPresent then
+        return pointed, "pointer", pointerError
     end
     if noctalia.commandExists(BINARY_NAME) then
         return BINARY_NAME, "path", ""
     end
-    return "", "path", "Install wall-in-one-backend or select its absolute path"
+    return "", "path", "Install wall-in-one-backend with the in-app setup commands"
 end
 
 local function refreshAvailability()
@@ -1230,5 +1270,14 @@ initializeStorage()
 resetResults(0)
 publishStatus()
 noctalia.state.watch(COMMAND_KEY, handleCommand)
+noctalia.state.watch(BACKEND_STATUS_KEY, function(backendState)
+    if type(backendState) == "table"
+        and backendState.available == true
+        and status.binary_compatible ~= true
+        and not probeBusy
+    then
+        startProbe()
+    end
+end)
 handleCommand(noctalia.state.get(COMMAND_KEY))
 startProbe()

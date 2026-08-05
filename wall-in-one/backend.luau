@@ -15,6 +15,9 @@ local RESULTS_KEY = "wall_in_one_backend_results_v1"
 local PALETTE_COMMAND_KEY = "wall_in_one_backend_palette_command_v1"
 local PALETTE_RESULTS_KEY = "wall_in_one_backend_palette_results_v1"
 local BINARY_NAME = "wall-in-one-backend"
+local BACKEND_POINTER_NAME = "backend-path"
+local MAX_BACKEND_POINTER_BYTES = 4097
+local DISCOVERY_RETRY_MS = 3000
 local PROBE_PROTOCOL = "WIO-BACKEND-PROBE1"
 local RPC_PROTOCOL = "WIO-BACKEND-RPC1"
 local GUARD_CONTENT = "WIO-BACKEND-GUARD1\n"
@@ -65,6 +68,7 @@ local pendingPaletteOperation = nil
 local lastDispatchedAction = ""
 local completedTransport = nil
 local validation = nil
+local nextDiscoveryAtMs = 0
 
 local status = {
     schema = SCHEMA,
@@ -312,22 +316,60 @@ local function cleanupOperationFiles(operation, keepResponse)
     operation.page_paths = {}
 end
 
+local function validatedExecutable(path, sourceLabel)
+    if not validAbsolutePath(path) then
+        return "", sourceLabel .. " is not a safe absolute path"
+    end
+    local info = noctalia.fileInfo(path)
+    if type(info) ~= "table" or info.isDir == true or (tonumber(info.size) or 0) <= 0 then
+        return "", sourceLabel .. " is not a readable non-empty regular file"
+    end
+    -- Noctalia's commandExists accepts absolute paths and checks X_OK plus
+    -- regular-file status.  This catches a downloaded-but-not-chmodded helper
+    -- before the launcher spends a process slot probing it.
+    if noctalia.commandExists(path) ~= true then
+        return "", sourceLabel .. " is not executable"
+    end
+    return path, ""
+end
+
+local function pointerBinary()
+    local pluginDataDirectory = noctalia.pluginDataDir()
+    if not validAbsolutePath(pluginDataDirectory) then
+        return "", false, "Backend pointer storage is unavailable"
+    end
+    local pointerPath = pluginDataDirectory:gsub("/+$", "") .. "/" .. BACKEND_POINTER_NAME
+    if not noctalia.fileExists(pointerPath) then
+        return "", false, ""
+    end
+    local raw = readBoundedRegularFile(pointerPath, MAX_BACKEND_POINTER_BYTES)
+    if type(raw) ~= "string" then
+        return "", true, "Backend pointer is not a bounded non-empty regular file"
+    end
+    if raw:sub(-1) == "\n" then
+        raw = raw:sub(1, -2)
+    end
+    if raw == "" or raw:find("[\r\n]") ~= nil then
+        return "", true, "Backend pointer must contain exactly one path line"
+    end
+    local selected, reason = validatedExecutable(raw, "Backend pointer target")
+    return selected, true, reason
+end
+
 local function configuredBinary()
     local configured = settingString("backend_binary_path", "")
-    local source = "configured"
     if configured ~= "" then
-        local expanded = noctalia.expandPath(configured)
-        local info = validAbsolutePath(expanded) and noctalia.fileInfo(expanded) or nil
-        if type(info) == "table" and info.isDir ~= true and (tonumber(info.size) or 0) > 0 then
-            return expanded, source, ""
-        end
-        return "", source, "Configured Wall-in-One backend path is not a readable regular file"
+        local selected, reason = validatedExecutable(noctalia.expandPath(configured), "Configured Wall-in-One backend path")
+        return selected, "configured", reason
     end
-    source = "path"
+    local pointed, pointerPresent, pointerError = pointerBinary()
+    if pointerPresent then
+        return pointed, "pointer", pointerError
+    end
     if noctalia.commandExists(BINARY_NAME) then
         return BINARY_NAME, "path", ""
     end
-    return "", "path", "Install wall-in-one-backend or select its absolute path"
+    return "", "path", "Install wall-in-one-backend with the in-app setup commands"
 end
 
 local function initializeStorage()
@@ -423,6 +465,7 @@ local pump
 local function startProbe()
     probeGeneration += 1
     local generation = probeGeneration
+    nextDiscoveryAtMs = math.floor(tonumber(noctalia.nowMs()) or 0) + DISCOVERY_RETRY_MS
     probeBusy = false
     binaryCommand = ""
     status.binary_available = false
@@ -480,6 +523,7 @@ local function startProbe()
         status.binary_version = probe.version
         status.binary_protocol = probe.protocol
         status.capabilities = probe.capabilities
+        nextDiscoveryAtMs = 0
         status.probe_state = "ready"
         status.availability_reason = "ready"
         status.last_error_kind = ""
@@ -1397,6 +1441,30 @@ function update()
         return
     end
     stepValidation()
+    local now = math.floor(tonumber(noctalia.nowMs()) or 0)
+    if not probeBusy
+        and status.available ~= true
+        and status.launcher_available == true
+        and dataDirectory ~= ""
+        and transportDirectory ~= ""
+        and now >= nextDiscoveryAtMs
+    then
+        -- Discovery polling is metadata-only.  Do not keep executing the same
+        -- incompatible or failed backend; probe only when a missing candidate
+        -- appears or a higher-precedence source (notably backend-path) wins.
+        local selected, source = configuredBinary()
+        local changed = selected ~= ""
+            and (
+                status.probe_state == "binary-missing"
+                or selected ~= status.binary_path
+                or source ~= status.binary_source
+            )
+        if changed then
+            startProbe()
+        else
+            nextDiscoveryAtMs = now + DISCOVERY_RETRY_MS
+        end
+    end
 end
 
 function onConfigChanged()

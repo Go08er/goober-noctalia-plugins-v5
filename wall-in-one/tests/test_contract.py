@@ -48,6 +48,59 @@ def require_all(source: str, needles: Iterable[str], label: str) -> None:
         assert needle in source, f"{label} is missing {needle!r}"
 
 
+def luau_function(source: str, name: str) -> str:
+    """Return one top-level Luau function without coupling tests to line numbers."""
+
+    match = re.search(
+        rf"(?ms)^(?:local\s+)?function\s+{re.escape(name)}\([^\n]*\).*?(?=^(?:local\s+)?function\s+|\Z)",
+        source,
+    )
+    assert match is not None, f"missing top-level Luau function {name}"
+    return match.group(0)
+
+
+def luau_braced_list_entry_count(source: str, marker: str) -> int:
+    """Count top-level entries in a simple Luau table while ignoring strings."""
+
+    start = source.find(marker)
+    assert start >= 0, f"missing Luau table marker {marker!r}"
+    cursor = start + len(marker)
+    depth = 1
+    quote = ""
+    escaped = False
+    separators = 0
+    has_value_after_separator = False
+    while cursor < len(source):
+        character = source[cursor]
+        cursor += 1
+        if quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = ""
+            if depth == 1:
+                has_value_after_separator = True
+            continue
+        if character in {'"', "'"}:
+            quote = character
+            if depth == 1:
+                has_value_after_separator = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return separators + (1 if has_value_after_separator else 0)
+        elif depth == 1 and character == ",":
+            separators += 1
+            has_value_after_separator = False
+        elif depth == 1 and not character.isspace():
+            has_value_after_separator = True
+    raise AssertionError(f"unterminated Luau table after {marker!r}")
+
+
 def test_manifest_and_translations() -> None:
     manifest_source = text("plugin.toml")
     manifest = tomllib.loads(manifest_source)
@@ -3242,6 +3295,308 @@ def test_palette_inventory_contract() -> None:
         assert forbidden not in palettes, f"inventory service must not apply themes: {forbidden}"
 
 
+def test_backend_binary_discovery_and_setup_contract() -> None:
+    """Pin safe, consistent backend discovery without duplicating process work."""
+
+    bridges = {
+        "generic backend": text("backend.luau"),
+        "MotionBGS compatibility": text("motionbgs.luau"),
+        "Wallhaven": text("wallhaven.luau"),
+    }
+    for label, bridge in bridges.items():
+        require_all(
+            bridge,
+            (
+                'local BINARY_NAME = "wall-in-one-backend"',
+                'local BACKEND_POINTER_NAME = "backend-path"',
+                "local MAX_BACKEND_POINTER_BYTES = 4097",
+                "local function validatedExecutable(",
+                "local function pointerBinary(",
+                "local function configuredBinary(",
+            ),
+            f"{label} backend discovery",
+        )
+
+        path_validation = luau_function(bridge, "validAbsolutePath")
+        require_all(
+            path_validation,
+            (
+                '#value > 1',
+                'value:sub(1, 1) == "/"',
+                'value:find("[%c\\\\]") == nil',
+                'not value:find("/../", 1, true)',
+            ),
+            f"{label} control-safe absolute path validation",
+        )
+
+        executable_validation = luau_function(bridge, "validatedExecutable")
+        require_all(
+            executable_validation,
+            (
+                "validAbsolutePath(path)",
+                "noctalia.fileInfo(path)",
+                "info.isDir == true",
+                "(tonumber(info.size) or 0) <= 0",
+                "noctalia.commandExists(path) ~= true",
+            ),
+            f"{label} absolute regular non-empty executable validation",
+        )
+
+        pointer = luau_function(bridge, "pointerBinary")
+        require_all(
+            pointer,
+            (
+                "noctalia.pluginDataDir()",
+                'gsub("/+$", "") .. "/" .. BACKEND_POINTER_NAME',
+                "noctalia.fileExists(pointerPath)",
+                "readBoundedRegularFile(pointerPath, MAX_BACKEND_POINTER_BYTES)",
+                'raw:sub(-1) == "\\n"',
+                'raw:find("[\\r\\n]") ~= nil',
+                'validatedExecutable(raw, "Backend pointer target")',
+            ),
+            f"{label} bounded plugin-data backend pointer",
+        )
+
+        resolver = luau_function(bridge, "configuredBinary")
+        require_all(
+            resolver,
+            (
+                'settingString("backend_binary_path", "")',
+                'validatedExecutable(noctalia.expandPath(configured)',
+                'return selected, "configured", reason',
+                "local pointed, pointerPresent, pointerError = pointerBinary()",
+                "if pointerPresent then",
+                'return pointed, "pointer", pointerError',
+                "noctalia.commandExists(BINARY_NAME)",
+                'return BINARY_NAME, "path", ""',
+            ),
+            f"{label} explicit-pointer-PATH resolver",
+        )
+        explicit_at = resolver.index('settingString("backend_binary_path", "")')
+        pointer_at = resolver.index("pointerBinary()")
+        path_at = resolver.index("noctalia.commandExists(BINARY_NAME)")
+        assert explicit_at < pointer_at < path_at, (
+            f"{label} must resolve backend_binary_path before backend-path before PATH"
+        )
+
+    # The retired helper path remains a MotionBGS-only compatibility fallback;
+    # it must never become the generic library/palette/Wallhaven backend.
+    motion_resolver = luau_function(bridges["MotionBGS compatibility"], "configuredBinary")
+    require_all(
+        motion_resolver,
+        (
+            'settingString("motionbgs_binary_path", "")',
+            'validatedExecutable(noctalia.expandPath(legacy)',
+            'return selected, "legacy-configured", reason',
+        ),
+        "legacy MotionBGS helper compatibility",
+    )
+    assert motion_resolver.index("pointerBinary()") < motion_resolver.index(
+        'settingString("motionbgs_binary_path", "")'
+    ) < motion_resolver.index("noctalia.commandExists(BINARY_NAME)"), (
+        "a shared backend pointer must win; legacy MotionBGS is fallback-only before PATH"
+    )
+    for label in ("generic backend", "Wallhaven"):
+        assert "motionbgs_binary_path" not in bridges[label], (
+            f"{label} must not adopt the MotionBGS-only migration path"
+        )
+
+    palettes = text("palettes.luau")
+    palette_client = palettes[
+        palettes.index("local function backendSupportsPalettes()") : palettes.index(
+            "local function clearInventoryState()"
+        )
+    ]
+    require_all(
+        palette_client,
+        (
+            "noctalia.state.get(BACKEND_STATUS_KEY)",
+            "status.available == true",
+            'find("," .. BACKEND_CAPABILITY .. ",", 1, true)',
+            "noctalia.state.set(BACKEND_PALETTE_COMMAND_KEY, {",
+        ),
+        "palette inventory inheritance from the generic backend bridge",
+    )
+    for forbidden in (
+        "configuredBinary",
+        "pointerBinary",
+        "backend_binary_path",
+        "motionbgs_binary_path",
+        "BINARY_NAME",
+        "noctalia.runAsync",
+    ):
+        assert forbidden not in palette_client, (
+            f"palette inventory must not duplicate backend process discovery/launching via {forbidden}"
+        )
+
+    generic_launcher = text("scripts/backend-provider")
+    motion_launcher = text("scripts/motionbgs-provider")
+    require_all(
+        generic_launcher,
+        ("[[ -f $candidate && ! -L $candidate && -x $candidate ]]",),
+        "generic launcher executable boundary",
+    )
+    require_all(
+        motion_launcher,
+        (
+            "[[ -f $candidate && ! -L $candidate && -x $candidate ]]",
+            "binary_subcommand()",
+            "unified:probe)",
+            "unified:rpc)",
+            "legacy:probe)",
+            "legacy:rpc)",
+        ),
+        "MotionBGS unified/legacy executable boundary",
+    )
+
+    backend = bridges["generic backend"]
+    require_all(
+        backend,
+        (
+            "local DISCOVERY_RETRY_MS = 3000",
+            "local nextDiscoveryAtMs = 0",
+            "nextDiscoveryAtMs = math.floor(tonumber(noctalia.nowMs()) or 0) + DISCOVERY_RETRY_MS",
+            "nextDiscoveryAtMs = 0",
+        ),
+        "bounded missing-backend rediscovery clock",
+    )
+    backend_update = luau_function(backend, "update")
+    require_all(
+        backend_update,
+        (
+            "noctalia.setUpdateInterval(",
+            "not probeBusy",
+            "status.available ~= true",
+            "status.launcher_available == true",
+            "noctalia.nowMs()",
+            "nextDiscoveryAtMs",
+            "local selected, source = configuredBinary()",
+            'status.probe_state == "binary-missing"',
+            "selected ~= status.binary_path",
+            "source ~= status.binary_source",
+            "nextDiscoveryAtMs = now + DISCOVERY_RETRY_MS",
+            "startProbe()",
+        ),
+        "automatic missing-backend rediscovery",
+    )
+    # Rediscovery is a cheap unresolved-state metadata timer. A compatible
+    # backend must not be process-probed forever merely to detect optional
+    # pointer replacement, and an unchanged failed candidate is not relaunched.
+    assert backend_update.index("status.available ~= true") < backend_update.index("startProbe()")
+
+    for label in ("MotionBGS compatibility", "Wallhaven"):
+        bridge = bridges[label]
+        require_all(
+            bridge,
+            (
+                'local BACKEND_STATUS_KEY = "wall_in_one_backend_status_v1"',
+                "noctalia.state.watch(BACKEND_STATUS_KEY, function(backendState)",
+                "backendState.available == true",
+                "startProbe(",
+            ),
+            f"{label} automatic adoption of the rediscovered shared backend",
+        )
+
+    panel = text("panel.luau")
+    require_all(
+        panel,
+        (
+            "local backendSetupCache =",
+            "function panelUi.backendSetupPointerPath()",
+            "function panelUi.backendSetupCommands()",
+            "function panelUi.backendSetupCard()",
+            "4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391",
+            "https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/",
+            "wall-in-one-backend.sha256",
+        ),
+        "cached pinned backend setup surface",
+    )
+    assert panel.count("local backendSetupCache =") == 1, (
+        "the setup command block must have one cached construction slot"
+    )
+
+    pointer_path = luau_function(panel, "panelUi.backendSetupPointerPath")
+    require_all(
+        pointer_path,
+        ("backendSetupDetails().pointer_path",),
+        "exact setup-card backend pointer destination",
+    )
+
+    setup_wrapper = luau_function(panel, "panelUi.backendSetupCommands")
+    require_all(setup_wrapper, ("backendSetupDetails().commands",), "cached setup-command accessor")
+    setup_commands = luau_function(panel, "backendSetupDetails")
+    require_all(
+        setup_commands,
+        (
+            "noctalia.pluginDataDir()",
+            'gsub("/+$", "")',
+            'pluginDataDirectory .. "/backend-path"',
+            "backendSetupCache",
+            "curl --disable --fail --silent --show-error",
+            "--max-redirs 0",
+            "--proto '=https'",
+            "wall-in-one-backend.sha256",
+            "sha256sum -c",
+            "chmod 0755",
+            "mv -fT --",
+            "backend-path",
+            "self-test",
+            '}, "\\n")',
+        ),
+        "five-command checksum-first backend setup",
+    )
+    assert setup_commands.count("--output") == 2, (
+        "setup must fetch the pinned payload and sibling checksum as separate data files"
+    )
+    assert setup_commands.count("mv -fT --") >= 2, (
+        "setup must atomically publish both the backend executable and pointer"
+    )
+    checksum_at = setup_commands.index("sha256sum -c")
+    chmod_at = setup_commands.index("chmod 0755")
+    pointer_at = setup_commands.rindex("backend-path")
+    self_test_at = setup_commands.rindex("self-test")
+    assert checksum_at < chmod_at < pointer_at < self_test_at, (
+        "setup must verify before chmod, publish the pointer atomically, then self-test"
+    )
+    command_entries = luau_braced_list_entry_count(setup_commands, "local commands = table.concat({")
+    assert command_entries == 5, (
+        f"backend setup must expose exactly five nonblank commands, found {command_entries}"
+    )
+
+    setup_card = luau_function(panel, "panelUi.backendSetupCard")
+    require_all(
+        setup_card,
+        (
+            "panelUi.backendSetupPointerPath()",
+            "panelUi.backendSetupCommands()",
+            'noctalia.tr("panel.backend_setup.title")',
+            'noctalia.tr("panel.backend_setup.pointer_label")',
+            'noctalia.tr("panel.backend_setup.command_label")',
+            'noctalia.tr("panel.backend_setup.copy")',
+            'noctalia.copyToClipboard(commands, "text/plain;charset=utf-8")',
+        ),
+        "unresolved-backend Home setup card and native copy API",
+    )
+    assert "noctalia.runAsync" not in setup_card, (
+        "the setup card may copy commands but must never execute installer steps"
+    )
+    home = luau_function(panel, "panelPages.homeSection")
+    require_all(
+        home,
+        (
+            "if preview.backendAvailable() then nil else panelUi.backendSetupCard()",
+            "{ backendSetupCard, locationCard }",
+            "{ backendSetupCard, homeCard }",
+        ),
+        "unresolved-only setup card in both Home layouts",
+    )
+    setup_at = home.index("panelUi.backendSetupCard()")
+    directory_gate_at = home.index("if not imageReady or not videoReady then")
+    assert setup_at < directory_gate_at, (
+        "Home must compute/show unresolved backend setup even before media directories are configured"
+    )
+
+
 def test_wallhaven_contract() -> None:
     wallhaven = text("wallhaven.luau")
     require_all(
@@ -5372,18 +5727,21 @@ def test_motionbgs_contract() -> None:
             "owned_writable_directory()",
             "guard_ready()",
             "resolve_binary()",
-            "[[ -f $candidate && -x $candidate ]]",
+            "[[ -f $candidate && ! -L $candidate && -x $candidate ]]",
+            "binary_subcommand()",
+            "subcommand=$(binary_subcommand \"$mode\" probe)",
+            "subcommand=$(binary_subcommand \"$mode\" rpc)",
             "[[ -f $path && ! -L $path ]]",
             '[[ $owner == "$(id -u)"',
             "ulimit -f",
             "PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1",
-            'run_bounded 8 "$binary" motionbgs-probe --protocol 1',
-            '"$binary" motionbgs-rpc --protocol 1 --request "$request" --response "$response" --guard "$guard"',
+            'run_bounded 8 "$binary" "$subcommand" --protocol 1',
+            '"$binary" "$subcommand" --protocol 1 --request "$request" --response "$response" --guard "$guard"',
             "RPC cancellation guard was removed before completion",
             '[[ -e $response || -L $response ]]',
             'owned_regular_file "$response" 2 "$max_response_bytes"',
             '[[ $actual_bytes != "$reported_bytes" ]]',
-            "expected probe BINARY, rpc BINARY REQUEST RESPONSE GUARD, or self-test",
+            "MODE is unified or legacy",
         ),
         "bounded MotionBGS launcher",
     )
@@ -6452,6 +6810,7 @@ def main() -> None:
     test_capture_scene_freshness_contract()
     test_managed_library_ownership_contract()
     test_palette_inventory_contract()
+    test_backend_binary_discovery_and_setup_contract()
     test_wallhaven_contract()
     test_bounded_fetch_contract()
     test_provider_thumbnail_helper_contract()

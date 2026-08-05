@@ -102,7 +102,7 @@
     "apply_callback": "A deferred wallpaper transition callback failed: {detail}",
     "apply_queue_full": "The bounded post-wallpaper transition queue is full; the live renderer was not started.",
     "audio_volume": "Wallpaper volume must be an integer from 0 to 100.",
-    "backend_unavailable": "Install wall-in-one-backend from the Wall-in-One repository or a published release, or select its absolute path with backend_binary_path. Last complete inventories remain visible; library and external palette refresh, provider previews, and integrated Wallhaven/MotionBGS operations degrade.",
+    "backend_unavailable": "Install wall-in-one-backend with the Home setup card, select its absolute path with backend_binary_path, or provide it on PATH. Last complete inventories remain visible; library and external palette refresh, provider previews, and integrated Wallhaven/MotionBGS operations degrade.",
     "backup": "Could not create the last-known-good backup.",
     "backing_query": "Could not read the current Noctalia backing wallpaper: {detail}",
     "backing_query_start": "Could not start the current-backing query.",
@@ -213,6 +213,16 @@
     "paired": "Still exported and paired through Noctalia: {path}"
   },
   "panel": {
+    "backend_setup": {
+      "command_label": "Install commands",
+      "copied": "Install commands copied",
+      "copy": "Copy commands",
+      "copy_failed": "Could not copy the install commands",
+      "description": "Open a terminal in the directory where the backend should remain, then paste these commands.",
+      "pointer_label": "Automatic pointer destination",
+      "title": "Install Wall-in-One backend",
+      "waiting": "Waiting for the backend to appear"
+    },
     "browse": {
       "next": "Next",
       "page": "Page {page} of {pages}",
@@ -404,7 +414,7 @@
       "helper_chip_missing": "Wall-in-One backend needed",
       "helper_chip_ready": "Wall-in-One backend {version} ready",
       "helper_chip_unavailable": "Wall-in-One backend unavailable",
-      "helper_missing": "MotionBGS browsing needs the separately installed wall-in-one-backend program. Set backend_binary_path in plugin settings or install wall-in-one-backend on PATH; host-coupled Wall-in-One features remain available.",
+      "helper_missing": "MotionBGS browsing needs the separately installed wall-in-one-backend program. Use the Home setup card, set backend_binary_path, or provide wall-in-one-backend on PATH; host-coupled Wall-in-One features remain available.",
       "helper_ready": "External backend {version} ready",
       "latest_note": "Pageable newest-wallpapers catalog",
       "mode_4k": "4K catalog",
@@ -822,7 +832,7 @@
       "label": "Glyph"
     },
     "backend_binary_path": {
-      "description": "Optional absolute path to the separately installed wall-in-one-backend program. Leave blank to detect wall-in-one-backend on PATH. Without it, library and external palette refresh, provider previews, and integrated Wallhaven/MotionBGS operations degrade; configured playlists, adaptive palette previews, host wallpaper/palette application, and renderer controls remain available.",
+      "description": "Optional absolute override for the separately installed wall-in-one-backend program. Leave blank to use the Home setup card's automatic pointer, then the fixed wall-in-one-backend PATH fallback. Without it, library and external palette refresh, provider previews, and integrated Wallhaven/MotionBGS operations degrade; configured playlists, adaptive palette previews, host wallpaper/palette application, and renderer controls remain available.",
       "label": "Wall-in-One backend program"
     },
     "label": {

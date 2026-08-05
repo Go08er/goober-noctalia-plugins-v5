@@ -131,12 +131,42 @@ tampered sidecars, and stale IDs fail closed.
 
 ## External backend
 
-Test binary discovery through the exact `wall-in-one-backend` name on PATH and
-through a readable absolute `backend_binary_path`. Reject relative paths,
-directories, symlinks, control characters, arbitrary shell commands, malformed
-probe output, incompatible schemas, and a probe missing any of `library.scan`,
-`palettes.inventory`, `preview.sync`, or the four `wallhaven.*` actions. The
-invisible retired `motionbgs_binary_path` key must not influence discovery.
+Test the three-tier binary resolution order: a readable absolute
+`backend_binary_path` override; the regular-file
+`pluginDataDir()/backend-path` pointer; then the exact `wall-in-one-backend`
+name on PATH. The pointer must contain exactly one bounded absolute path line,
+with an optional terminal LF. The documented installer must publish it as a
+regular non-symlink file beneath the plugin data directory. Its target must be
+a non-empty, regular, non-symlink executable before a launcher accepts it.
+Reject relative paths, directories, symlinks, control characters, extra lines,
+arbitrary shell commands, malformed probe output, incompatible schemas, and a
+probe missing any of `library.scan`, `palettes.inventory`, `preview.sync`, or
+the four `wallhaven.*` actions. A valid explicit setting must override a valid
+pointer, and a valid pointer must override PATH.
+
+Exercise automatic first-install discovery without restarting or reloading
+Noctalia: begin with no backend, atomically rename a valid pointer into place,
+and require the generic service plus isolated provider bridges to become ready
+within the bounded missing-state retry interval. Once a compatible backend is
+ready it must not be process-probed forever merely to detect optional manual
+pointer replacement; replacement/removal is adopted on service/config reload.
+
+The thin MotionBGS bridge must prefer the same explicit setting and automatic
+pointer as the generic bridge. Its compatibility-only third tier is the
+invisible retired `motionbgs_binary_path`, followed by the fixed PATH name. A
+unified target uses `motionbgs-probe` and `motionbgs-rpc`; a legacy standalone
+helper uses `probe` and `rpc`. The retired setting must never select the generic
+backend used by library, palette, preview, or Wallhaven operations. Exercise
+unified and legacy launch/cancellation, plus automatic adoption of a newly
+installed shared pointer while the legacy bridge is active.
+
+Pin the Home setup card to the documented five-command flow: full commit
+`4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391`, SHA-256
+`49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a`,
+quoted current-directory paths, verification before `chmod`, same-directory
+atomic promotion of `pluginDataDir()/backend-path`, and `self-test` as the final
+command. Copying the commands is allowed; the plugin itself must never run the
+download, checksum, permission, pointer-install, or self-test commands.
 
 Pin `WIO-BACKEND-PROBE1` and `WIO-BACKEND-RPC1` interface schema 1. Requests are
 at most 64 KiB and the manifest plus each page are at most 128 KiB. Transport
@@ -254,16 +284,16 @@ show queued/active/on-disk state, reject an exact active or pending duplicate,
 and keep a persistent queue summary visible while work remains. Do not assert a
 byte percentage because the one-shot helper protocol does not stream one.
 
-Test MotionBGS compatibility discovery through the same authoritative forms as
-the generic bridge: exact `wall-in-one-backend` on PATH or a readable absolute
-`backend_binary_path`. Reject relative paths, directories, control characters,
-arbitrary command strings, missing executables, malformed compatibility-probe
-output, incompatible schema, and incomplete capabilities. The retired
-`motionbgs_binary_path` key is inert. Missing or incompatible programs must
-degrade every backend-owned capability: MotionBGS, Wallhaven, provider
-previews, and fresh library/external palette inventory. Configured playlists,
-adaptive palette preview, renderers, and direct-site/**Get backend** actions
-remain available.
+Test MotionBGS discovery through the explicit `backend_binary_path`, automatic
+pointer, compatibility-only `motionbgs_binary_path`, and fixed
+`wall-in-one-backend` PATH tiers in that order. Verify unified and legacy
+command names independently. Reject relative paths, directories, control
+characters, arbitrary command strings, missing executables, malformed
+compatibility-probe output, incompatible schema, and incomplete capabilities.
+A missing or incompatible generic backend must degrade Wallhaven, provider
+previews, and fresh library/external palette inventory; MotionBGS may remain
+available through a valid legacy helper. Configured playlists, adaptive palette
+preview, renderers, and direct-site/**Get backend** actions remain available.
 
 Pin `WIO-MBGS-PROBE1` and `WIO-MBGS-RPC1` interface schema 1. The probe must
 advertise exactly search/details/download/clear. RPC request files are capped at

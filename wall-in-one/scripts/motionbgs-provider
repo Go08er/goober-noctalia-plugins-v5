@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Bounded launcher and protocol gate for the separately installed
-# wall-in-one-backend program's MotionBGS compatibility interface. This script
-# performs no provider network
-# work and parses no provider markup.  Its only jobs are to validate the
-# configured executable and transport paths, apply a file-size backstop, and
+# Bounded launcher and protocol gate for either the separately installed
+# wall-in-one-backend program's MotionBGS compatibility interface or the
+# retired standalone MotionBGS program. This script performs no provider
+# network work and parses no provider markup. Its only jobs are to validate the
+# selected executable mode and transport paths, apply a file-size backstop, and
 # pass through one exact bounded probe or RPC completion record.
 
 readonly probe_wire='WIO-MBGS-PROBE1'
@@ -116,8 +116,30 @@ resolve_binary() {
   else
     return 1
   fi
-  [[ -f $candidate && -x $candidate ]] || return 1
+  [[ -f $candidate && ! -L $candidate && -x $candidate ]] || return 1
   printf '%s' "$candidate"
+}
+
+binary_subcommand() {
+  local mode=$1
+  local operation=$2
+  case "$mode:$operation" in
+    unified:probe)
+      printf '%s' 'motionbgs-probe'
+      ;;
+    unified:rpc)
+      printf '%s' 'motionbgs-rpc'
+      ;;
+    legacy:probe)
+      printf '%s' 'probe'
+      ;;
+    legacy:rpc)
+      printf '%s' 'rpc'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 allocate_transport_files() {
@@ -180,8 +202,13 @@ valid_error_line() {
 }
 
 probe_binary() {
-  local configured=$1
-  local binary
+  local mode=$1
+  local configured=$2
+  local binary subcommand
+  subcommand=$(binary_subcommand "$mode" probe) || {
+    emit_error "$probe_wire" usage 'mode must be unified or legacy'
+    return 64
+  }
   binary=$(resolve_binary "$configured") || {
     emit_error "$probe_wire" missing-binary 'configured MotionBGS program is absent or not executable'
     return 127
@@ -191,7 +218,7 @@ probe_binary() {
     return 73
   }
   local result=0 line=''
-  run_bounded 8 "$binary" motionbgs-probe --protocol 1 || result=$?
+  run_bounded 8 "$binary" "$subcommand" --protocol 1 || result=$?
   line=$(protocol_line 2>/dev/null || true)
   if (( result != 0 )); then
     if valid_error_line "$probe_wire" "$line"; then
@@ -224,11 +251,16 @@ discard_invalid_response() {
 }
 
 rpc_binary() {
-  local configured=$1
-  local request=$2
-  local response=$3
-  local guard=$4
-  local binary response_directory
+  local mode=$1
+  local configured=$2
+  local request=$3
+  local response=$4
+  local guard=$5
+  local binary response_directory subcommand
+  subcommand=$(binary_subcommand "$mode" rpc) || {
+    emit_error "$rpc_wire" usage 'mode must be unified or legacy'
+    return 64
+  }
   binary=$(resolve_binary "$configured") || {
     emit_error "$rpc_wire" missing-binary 'configured MotionBGS program is absent or not executable'
     return 127
@@ -264,7 +296,7 @@ rpc_binary() {
 
   local result=0 line=''
   run_bounded "$max_rpc_file_kib" \
-    "$binary" motionbgs-rpc --protocol 1 --request "$request" --response "$response" --guard "$guard" || result=$?
+    "$binary" "$subcommand" --protocol 1 --request "$request" --response "$response" --guard "$guard" || result=$?
   line=$(protocol_line 2>/dev/null || true)
   if (( result != 0 )); then
     discard_invalid_response "$response"
@@ -312,10 +344,21 @@ rpc_binary() {
 }
 
 self_test() {
+  local command=''
   valid_absolute_path '/tmp/wall-in-one-motionbgs/request-1.json' || return 1
   ! valid_absolute_path '/tmp/wall-in-one-motionbgs/../escape' || return 1
   ! valid_absolute_path $'/tmp/wall-in-one-motionbgs/bad\npath' || return 1
   resolve_binary '/definitely/missing/wall-in-one-backend' >/dev/null 2>&1 && return 1
+  command=$(binary_subcommand unified probe) || return 1
+  [[ $command == motionbgs-probe ]] || return 1
+  command=$(binary_subcommand unified rpc) || return 1
+  [[ $command == motionbgs-rpc ]] || return 1
+  command=$(binary_subcommand legacy probe) || return 1
+  [[ $command == probe ]] || return 1
+  command=$(binary_subcommand legacy rpc) || return 1
+  [[ $command == rpc ]] || return 1
+  binary_subcommand invalid probe >/dev/null 2>&1 && return 1
+  binary_subcommand unified invalid >/dev/null 2>&1 && return 1
   valid_error_line "$rpc_wire" $'WIO-MBGS-RPC1\terror\tfixture\tbounded failure' || return 1
   ! valid_error_line "$rpc_wire" $'WIO-MBGS-PROBE1\terror\tfixture\twrong wire' || return 1
   [[ $(( ${#guard_wire} + 1 )) == 16 ]] || return 1
@@ -324,18 +367,28 @@ self_test() {
 
 case ${1:-} in
   probe)
-    (( $# == 2 )) || {
-      emit_error "$probe_wire" usage 'probe expects BINARY'
+    if (( $# == 2 )); then
+      # Compatibility for callers predating the explicit mode argument. The
+      # implicit form can select only the unified backend, never legacy mode.
+      probe_binary unified "$2"
+    elif (( $# == 3 )); then
+      probe_binary "$2" "$3"
+    else
+      emit_error "$probe_wire" usage 'probe expects [MODE] BINARY; MODE is unified or legacy'
       exit 64
-    }
-    probe_binary "$2"
+    fi
     ;;
   rpc)
-    (( $# == 5 )) || {
-      emit_error "$rpc_wire" usage 'rpc expects BINARY REQUEST RESPONSE GUARD'
+    if (( $# == 5 )); then
+      # As above, the legacy-free historical form remains unified-only.
+      rpc_binary unified "$2" "$3" "$4" "$5"
+    elif (( $# == 6 )); then
+      rpc_binary "$2" "$3" "$4" "$5" "$6"
+    else
+      emit_error "$rpc_wire" usage \
+        'rpc expects [MODE] BINARY REQUEST RESPONSE GUARD; MODE is unified or legacy'
       exit 64
-    }
-    rpc_binary "$2" "$3" "$4" "$5"
+    fi
     ;;
   self-test)
     (( $# == 1 )) || {
@@ -348,7 +401,8 @@ case ${1:-} in
     }
     ;;
   *)
-    emit_error "$rpc_wire" usage 'expected probe BINARY, rpc BINARY REQUEST RESPONSE GUARD, or self-test'
+    emit_error "$rpc_wire" usage \
+      'expected probe [MODE] BINARY, rpc [MODE] BINARY REQUEST RESPONSE GUARD, or self-test; MODE is unified or legacy'
     exit 64
     ;;
 esac

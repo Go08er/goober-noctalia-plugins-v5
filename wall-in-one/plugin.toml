@@ -267,7 +267,9 @@ visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_set
 # Wall-in-One 0.8 replaces the MotionBGS-only program path with one backend
 # program path shared by library indexing and MotionBGS. Keep the old key
 # invisible so an existing host override does not become an unknown setting.
-# Runtime code never reads it; backend_binary_path and PATH are authoritative.
+# The MotionBGS bridge still accepts it as its final compatibility-only
+# configured fallback, after backend_binary_path and the backend pointer but
+# before PATH. Other backend capabilities never execute this legacy helper.
 [[setting]]
 key = "motionbgs_binary_path"
 type = "string"

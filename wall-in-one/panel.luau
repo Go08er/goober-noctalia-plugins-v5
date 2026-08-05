@@ -159,6 +159,53 @@ local closePlaylistEntryEditor
 local refreshPanelState
 local reloadSharedState
 
+-- The backend setup instructions are immutable for this panel runtime. Build
+-- them once: a missing backend must not add string-building work to every
+-- render while Noctalia is already protecting a tight callback budget.
+local BACKEND_INSTALL_REF = "4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391"
+local BACKEND_INSTALL_SHA256 = "49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a"
+local backendSetupCache = nil
+local backendSetupCopyFeedback = ""
+
+local function backendSetupShellQuote(value)
+    return "'" .. tostring(value or ""):gsub("'", "'\"'\"'") .. "'"
+end
+
+local function backendSetupDetails()
+    if type(backendSetupCache) == "table" then
+        return backendSetupCache
+    end
+    local pluginDataDirectory = tostring(noctalia.pluginDataDir() or ""):gsub("/+$", "")
+    local pointerPath = pluginDataDirectory .. "/backend-path"
+    local rawBase = "https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/"
+        .. BACKEND_INSTALL_REF
+        .. "/wall-in-one-backend"
+    local curlProgram = "curl --disable --fail --silent --show-error --location --max-redirs 0"
+        .. " --proto '=https' --proto-redir '=https' --tlsv1.2"
+    local commands = table.concat({
+        "installed=0; install_dir=\"$(pwd -P)\" || install_dir=; backend=\"$install_dir/wall-in-one-backend\"; pointer_dir="
+            .. backendSetupShellQuote(pluginDataDirectory)
+            .. "; expected="
+            .. backendSetupShellQuote(BACKEND_INSTALL_SHA256)
+            .. "; base="
+            .. backendSetupShellQuote(rawBase)
+            .. "; stage=; test -n \"$install_dir\" && stage=\"$(mktemp -d --tmpdir=\"$install_dir\" .wall-in-one-backend.XXXXXX)\"",
+        "test -n \"$stage\" && "
+            .. curlProgram
+            .. " --max-filesize 1048576 --output \"$stage/wall-in-one-backend\" \"$base/wall-in-one-backend\" && "
+            .. curlProgram
+            .. " --max-filesize 4096 --output \"$stage/wall-in-one-backend.sha256\" \"$base/wall-in-one-backend.sha256\"",
+        "test -n \"$stage\" && { checksum_line=\"$(<\"$stage/wall-in-one-backend.sha256\")\"; test \"$checksum_line\" = \"$expected  wall-in-one-backend\" && test \"$(wc -l < \"$stage/wall-in-one-backend.sha256\")\" = 1 && (cd \"$stage\" && sha256sum -c -- wall-in-one-backend.sha256 && : > .verified); }",
+        "test -n \"$stage\" && test -f \"$stage/.verified\" && chmod 0755 -- \"$stage/wall-in-one-backend\" && mv -fT -- \"$stage/wall-in-one-backend\" \"$backend\" && rm -f -- \"$stage/wall-in-one-backend.sha256\" \"$stage/.verified\" && rmdir -- \"$stage\" && mkdir -p -- \"$pointer_dir\" && pointer_tmp=\"$(mktemp --tmpdir=\"$pointer_dir\" .backend-path.XXXXXX)\" && printf '%s\\n' \"$backend\" > \"$pointer_tmp\" && chmod 0600 -- \"$pointer_tmp\" && mv -fT -- \"$pointer_tmp\" \"$pointer_dir/backend-path\" && installed=1",
+        "test \"$installed\" = 1 && ./wall-in-one-backend self-test",
+    }, "\n")
+    backendSetupCache = {
+        commands = commands,
+        pointer_path = pointerPath,
+    }
+    return backendSetupCache
+end
+
 local preview = {}
 do
 local BACKEND_STATUS_KEY = "wall_in_one_backend_status_v1"
@@ -979,6 +1026,10 @@ preview.setBackendStatus = function(nextStatus)
         wakeUpdate()
     end
     return changed
+end
+preview.backendAvailable = backendAvailable
+preview.backendSnapshot = function()
+    return backendStatus
 end
 preview.backendStatusKey = BACKEND_STATUS_KEY
 preview.cancel = cancel
@@ -2699,6 +2750,75 @@ function panelUi.card(children)
         borderWidth = 1,
         align = "stretch",
     }, children)
+end
+
+function panelUi.backendSetupPointerPath()
+    return backendSetupDetails().pointer_path
+end
+
+function panelUi.backendSetupCommands()
+    return backendSetupDetails().commands
+end
+
+function panelUi.backendSetupCard()
+    local commands = panelUi.backendSetupCommands()
+    local pointerPath = panelUi.backendSetupPointerPath()
+    local children = {
+        panelUi.sectionHeader(
+            "terminal-2",
+            noctalia.tr("panel.backend_setup.title"),
+            noctalia.tr("panel.backend_setup.description")
+        ),
+        ui.label({
+            text = noctalia.tr("panel.backend_setup.pointer_label"),
+            fontSize = 9,
+            fontWeight = "bold",
+        }),
+        -- Noctalia v5 does not expose a read-only selectable-text node. A
+        -- controlled input keeps the exact path selectable without accepting
+        -- edits into plugin state.
+        ui.input({
+            key = "backend-setup-pointer",
+            value = pointerPath,
+            onChange = function(_value) end,
+        }),
+        ui.label({
+            text = noctalia.tr("panel.backend_setup.command_label"),
+            fontSize = 9,
+            fontWeight = "bold",
+        }),
+        ui.input({
+            key = "backend-setup-commands",
+            value = commands,
+            multiline = true,
+            height = 210,
+            onChange = function(_value) end,
+        }),
+        ui.row({ gap = 8, align = "center" }, {
+            ui.button({
+                text = noctalia.tr("panel.backend_setup.copy"),
+                glyph = "copy",
+                variant = "primary",
+                controlSize = "sm",
+                onClick = function()
+                    backendSetupCopyFeedback = if noctalia.copyToClipboard(commands, "text/plain;charset=utf-8")
+                        then noctalia.tr("panel.backend_setup.copied")
+                        else noctalia.tr("panel.backend_setup.copy_failed")
+                    render()
+                end,
+            }),
+            ui.label({
+                text = if backendSetupCopyFeedback ~= ""
+                    then backendSetupCopyFeedback
+                    else noctalia.tr("panel.backend_setup.waiting"),
+                fontSize = 9,
+                color = "on_surface_variant",
+                flexGrow = 1,
+                maxLines = 2,
+            }),
+        }),
+    }
+    return panelUi.card(children)
 end
 
 function panelUi.pathRow(glyph, label, path, ready)
@@ -7444,10 +7564,11 @@ function panelPages.steamShopSection()
 end
 
 function panelPages.homeSection()
+    local backendSetupCard = if preview.backendAvailable() then nil else panelUi.backendSetupCard()
     local imageReady, imageRoot = panelUi.locationReady("image")
     local videoReady, videoRoot = panelUi.locationReady("video")
     if not imageReady or not videoReady then
-        return panelUi.card({
+        local locationCard = panelUi.card({
             panelUi.sectionHeader("folder-cog", noctalia.tr("panel.setup.title"), noctalia.tr("panel.setup.home_required")),
             panelUi.pathRow("photo", noctalia.tr("panel.storage.image_root"), imageRoot, imageReady),
             panelUi.pathRow("movie", noctalia.tr("panel.storage.video_root"), videoRoot, videoReady),
@@ -7465,6 +7586,9 @@ function panelPages.homeSection()
                 onClick = "onSettings",
             }),
         })
+        return if backendSetupCard ~= nil
+            then ui.column({ gap = 10, align = "stretch" }, { backendSetupCard, locationCard })
+            else locationCard
     end
 
     local output = panelPages.ensureSelectedScreen()
@@ -7557,7 +7681,10 @@ function panelPages.homeSection()
             end,
         }),
     }))
-    return panelUi.card(children)
+    local homeCard = panelUi.card(children)
+    return if backendSetupCard ~= nil
+        then ui.column({ gap = 10, align = "stretch" }, { backendSetupCard, homeCard })
+        else homeCard
 end
 
 function panelPages.selectedScreenPlaylist(output)

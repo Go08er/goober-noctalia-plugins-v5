@@ -259,11 +259,15 @@ separately installed Python 3.11+ executable `wall-in-one-backend`. The
 nonce/cancellation handling, incremental result validation, and state
 publication.
 
-The service accepts the exact executable name `wall-in-one-backend` from PATH,
-or one user-selected absolute executable through `backend_binary_path`. It does
-not accept a shell command. The retired `motionbgs_binary_path` manifest key is
-invisible and inert; it exists only because API 17 cannot delete an old host
-setting override.
+The service resolves a user-selected absolute executable from
+`backend_binary_path`, then the single-line `pluginDataDir()/backend-path`
+pointer, then the exact executable name `wall-in-one-backend` from PATH. Both
+absolute-path tiers require a non-empty regular executable and reject control
+characters; no tier accepts a shell command. The retired
+`motionbgs_binary_path` manifest key remains invisible, but the isolated
+MotionBGS bridge still honors a valid legacy helper after the two shared
+absolute-path tiers and before PATH. Other backend capabilities never execute
+that compatibility-only program.
 
 The bundled `scripts/backend-provider` launcher probes
 `WIO-BACKEND-PROBE1` schema 1 for the exact capability set `library.scan`,
@@ -341,10 +345,11 @@ schema-1 acknowledgement/status/result state.
 
 Version 0.8 folds that implementation into the separately installed one-shot
 Python 3.11+ program `wall-in-one-backend`, staged in the repository's top-level
-`wall-in-one-backend/` directory. Both Luau bridges use the authoritative
-`backend_binary_path`/fixed PATH command; the provider bridge invokes
-`motionbgs-*` compatibility subcommands so its existing state protocol does not
-change.
+`wall-in-one-backend/` directory. The generic and provider bridges share the
+explicit-setting/pointer/PATH resolution tiers. The provider bridge invokes
+`motionbgs-*` compatibility subcommands for the unified backend, or the old
+`probe`/`rpc` names only when its legacy setting selected the pre-0.8 helper,
+so its existing state protocol does not change.
 
 Bridge status publishes `active_slug`, `active_quality`, and a queue-bounded
 `queued_downloads` list. Exact slug/quality duplicates are rejected while
