@@ -149,176 +149,112 @@ local reloadSharedState
 
 local preview = {}
 do
--- Keep the implementation in a closed lexical scope. panel.luau is close to
--- Luau's 200-local register ceiling; only the small preview facade needs to
--- remain live for the rest of the entry file.
-local PREVIEW_CACHE_SCHEMA = 1
-local PREVIEW_MAX_CONCURRENT = 4
-local PREVIEW_MAX_QUEUE = 32
-local PREVIEW_MAX_FILE_BYTES = 2 * 1024 * 1024
-local PREVIEW_MAX_CACHE_BYTES = 64 * 1024 * 1024
-local PREVIEW_MAX_ENTRIES = 64
-local PREVIEW_MAX_MANIFEST_BYTES = 64 * 1024
-local PREVIEW_MAX_FAILURES = 64
-local PREVIEW_RETRY_BASE_SECONDS = 15
-local PREVIEW_RETRY_MAX_SECONDS = 300
-local PREVIEW_RETRY_POLL_MS = 5000
-local PREVIEW_ACTIVE_POLL_MS = 16
-local PREVIEW_INIT_BATCH = 4
-local PREVIEW_PROTOCOL = "WIO-THUMB1"
+local BACKEND_STATUS_KEY = "wall_in_one_backend_status_v1"
+local RPC_SCHEMA = 1
+local RPC_ACTION = "preview.sync"
+local RPC_PROTOCOL = "WIO-BACKEND-RPC1"
+local GUARD_CONTENT = "WIO-BACKEND-GUARD1\n"
+local MAX_REQUEST_BYTES = 64 * 1024
+local MAX_RESPONSE_BYTES = 128 * 1024
+local MAX_ITEMS = 13
+local PAGE_ITEMS = 12
+local RPC_TIMEOUT_MS = 55000
+local ACTIVE_POLL_MS = 50
+local IDLE_POLL_MS = 5000
+local MAX_RETRIES = 32
 
--- Provider thumbnails are presentation data, so the panel owns their cache.
--- Noctalia creates one ScriptRuntime for this declared panel entry; repeated
--- widget placements do not create competing owners for this manifest.
--- Remote URLs never reach ui.image: a strict helper installs a bounded local
--- file first, and only that verified path is rendered. The manifest names
--- every file this cache may delete and keeps both entry count and bytes flat.
-local previewCacheInitialized = false
-local previewCacheReady = false
-local previewCacheDirectory = ""
-local previewManifestPath = ""
-local previewHelperPath = ""
-local previewCache = { schema = PREVIEW_CACHE_SCHEMA, entries = {} }
+local backendStatus = nil
+local storageInitialized = false
+local storageReady = false
+local cacheDirectory = ""
+local rpcDirectory = ""
+local launcherPath = ""
+local thumbnailHelperPath = ""
 local previewPaths = {}
-local previewQueue = {}
-local previewQueued = {}
-local previewPending = {}
-local previewCompletions = {}
-local previewRetiredPaths = {}
-local previewRetiredPathSet = {}
-local previewFailures = {}
-local previewValidationMemo = {}
-local previewPlan = nil
-local previewSweep = nil
-local previewActive = 0
-local previewSequence = 0
-local previewFailureSequence = 0
-local previewGeneration = 0
-local previewInterest = 0
-local previewScope = ""
-local previewInitializationRequested = false
-local previewInitialization = nil
-local previewManifestDirty = false
-local previewRenderPending = false
-local previewUpdateInterval = 0
-local previewClockSeconds = 0
+local previewRecords = {}
+local currentPlan = nil
+local pendingPlan = nil
+local activeOperation = nil
+local completedOperation = nil
+local cancelRequested = false
+local renderPending = false
+local generation = 0
+local operationSequence = 0
+local runtimeToken = tostring(math.floor(noctalia.nowMs()))
+local clockMs = 0
+local retryAtMs = 0
+local retryCount = 0
+local pendingCount = 0
+local updateInterval = 0
+local lastError = ""
+local scopeName = ""
 
-local function setPreviewUpdateInterval(interval)
-    if previewUpdateInterval ~= interval then
-        noctalia.setUpdateInterval(interval)
-        previewUpdateInterval = interval
-    end
+local function bounded(value, maximum)
+    local text = tostring(value or ""):gsub("[%c]", " ")
+    text = noctalia.string.trim(text)
+    return if #text > maximum then text:sub(1, maximum) else text
 end
 
-local function wakePreviewWork()
-    setPreviewUpdateInterval(PREVIEW_ACTIVE_POLL_MS)
-    panel.setNeedsFrameTick(true)
-end
-
-local function previewNowSeconds()
-    return previewClockSeconds
-end
-
-local function previewRetryReady(url)
-    local failure = previewFailures[url]
-    return type(failure) ~= "table"
-        or previewNowSeconds() >= math.max(0, math.floor(tonumber(failure.retry_at) or 0))
-end
-
-local function previewRetryDue()
-    local now = previewNowSeconds()
-    for _, failure in pairs(previewFailures) do
-        if
-            type(failure) == "table"
-            and tonumber(failure.generation) == previewGeneration
-            and tonumber(failure.interest) == previewInterest
-            and now >= math.max(0, math.floor(tonumber(failure.retry_at) or 0))
-        then
-            return true
-        end
-    end
-    return false
-end
-
-local function clearPreviewFailure(url)
-    previewFailures[url] = nil
-end
-
-local function recordPreviewFailure(url)
-    local previous = previewFailures[url]
-    local attempts = math.min(16, math.max(0, math.floor(tonumber(type(previous) == "table" and previous.attempts or 0) or 0)) + 1)
-    local delay = math.min(PREVIEW_RETRY_MAX_SECONDS, PREVIEW_RETRY_BASE_SECONDS * (2 ^ math.min(5, attempts - 1)))
-    previewFailureSequence += 1
-    previewFailures[url] = {
-        attempts = attempts,
-        retry_at = previewNowSeconds() + delay,
-        generation = previewGeneration,
-        interest = previewInterest,
-        sequence = previewFailureSequence,
-    }
-
-    local count = 0
-    local oldestUrl = nil
-    local oldestSequence = math.huge
-    for candidateUrl, failure in pairs(previewFailures) do
-        count += 1
-        local sequence = math.max(0, math.floor(tonumber(type(failure) == "table" and failure.sequence or 0) or 0))
-        if sequence < oldestSequence or (sequence == oldestSequence and tostring(candidateUrl) < tostring(oldestUrl or "")) then
-            oldestUrl = candidateUrl
-            oldestSequence = sequence
-        end
-    end
-    if count > PREVIEW_MAX_FAILURES and oldestUrl ~= nil then
-        previewFailures[oldestUrl] = nil
-    end
-end
-
-local function resetPreviewQueue(scope)
-    previewGeneration += 1
-    previewQueue = {}
-    previewQueued = {}
-    previewValidationMemo = {}
-    previewPlan = nil
-    previewSweep = nil
-    if scope ~= nil then
-        previewScope = tostring(scope)
-    end
-end
-
-local function previewAbsolutePath(value)
+local function absolutePath(value)
     return type(value) == "string"
         and #value > 1
         and #value <= 4096
         and value:sub(1, 1) == "/"
-        and not value:find("[%c\\]")
+        and value:find("[%c\\]") == nil
         and not value:find("//", 1, true)
         and not value:find("/./", 1, true)
         and not value:find("/../", 1, true)
-        and not value:match("/%.%.$")
         and not value:match("/%.$")
+        and not value:match("/%.%.$")
 end
 
-local function previewIdentifier(provider, value)
+local function directChild(path, directory)
+    if not absolutePath(path) or not absolutePath(directory) then
+        return false
+    end
+    directory = directory:gsub("/+$", "")
+    local prefix = directory .. "/"
+    if path:sub(1, #prefix) ~= prefix then
+        return false
+    end
+    local name = path:sub(#prefix + 1)
+    return name ~= "" and not name:find("/", 1, true) and name:find("[%c\\]") == nil
+end
+
+local function shellQuote(value)
+    return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
+end
+
+local function setUpdateInterval(interval)
+    if updateInterval ~= interval then
+        noctalia.setUpdateInterval(interval)
+        updateInterval = interval
+    end
+end
+
+local function wakeUpdate()
+    setUpdateInterval(ACTIVE_POLL_MS)
+end
+
+local function identifier(provider, value)
     if type(value) ~= "string" then
         return nil
     end
-    local identifier = value:lower()
+    local candidate = value:lower()
     if provider == "wallhaven" then
-        return if #identifier == 6 and identifier:match("^[a-z0-9]+$") ~= nil then identifier else nil
-    end
-    if provider == "motionbgs" then
-        return if #identifier >= 1
-                and #identifier <= 120
-                and identifier:match("^[a-z0-9][a-z0-9-]*$") ~= nil
-            then identifier
+        return if #candidate == 6 and candidate:match("^[a-z0-9]+$") ~= nil then candidate else nil
+    elseif provider == "motionbgs" then
+        return if #candidate >= 1
+                and #candidate <= 120
+                and candidate:match("^[a-z0-9][a-z0-9-]*$") ~= nil
+            then candidate
             else nil
     end
     return nil
 end
 
-local function validPreviewUrl(provider, value)
-    if
-        type(value) ~= "string"
+local function previewUrl(provider, value)
+    if type(value) ~= "string"
         or value == ""
         or #value > 2048
         or value:find("[%c\\#]") ~= nil
@@ -328,12 +264,11 @@ local function validPreviewUrl(provider, value)
         return nil
     end
     if provider == "wallhaven" then
-        local bucket, identifier, extension = value:match(
+        local bucket, itemId, extension = value:match(
             "^https://th%.wallhaven%.cc/lg/([a-z0-9][a-z0-9])/([a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9])%.([a-z]+)$"
         )
-        if
-            identifier ~= nil
-            and bucket == identifier:sub(1, 2)
+        if itemId ~= nil
+            and bucket == itemId:sub(1, 2)
             and (extension == "jpg" or extension == "jpeg" or extension == "png" or extension == "webp")
         then
             return value
@@ -349,17 +284,11 @@ local function validPreviewUrl(provider, value)
             width, height, mediaId, filename = value:match(
                 "^https://motionbgs%.com/i/c/([1-9][0-9]*)x([1-9][0-9]*)/media/([0-9]+)/([A-Za-z0-9][A-Za-z0-9._-]*)$"
             )
-            if
-                width == nil
-                or tonumber(width) > 4096
-                or height == nil
-                or tonumber(height) > 4096
-            then
+            if width == nil or tonumber(width) > 4096 or height == nil or tonumber(height) > 4096 then
                 return nil
             end
         end
-        if
-            mediaId ~= nil
+        if mediaId ~= nil
             and #mediaId <= 12
             and filename ~= nil
             and #filename <= 240
@@ -373,566 +302,494 @@ local function validPreviewUrl(provider, value)
     return nil
 end
 
-local function previewKey(provider, identifier)
-    local safe = previewIdentifier(provider, identifier)
-    return if safe ~= nil then provider .. ":" .. safe else nil
-end
-
-local function validatedPreviewRequest(provider, identifier, url)
-    local rawIdentifier = tostring(identifier or "")
-    local rawUrl = tostring(url or "")
-    local memoKey = tostring(provider or "") .. ":" .. rawIdentifier
-    local memo = previewValidationMemo[memoKey]
-    if
-        type(memo) == "table"
-        and memo.raw_identifier == rawIdentifier
-        and memo.raw_url == rawUrl
-    then
-        return memo
+local function itemFields(provider, item)
+    if type(item) ~= "table" then
+        return nil
     end
-    local safeIdentifier = previewIdentifier(provider, rawIdentifier)
-    local safeUrl = validPreviewUrl(provider, rawUrl)
-    local key = if safeIdentifier ~= nil then provider .. ":" .. safeIdentifier else nil
-    memo = {
-        raw_identifier = rawIdentifier,
-        raw_url = rawUrl,
-        identifier = safeIdentifier,
-        url = safeUrl,
-        key = if safeUrl ~= nil then key else nil,
-    }
-    previewValidationMemo[memoKey] = memo
-    return memo
+    local rawId
+    local rawUrl
+    if provider == "wallhaven" then
+        local thumbs = type(item.thumbs) == "table" and item.thumbs or {}
+        rawId = tostring(item.id or "")
+        rawUrl = tostring(thumbs.large or "")
+    else
+        rawId = tostring(item.slug or "")
+        rawUrl = tostring(item.thumbnail_url or item.poster_url or "")
+    end
+    local safeId = identifier(provider, rawId)
+    local safeUrl = previewUrl(provider, rawUrl)
+    if safeId == nil or safeUrl == nil then
+        return nil
+    end
+    return { provider = provider, id = safeId, url = safeUrl, key = provider .. ":" .. safeId }
 end
 
-local function previewOwnedFilename(value)
-    if type(value) ~= "string" or value:find("[/\\%c]") ~= nil then
+local function selectedFields(provider, selected)
+    if type(selected) ~= "table" then
+        return nil
+    end
+    if provider == "wallhaven" then
+        return itemFields(provider, selected)
+    end
+    local copy = {
+        slug = selected.slug,
+        thumbnail_url = selected.poster_url or selected.thumbnail_url,
+    }
+    return itemFields(provider, copy)
+end
+
+local function ownedFilename(provider, itemId, value)
+    if type(value) ~= "string" or #value > 255 or value:find("[/\\%c]") ~= nil then
         return false
     end
-    local provider, identifier, milliseconds, sequence, extension = value:match(
+    local fileProvider, fileId, stamp, sequence, extension = value:match(
         "^(wallhaven)%-([a-z0-9]+)%-([0-9]+)%-([0-9]+)%.([a-z]+)$"
     )
-    if provider == nil then
-        provider, identifier, milliseconds, sequence, extension = value:match(
+    if fileProvider == nil then
+        fileProvider, fileId, stamp, sequence, extension = value:match(
             "^(motionbgs)%-([a-z0-9][a-z0-9-]*)%-([0-9]+)%-([0-9]+)%.([a-z]+)$"
         )
     end
-    return provider ~= nil
-        and previewIdentifier(provider, identifier) ~= nil
-        and #milliseconds <= 20
+    return fileProvider == provider
+        and fileId == itemId
+        and #stamp <= 20
         and #sequence <= 12
         and (extension == "jpg" or extension == "png" or extension == "webp")
 end
 
-local function previewEntryPath(entry)
-    local filename = type(entry) == "table" and tostring(entry.filename or "") or ""
-    if not previewCacheReady or not previewOwnedFilename(filename) then
-        return nil
+local function backendHasCapability(candidate, name)
+    local capabilities = type(candidate) == "table" and candidate.capabilities or nil
+    if type(capabilities) == "table" then
+        if capabilities[name] == true then
+            return true
+        end
+        for _, capability in ipairs(capabilities) do
+            if capability == name then
+                return true
+            end
+        end
+    elseif type(capabilities) == "string" then
+        for capability in capabilities:gmatch("[^,]+") do
+            if capability == name then
+                return true
+            end
+        end
     end
-    local path = previewCacheDirectory .. "/" .. filename
-    return if previewAbsolutePath(path) then path else nil
+    return false
 end
 
-local function removePreviewEntry(key, removeFile)
-    local entry = previewCache.entries[key]
-    if type(entry) == "table" and removeFile == true then
-        local path = previewEntryPath(entry)
-        if path ~= nil then
+local function safeBinary(candidate)
+    local value = type(candidate) == "table" and tostring(candidate.binary_path or "") or ""
+    if value == "wall-in-one-backend" then
+        return value
+    end
+    return if absolutePath(value) then value else ""
+end
+
+local function backendAvailable()
+    return type(backendStatus) == "table"
+        and backendStatus.available == true
+        and backendHasCapability(backendStatus, RPC_ACTION)
+        and safeBinary(backendStatus) ~= ""
+end
+
+local function initializeStorage()
+    if storageInitialized then
+        return storageReady
+    end
+    storageInitialized = true
+    local pluginDirectory = noctalia.pluginDir()
+    local dataDirectory = noctalia.pluginDataDir()
+    if not absolutePath(pluginDirectory) or not absolutePath(dataDirectory) then
+        lastError = "Provider preview storage is unavailable"
+        return false
+    end
+    pluginDirectory = pluginDirectory:gsub("/+$", "")
+    dataDirectory = dataDirectory:gsub("/+$", "")
+    launcherPath = pluginDirectory .. "/scripts/backend-provider"
+    thumbnailHelperPath = pluginDirectory .. "/scripts/provider-thumbnail"
+    cacheDirectory = dataDirectory .. "/provider-previews/v1"
+    rpcDirectory = cacheDirectory .. "/rpc"
+    if not absolutePath(launcherPath)
+        or not absolutePath(thumbnailHelperPath)
+        or not noctalia.fileExists(launcherPath)
+        or not noctalia.fileExists(thumbnailHelperPath)
+        or noctalia.mkdirAll(rpcDirectory) ~= true
+    then
+        lastError = "Provider preview bridge is unavailable"
+        return false
+    end
+    storageReady = true
+    return true
+end
+
+local function atomicWrite(path, content, maximum)
+    if not directChild(path, rpcDirectory) or type(content) ~= "string" or #content < 1 or #content > maximum then
+        return false
+    end
+    local temporary = path .. ".tmp"
+    noctalia.removeFile(temporary)
+    if noctalia.fileExists(path) or noctalia.writeFile(temporary, content) ~= true then
+        noctalia.removeFile(temporary)
+        return false
+    end
+    if noctalia.renameFile(temporary, path) ~= true then
+        noctalia.removeFile(temporary)
+        return false
+    end
+    return true
+end
+
+local function cleanupOperation(operation)
+    if type(operation) ~= "table" then
+        return
+    end
+    for _, path in ipairs({ operation.guard_path, operation.request_path, operation.response_path }) do
+        if directChild(path, rpcDirectory) and noctalia.fileExists(path) then
             noctalia.removeFile(path)
         end
     end
-    previewCache.entries[key] = nil
-    previewPaths[key] = nil
 end
 
-local function markPreviewManifestDirty()
-    previewManifestDirty = true
-    wakePreviewWork()
+local function requestRender()
+    renderPending = true
+    wakeUpdate()
 end
 
-local function retirePreviewEntry(key, entry)
-    local path = previewEntryPath(entry)
-    removePreviewEntry(key, false)
-    if path ~= nil and previewRetiredPathSet[path] == nil then
-        previewRetiredPathSet[path] = true
-        table.insert(previewRetiredPaths, path)
-    end
-    markPreviewManifestDirty()
-end
-
-local function previewEntryValid(key, entry)
-    if type(key) ~= "string" or type(entry) ~= "table" then
-        return false
-    end
-    local provider, identifier = key:match("^(wallhaven):([a-z0-9]+)$")
-    if provider == nil then
-        provider, identifier = key:match("^(motionbgs):([a-z0-9][a-z0-9-]*)$")
-    end
-    local safeIdentifier = previewIdentifier(provider, identifier)
-    local url = validPreviewUrl(provider, entry.url)
-    local path = previewEntryPath(entry)
-    local bytes = math.floor(tonumber(entry.bytes) or 0)
-    local info = path ~= nil and noctalia.fileInfo(path) or nil
-    return safeIdentifier ~= nil
-        and key == provider .. ":" .. safeIdentifier
-        and url ~= nil
-        and type(info) == "table"
-        and info.isDir ~= true
-        and bytes >= 1
-        and bytes <= PREVIEW_MAX_FILE_BYTES
-        and math.floor(tonumber(info.size) or 0) == bytes
-        and tonumber(entry.last_used) ~= nil
-end
-
-local function savePreviewManifest()
-    if not previewCacheReady or previewManifestPath == "" then
-        return false
-    end
-    local encoded = noctalia.json.encode(previewCache, true)
-    if type(encoded) ~= "string" or #encoded + 1 > PREVIEW_MAX_MANIFEST_BYTES then
-        return false
-    end
-    local temporary = previewManifestPath .. ".tmp"
-    local wrote = noctalia.writeFile(temporary, encoded .. "\n")
-    if wrote ~= true then
-        noctalia.removeFile(temporary)
-        return false
-    end
-    local installed = noctalia.renameFile(temporary, previewManifestPath)
-    if installed ~= true then
-        noctalia.removeFile(temporary)
-        return false
-    end
-    return true
-end
-
-local function prunePreviewCache()
-    local ordered = {}
-    local totalBytes = 0
-    for key, entry in pairs(previewCache.entries) do
-        local bytes = math.max(0, math.floor(tonumber(type(entry) == "table" and entry.bytes or 0) or 0))
-        totalBytes += bytes
-        table.insert(ordered, {
-            key = key,
-            bytes = bytes,
-            last_used = math.max(0, math.floor(tonumber(type(entry) == "table" and entry.last_used or 0) or 0)),
-        })
-    end
-    table.sort(ordered, function(left, right)
-        if left.last_used == right.last_used then
-            return left.key < right.key
+local function scheduleRetry()
+    if currentPlan == nil or retryCount >= MAX_RETRIES then
+        retryAtMs = 0
+        if pendingCount > 0 then
+            lastError = "Provider preview retry limit reached"
         end
-        return left.last_used < right.last_used
-    end)
-    local removed = false
-    local index = 1
-    while (#ordered - index + 1) > PREVIEW_MAX_ENTRIES or totalBytes > PREVIEW_MAX_CACHE_BYTES do
-        local victim = ordered[index]
-        if victim == nil then
-            break
-        end
-        removePreviewEntry(victim.key, true)
-        totalBytes = math.max(0, totalBytes - victim.bytes)
-        index += 1
-        removed = true
+        return
     end
-    return removed
+    retryCount += 1
+    local delay = math.min(2000, 100 + (retryCount * 100))
+    retryAtMs = clockMs + delay
+    wakeUpdate()
 end
 
-local function initializePreviewCache()
-    if previewCacheInitialized then
-        return previewCacheReady
+local function responsePayload(operation, result)
+    if type(result) ~= "table" or result.timedOut == true then
+        return nil, "Provider preview backend timed out"
     end
-    previewCacheInitialized = true
-    previewInitializationRequested = false
-    local pluginDirectory = noctalia.pluginDir()
-    local dataDirectory = noctalia.pluginDataDir()
-    if not previewAbsolutePath(pluginDirectory) or not previewAbsolutePath(dataDirectory) then
-        return false
+    local line = tostring(result.stdout or ""):match("([^\r\n]+)%s*$") or ""
+    local errorWire, errorOutcome, _kind, detail = line:match("^([^\t]+)\t([^\t]+)\t([^\t]*)\t(.*)$")
+    if errorWire == RPC_PROTOCOL and errorOutcome == "error" then
+        return nil, bounded(detail, 400)
+    elseif tonumber(result.exitCode) ~= 0 then
+        local fallback = bounded(result.stderr, 400)
+        return nil, if fallback ~= "" then fallback else "Provider preview backend failed"
     end
-    previewHelperPath = pluginDirectory:gsub("/+$", "") .. "/scripts/provider-thumbnail"
-    previewCacheDirectory = dataDirectory:gsub("/+$", "") .. "/provider-previews/v1"
-    previewManifestPath = previewCacheDirectory .. "/manifest.json"
-    if not noctalia.fileExists(previewHelperPath) or noctalia.mkdirAll(previewCacheDirectory) ~= true then
-        return false
-    end
-    previewCacheReady = true
-
-    local manifestInfo = noctalia.fileInfo(previewManifestPath)
-    local changed = false
-    if
-        type(manifestInfo) == "table"
-        and manifestInfo.isDir ~= true
-        and tonumber(manifestInfo.size) ~= nil
-        and tonumber(manifestInfo.size) >= 1
-        and tonumber(manifestInfo.size) <= PREVIEW_MAX_MANIFEST_BYTES
+    local wire, outcome, requestId, responsePath, reportedBytes = line:match(
+        "^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$"
+    )
+    local bytes = tonumber(reportedBytes)
+    if wire ~= RPC_PROTOCOL
+        or outcome ~= "ok"
+        or requestId ~= operation.request_id
+        or responsePath ~= operation.response_path
+        or bytes == nil
+        or bytes < 2
+        or bytes > MAX_RESPONSE_BYTES
     then
-        local raw = noctalia.readFile(previewManifestPath)
-        local decoded = type(raw) == "string" and #raw <= PREVIEW_MAX_MANIFEST_BYTES and noctalia.json.decode(raw) or nil
-        if type(decoded) == "table" and tonumber(decoded.schema) == PREVIEW_CACHE_SCHEMA and type(decoded.entries) == "table" then
-            previewCache = { schema = PREVIEW_CACHE_SCHEMA, entries = {} }
-            local retained = 0
-            for key, entry in pairs(decoded.entries) do
-                if retained < PREVIEW_MAX_ENTRIES * 2 then
-                    previewCache.entries[key] = entry
-                    retained += 1
-                else
-                    changed = true
-                    break
+        return nil, "Provider preview backend returned an invalid completion"
+    end
+    local info = noctalia.fileInfo(responsePath)
+    if type(info) ~= "table" or info.isDir == true or math.floor(tonumber(info.size) or 0) ~= bytes then
+        return nil, "Provider preview backend response is not a bounded regular file"
+    end
+    local raw = noctalia.readFile(responsePath)
+    if type(raw) ~= "string" or #raw ~= bytes then
+        return nil, "Provider preview backend response could not be read"
+    end
+    local decoded = noctalia.json.decode(raw)
+    if type(decoded) ~= "table"
+        or tonumber(decoded.schema) ~= RPC_SCHEMA
+        or decoded.action ~= RPC_ACTION
+        or decoded.request_id ~= operation.request_id
+        or decoded.ok ~= true
+        or type(decoded.items) ~= "table"
+        or #decoded.items ~= #operation.items
+    then
+        return nil, "Provider preview backend returned an invalid payload"
+    end
+    return decoded, nil
+end
+
+local function applyResponse(operation, payload)
+    local nextPending = tonumber(payload.pending_count)
+    if nextPending == nil or nextPending ~= math.floor(nextPending) or nextPending < 0 or nextPending > #operation.items then
+        return false, "Provider preview backend returned an invalid pending count"
+    end
+    local seen = {}
+    local changed = false
+    local countedPending = 0
+    local nextRecords = {}
+    local nextPaths = {}
+    -- Retry operations intentionally omit items that already failed, so one
+    -- bad remote thumbnail cannot starve the rest of the visible page. Keep
+    -- every validated record from this result generation while the retry
+    -- response updates only the still-pending subset.
+    if type(currentPlan) == "table" and currentPlan.generation == operation.generation then
+        for _, planned in ipairs(currentPlan.items) do
+            local previous = previewRecords[planned.key]
+            if type(previous) == "table" and previous.url == planned.url then
+                nextRecords[planned.key] = previous
+                if previous.path ~= nil then
+                    nextPaths[planned.key] = previous.path
                 end
             end
-        else
-            -- Schema mismatches and malformed JSON are discarded in place;
-            -- rewrite a clean fixed-slot manifest after owned orphan cleanup.
+        end
+    end
+    for _, result in ipairs(payload.items) do
+        local index = tonumber(type(result) == "table" and result.index or nil)
+        if index == nil or index ~= math.floor(index) or index < 1 or index > #operation.items or seen[index] then
+            return false, "Provider preview backend returned an invalid item index"
+        end
+        seen[index] = true
+        local requested = operation.items[index]
+        local state = tostring(result.state or "")
+        if state ~= "ready" and state ~= "pending" and state ~= "error" then
+            return false, "Provider preview backend returned an invalid item state"
+        end
+        local path = nil
+        if state == "ready" then
+            local filename = tostring(result.filename or "")
+            if not ownedFilename(requested.provider, requested.id, filename) then
+                return false, "Provider preview backend returned an unsafe cache filename"
+            end
+            path = cacheDirectory .. "/" .. filename
+            if not directChild(path, cacheDirectory) then
+                return false, "Provider preview backend returned a cache path outside its directory"
+            end
+        elseif state == "pending" then
+            countedPending += 1
+        end
+        local previous = previewRecords[requested.key]
+        local errorMessage = if state == "error" then bounded(result.error, 240) else ""
+        if type(previous) ~= "table"
+            or previous.url ~= requested.url
+            or previous.state ~= state
+            or previous.path ~= path
+            or previous.error ~= errorMessage
+        then
             changed = true
         end
-    elseif type(manifestInfo) == "table" then
-        -- Empty, oversized, or directory-shaped manifests are never read.
-        changed = true
-    end
-
-    local keys = {}
-    for key in pairs(previewCache.entries) do
-        table.insert(keys, key)
-    end
-    previewInitialization = {
-        phase = "validate",
-        keys = keys,
-        index = 1,
-        changed = changed,
-    }
-    return true
-end
-
-local function preparePreviewPrune(initialization)
-    local ordered = {}
-    local totalBytes = 0
-    for key, entry in pairs(previewCache.entries) do
-        local bytes = math.max(0, math.floor(tonumber(type(entry) == "table" and entry.bytes or 0) or 0))
-        totalBytes += bytes
-        table.insert(ordered, {
-            key = key,
-            bytes = bytes,
-            last_used = math.max(0, math.floor(tonumber(type(entry) == "table" and entry.last_used or 0) or 0)),
-        })
-    end
-    table.sort(ordered, function(left, right)
-        if left.last_used == right.last_used then
-            return left.key < right.key
-        end
-        return left.last_used < right.last_used
-    end)
-    local victims = {}
-    local index = 1
-    while (#ordered - index + 1) > PREVIEW_MAX_ENTRIES or totalBytes > PREVIEW_MAX_CACHE_BYTES do
-        local victim = ordered[index]
-        if victim == nil then
-            break
-        end
-        table.insert(victims, victim.key)
-        totalBytes = math.max(0, totalBytes - victim.bytes)
-        index += 1
-    end
-    initialization.phase = "prune"
-    initialization.keys = victims
-    initialization.index = 1
-end
-
-local function preparePreviewCleanup(initialization)
-    local referenced = { ["manifest.json"] = true }
-    for _, entry in pairs(previewCache.entries) do
-        referenced[tostring(entry.filename or "")] = true
-    end
-    local names = noctalia.listDir(previewCacheDirectory)
-    initialization.phase = "cleanup"
-    initialization.names = type(names) == "table" and names or {}
-    initialization.referenced = referenced
-    initialization.index = 1
-end
-
-local function stepPreviewInitialization()
-    local initialization = previewInitialization
-    if type(initialization) ~= "table" then
-        return true
-    end
-    for _ = 1, PREVIEW_INIT_BATCH do
-        if initialization.phase == "validate" then
-            local key = initialization.keys[initialization.index]
-            if key == nil then
-                preparePreviewPrune(initialization)
-                continue
-            end
-            initialization.index += 1
-            local entry = previewCache.entries[key]
-            if not previewEntryValid(key, entry) then
-                removePreviewEntry(key, true)
-                initialization.changed = true
-            else
-                previewPaths[key] = previewEntryPath(entry)
-            end
-        elseif initialization.phase == "prune" then
-            local key = initialization.keys[initialization.index]
-            if key == nil then
-                preparePreviewCleanup(initialization)
-                continue
-            end
-            initialization.index += 1
-            removePreviewEntry(key, true)
-            initialization.changed = true
-        elseif initialization.phase == "cleanup" then
-            local name = initialization.names[initialization.index]
-            if name == nil then
-                if initialization.changed then
-                    markPreviewManifestDirty()
-                end
-                previewInitialization = nil
-                return true
-            end
-            initialization.index += 1
-            if
-                type(name) == "string"
-                and not initialization.referenced[name]
-                and (previewOwnedFilename(name)
-                    or name:match("^%.wall%-in%-one%-preview%-%d+%-%d+%.stage$") ~= nil
-                    or name == "manifest.json.tmp")
-            then
-                noctalia.removeFile(previewCacheDirectory .. "/" .. name)
-                initialization.changed = true
-            end
+        nextRecords[requested.key] = {
+            provider = requested.provider,
+            id = requested.id,
+            url = requested.url,
+            state = state,
+            path = path,
+            kind = bounded(result.kind, 40),
+            error = errorMessage,
+        }
+        if path ~= nil then
+            nextPaths[requested.key] = path
         end
     end
-    return false
+    if countedPending ~= nextPending then
+        return false, "Provider preview backend pending count did not match item states"
+    end
+    -- Adopt a nonce-bound response only after every ordinal has validated;
+    -- a malformed tail can never leave a partially replaced visible page.
+    previewRecords = nextRecords
+    previewPaths = nextPaths
+    pendingCount = nextPending
+    return changed, nil
 end
 
-local function previewShellQuote(value)
-    return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
-end
-
-local function previewHelperResult(result)
-    if type(result) ~= "table" or result.timedOut == true or tonumber(result.exitCode) ~= 0 then
-        return nil
+local function finishCompletion()
+    local completion = completedOperation
+    completedOperation = nil
+    if type(completion) ~= "table" then
+        return false
     end
-    local output = tostring(result.stdout or ""):match("([^\r\n]+)%s*$") or ""
-    local protocol, outcome, provider, statusCode, effectiveUrl, contentType, bytes, path = output:match(
-        "^([^\t]+)\t([^\t]+)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$"
-    )
-    if protocol ~= PREVIEW_PROTOCOL or outcome ~= "ok" then
-        return nil
+    local operation = completion.operation
+    if activeOperation == operation then
+        activeOperation = nil
     end
-    return {
-        provider = provider,
-        status = math.floor(tonumber(statusCode) or 0),
-        effective_url = effectiveUrl,
-        content_type = contentType,
-        bytes = math.floor(tonumber(bytes) or 0),
-        path = path,
-    }
-end
-
-local function previewExtension(contentType)
-    if contentType == "image/jpeg" then
-        return "jpg"
-    elseif contentType == "image/png" then
-        return "png"
-    elseif contentType == "image/webp" then
-        return "webp"
+    local stale = type(operation) ~= "table" or operation.generation ~= generation or operation.cancelled == true
+    local payload
+    local failure
+    if not stale then
+        payload, failure = responsePayload(operation, completion.result)
     end
-    return nil
-end
-
-local function finishPreviewTask(task, result)
-    previewPending[task.key] = nil
-    if task.generation ~= previewGeneration then
-        if previewAbsolutePath(task.staging_path) then
-            noctalia.removeFile(task.staging_path)
-        end
-        local failure = previewFailures[task.url]
-        if type(failure) == "table" and tonumber(failure.retry_at) == math.huge then
-            failure.retry_at = previewNowSeconds()
-            failure.generation = task.generation
-        end
-        -- Rebuild only the current view so a current-generation request for
-        -- the same key can be queued after the stale flight releases it.
-        return isOpen
+    cleanupOperation(operation)
+    if stale then
+        return false
+    elseif payload == nil then
+        lastError = bounded(failure, 400)
+        pendingCount = #operation.items
+        scheduleRetry()
+        return false
     end
-    local transport = previewHelperResult(result)
-    local valid = transport ~= nil
-        and transport.provider == task.provider
-        and transport.status >= 200
-        and transport.status < 300
-        and transport.effective_url == task.url
-        and transport.path == task.staging_path
-        and transport.bytes >= 1
-        and transport.bytes <= PREVIEW_MAX_FILE_BYTES
-    local extension = valid and previewExtension(transport.content_type) or nil
-    local info = valid and noctalia.fileInfo(task.staging_path) or nil
-    valid = valid
-        and extension ~= nil
-        and type(info) == "table"
-        and info.isDir ~= true
-        and math.floor(tonumber(info.size) or 0) == transport.bytes
-
-    if valid then
-        local filename = task.provider
-            .. "-"
-            .. task.identifier
-            .. "-"
-            .. task.token
-            .. "."
-            .. extension
-        local finalPath = previewCacheDirectory .. "/" .. filename
-        local installed = noctalia.renameFile(task.staging_path, finalPath)
-        if installed == true then
-            local previous = previewCache.entries[task.key]
-            previewCache.entries[task.key] = {
-                provider = task.provider,
-                id = task.identifier,
-                url = task.url,
-                filename = filename,
-                bytes = transport.bytes,
-                last_used = previewNowSeconds(),
-            }
-            previewPaths[task.key] = finalPath
-            clearPreviewFailure(task.url)
-            if type(previous) == "table" and previous.filename ~= filename then
-                local previousPath = previewEntryPath(previous)
-                if previousPath ~= nil then
-                    noctalia.removeFile(previousPath)
-                end
-            end
-            prunePreviewCache()
-            markPreviewManifestDirty()
-            return isOpen
-        else
-            noctalia.removeFile(task.staging_path)
-            recordPreviewFailure(task.url)
-        end
+    local changed, applyError = applyResponse(operation, payload)
+    if applyError ~= nil then
+        lastError = applyError
+        pendingCount = #operation.items
+        scheduleRetry()
+        return false
+    end
+    lastError = ""
+    if pendingCount > 0 then
+        scheduleRetry()
     else
-        if previewAbsolutePath(task.staging_path) then
-            noctalia.removeFile(task.staging_path)
-        end
-        recordPreviewFailure(task.url)
+        retryAtMs = 0
+        retryCount = 0
     end
-    return false
+    return changed
 end
 
-local function queuePreviewCompletion(task, result)
-    previewActive = math.max(0, previewActive - 1)
-    table.insert(previewCompletions, { task = task, result = result })
-    wakePreviewWork()
-end
-
-local function startOnePreviewTask()
-    if not isOpen
-        or not previewCacheReady
-        or previewInitialization ~= nil
-        or previewActive >= PREVIEW_MAX_CONCURRENT
-        or #previewQueue == 0
-    then
+local function launchPlan(plan)
+    if type(plan) ~= "table" or plan.generation ~= generation or #plan.items < 1 then
         return false
     end
-    local task = table.remove(previewQueue, 1)
-    previewQueued[task.key] = nil
-    local currentEntry = previewCache.entries[task.key]
-    if
-        task.generation == previewGeneration
-        and previewPending[task.key] == nil
-        and previewRetryReady(task.url)
-        and not (type(currentEntry) == "table" and currentEntry.url == task.url and previewPaths[task.key] ~= nil)
+    if not initializeStorage() or not backendAvailable() then
+        return false
+    end
+    operationSequence += 1
+    local token = runtimeToken .. "-" .. tostring(generation) .. "-" .. tostring(operationSequence)
+    local operation = {
+        generation = generation,
+        request_id = token,
+        items = plan.items,
+        request_path = rpcDirectory .. "/request-" .. token .. ".json",
+        response_path = rpcDirectory .. "/response-" .. token .. ".json",
+        guard_path = rpcDirectory .. "/.wall-in-one-backend-guard-" .. token,
+    }
+    local payload = {
+        schema = RPC_SCHEMA,
+        action = RPC_ACTION,
+        request_id = operation.request_id,
+        transport_directory = rpcDirectory,
+        guard_path = operation.guard_path,
+        operation_timeout_ms = math.min(45000, RPC_TIMEOUT_MS - 5000),
+        thumbnail_helper = thumbnailHelperPath,
+        items = {},
+    }
+    for _, item in ipairs(operation.items) do
+        table.insert(payload.items, { provider = item.provider, id = item.id, url = item.url })
+    end
+    local encoded = noctalia.json.encode(payload, true)
+    if type(encoded) ~= "string"
+        or #encoded + 1 > MAX_REQUEST_BYTES
+        or not atomicWrite(operation.guard_path, GUARD_CONTENT, #GUARD_CONTENT)
+        or not atomicWrite(operation.request_path, encoded .. "\n", MAX_REQUEST_BYTES)
     then
-        previewSequence += 1
-        local token = tostring(math.floor(noctalia.nowMs())) .. "-" .. tostring(previewSequence)
-        task.token = token
-        task.staging_path = previewCacheDirectory .. "/.wall-in-one-preview-" .. token .. ".stage"
-        previewPending[task.key] = task.url
-        previewActive += 1
-        local failure = previewFailures[task.url]
-        if type(failure) == "table" then
-            failure.retry_at = math.huge
-            failure.generation = task.generation
-        end
-        local command = "exec bash "
-            .. previewShellQuote(previewHelperPath)
-            .. " fetch "
-            .. previewShellQuote(task.provider)
-            .. " "
-            .. previewShellQuote(task.url)
-            .. " "
-            .. previewShellQuote(task.staging_path)
-        local started = noctalia.runAsync(command, function(result)
-            queuePreviewCompletion(task, result)
-        end, 40000)
-        if started ~= true then
-            previewActive = math.max(0, previewActive - 1)
-            previewPending[task.key] = nil
-            recordPreviewFailure(task.url)
-        end
+        cleanupOperation(operation)
+        lastError = "Could not prepare provider preview request"
+        scheduleRetry()
+        return false
+    end
+    activeOperation = operation
+    local command = "exec bash "
+        .. shellQuote(launcherPath)
+        .. " rpc "
+        .. shellQuote(safeBinary(backendStatus))
+        .. " "
+        .. shellQuote(operation.request_path)
+        .. " "
+        .. shellQuote(operation.response_path)
+        .. " "
+        .. shellQuote(operation.guard_path)
+    local started = noctalia.runAsync(command, function(result)
+        completedOperation = { operation = operation, result = result }
+        wakeUpdate()
+    end, RPC_TIMEOUT_MS)
+    if started ~= true then
+        activeOperation = nil
+        cleanupOperation(operation)
+        lastError = "Noctalia refused the provider preview backend process"
+        scheduleRetry()
+        return false
     end
     return true
 end
 
-local function ensureProviderPreview(provider, identifier, url)
-    local validated = validatedPreviewRequest(provider, identifier, url)
-    local safeIdentifier = validated.identifier
-    local safeUrl = validated.url
-    local key = validated.key
-    if safeIdentifier == nil or safeUrl == nil or key == nil then
-        return false
-    end
-    if not previewCacheInitialized then
-        previewInitializationRequested = true
-        wakePreviewWork()
-        return false
-    elseif not previewCacheReady or previewInitialization ~= nil then
-        return false
-    end
-    local entry = previewCache.entries[key]
-    local cachedPath = previewPaths[key]
-    if type(entry) == "table" and entry.url == safeUrl and previewAbsolutePath(cachedPath) then
-        clearPreviewFailure(safeUrl)
-        local now = previewNowSeconds()
-        if now - math.floor(tonumber(entry.last_used) or 0) >= 60 then
-            entry.last_used = now
-            markPreviewManifestDirty()
+local function buildPlan(provider, scope, items, first, last, selected, enabled)
+    generation += 1
+    scopeName = tostring(scope or "")
+    retryAtMs = 0
+    retryCount = 0
+    pendingCount = 0
+    lastError = ""
+    local oldRecords = previewRecords
+    local oldPaths = previewPaths
+    previewRecords = {}
+    previewPaths = {}
+    local requests = {}
+    local seen = {}
+    local startIndex = math.max(1, math.floor(tonumber(first) or 1))
+    local endIndex = math.min(#items, math.floor(tonumber(last) or 0), startIndex + PAGE_ITEMS - 1)
+    local function append(candidate)
+        if type(candidate) ~= "table" or seen[candidate.key] or #requests >= MAX_ITEMS then
+            return
         end
-        return true
+        seen[candidate.key] = true
+        table.insert(requests, candidate)
+        local previous = oldRecords[candidate.key]
+        if type(previous) == "table" and previous.url == candidate.url and oldPaths[candidate.key] ~= nil then
+            previewRecords[candidate.key] = previous
+            previewPaths[candidate.key] = oldPaths[candidate.key]
+        else
+            previewRecords[candidate.key] = {
+                provider = candidate.provider,
+                id = candidate.id,
+                url = candidate.url,
+                state = "pending",
+                path = nil,
+                error = "",
+            }
+        end
     end
-    if type(entry) == "table" and entry.url ~= safeUrl then
-        retirePreviewEntry(key, entry)
+    for index = startIndex, endIndex do
+        append(itemFields(provider, items[index]))
     end
-    local failure = previewFailures[safeUrl]
-    if type(failure) == "table" then
-        -- The periodic retry tick should wake only for a failure still visible
-        -- in the current result generation.
-        failure.generation = previewGeneration
-        failure.interest = previewInterest
+    append(selectedFields(provider, selected))
+    currentPlan = {
+        generation = generation,
+        provider = provider,
+        scope = scopeName,
+        source = items,
+        selected = selected,
+        first = startIndex,
+        last = endIndex,
+        enabled = enabled == true,
+        items = requests,
+    }
+    pendingPlan = if currentPlan.enabled and #requests > 0 then currentPlan else nil
+    if activeOperation ~= nil then
+        activeOperation.cancelled = true
+        cancelRequested = true
     end
-    if
-        previewPending[key] == nil
-        and previewQueued[key] == nil
-        and previewRetryReady(safeUrl)
-        and #previewQueue < PREVIEW_MAX_QUEUE
-    then
-        previewQueued[key] = safeUrl
-        table.insert(previewQueue, {
-            provider = provider,
-            identifier = safeIdentifier,
-            key = key,
-            url = safeUrl,
-            generation = previewGeneration,
-        })
-        wakePreviewWork()
-    end
-    return previewPending[key] ~= nil or previewQueued[key] ~= nil or previewRetryReady(safeUrl)
+    wakeUpdate()
 end
 
-local function providerPreviewNode(provider, item, width, height, glyph)
-    local identifier = if provider == "wallhaven" then tostring(item.id or "") else tostring(item.slug or "")
-    local memo = previewValidationMemo[provider .. ":" .. identifier]
-    local key = if type(memo) == "table" and memo.raw_identifier == identifier then memo.key else nil
-    local path = key ~= nil and previewPaths[key] or nil
-    -- previewPaths is populated only after bounded path validation or an
-    -- atomic helper promotion. Rendering therefore needs only this O(1)
-    -- lookup; it must never repeat path/URL regex work for every card.
+local function plan(provider, scope, items, first, last, selected, enabled)
+    local source = type(items) == "table" and items or {}
+    local startIndex = math.max(1, math.floor(tonumber(first) or 1))
+    local endIndex = math.min(#source, math.floor(tonumber(last) or 0), startIndex + PAGE_ITEMS - 1)
+    if type(currentPlan) == "table"
+        and currentPlan.provider == provider
+        and currentPlan.scope == tostring(scope or "")
+        and currentPlan.source == source
+        and currentPlan.selected == selected
+        and currentPlan.first == startIndex
+        and currentPlan.last == endIndex
+        and currentPlan.enabled == (enabled == true)
+    then
+        return
+    end
+    buildPlan(provider, scope, source, startIndex, endIndex, selected, enabled)
+end
+
+local function node(provider, item, width, height, _glyph)
+    local rawId = if provider == "wallhaven" then item.id else item.slug
+    local key = provider .. ":" .. tostring(rawId or ""):lower()
+    local path = previewPaths[key]
     if path ~= nil then
         return ui.image({
             width = width,
@@ -944,8 +801,6 @@ local function providerPreviewNode(provider, item, width, height, glyph)
             borderWidth = 1,
         })
     end
-    -- Match Noctalia's official Wallhaven browser with a simple decorative
-    -- placeholder, avoiding a second nested row inside every result tile.
     return ui.box({
         width = width,
         height = height,
@@ -956,242 +811,170 @@ local function providerPreviewNode(provider, item, width, height, glyph)
     })
 end
 
-local function previewSelectedFields(provider, selected)
-    if type(selected) ~= "table" then
-        return "", ""
-    end
-    if provider == "wallhaven" then
-        local thumbs = type(selected.thumbs) == "table" and selected.thumbs or {}
-        return tostring(selected.id or ""), tostring(thumbs.large or "")
-    end
-    return tostring(selected.slug or ""), tostring(selected.poster_url or selected.thumbnail_url or "")
-end
-
-local function restartPreviewSweep()
-    if previewSweep ~= nil then
-        return false
-    end
-    if type(previewPlan) ~= "table" or previewPlan.enabled ~= true or not isOpen then
-        previewSweep = nil
-        return false
-    end
-    previewSweep = {
-        provider = previewPlan.provider,
-        items = previewPlan.items,
-        first = previewPlan.first,
-        limit = previewPlan.last,
-        index = previewPlan.first,
-        selected_identifier = previewPlan.selected_identifier,
-        selected_url = previewPlan.selected_url,
-        selected_seen = false,
-        selected_done = false,
-    }
-    wakePreviewWork()
-    return true
-end
-
-local function planProviderPreviews(provider, scope, items, first, last, selected, enabled)
-    local selectedScope = tostring(scope or "")
-    local source = type(items) == "table" and items or {}
-    local selectedIdentifier, selectedUrl = previewSelectedFields(provider, selected)
-    local unchanged = type(previewPlan) == "table"
-        and previewPlan.scope == selectedScope
-        and previewPlan.items == source
-        and previewPlan.first == first
-        and previewPlan.last == last
-        and previewPlan.selected == selected
-        and previewPlan.enabled == (enabled == true)
-    if unchanged then
-        return
-    end
-
-    resetPreviewQueue(selectedScope)
-    previewInterest += 1
-    previewPlan = {
-        provider = provider,
-        scope = selectedScope,
-        items = source,
-        selected = selected,
-        selected_identifier = selectedIdentifier,
-        selected_url = selectedUrl,
-        first = math.max(1, math.floor(tonumber(first) or 1)),
-        last = math.min(#source, 48, math.max(0, math.floor(tonumber(last) or 0))),
-        enabled = enabled == true,
-    }
-    if previewPlan.enabled then
-        if not previewCacheInitialized then
-            previewInitializationRequested = true
-        end
-        restartPreviewSweep()
+local function cancel()
+    generation += 1
+    currentPlan = nil
+    pendingPlan = nil
+    retryAtMs = 0
+    retryCount = 0
+    pendingCount = 0
+    scopeName = ""
+    previewRecords = {}
+    previewPaths = {}
+    if activeOperation ~= nil then
+        activeOperation.cancelled = true
+        cancelRequested = true
+        wakeUpdate()
     end
 end
 
-local function stepPreviewSweep()
-    local sweep = previewSweep
-    if type(sweep) ~= "table" then
-        return false, false
-    end
-    local item = if sweep.index <= sweep.limit then sweep.items[sweep.index] else nil
-    if sweep.index <= sweep.limit then
-        sweep.index += 1
-        if type(item) == "table" then
-            local identifier
-            local url
-            if sweep.provider == "wallhaven" then
-                local thumbs = type(item.thumbs) == "table" and item.thumbs or {}
-                identifier = tostring(item.id or "")
-                url = tostring(thumbs.large or "")
-            else
-                identifier = tostring(item.slug or "")
-                url = tostring(item.thumbnail_url or "")
-            end
-            local accepted = ensureProviderPreview(sweep.provider, identifier, url)
-            if identifier ~= "" and identifier == sweep.selected_identifier and accepted then
-                sweep.selected_seen = true
-            end
+local function hasWork()
+    return completedOperation ~= nil
+        or (cancelRequested and activeOperation ~= nil)
+        or (not storageInitialized and type(pendingPlan) == "table" and backendAvailable())
+        or (type(pendingPlan) == "table" and storageReady and backendAvailable() and activeOperation == nil and retryAtMs == 0)
+end
+
+local function step()
+    if cancelRequested and activeOperation ~= nil then
+        cancelRequested = false
+        if directChild(activeOperation.guard_path, rpcDirectory) then
+            noctalia.removeFile(activeOperation.guard_path)
         end
         return true, false
-    end
-    if
-        not sweep.selected_done
-        and not sweep.selected_seen
-        and sweep.selected_identifier ~= ""
+    elseif completedOperation ~= nil then
+        local changed = finishCompletion()
+        return true, changed and isOpen
+    elseif not storageInitialized and type(pendingPlan) == "table" and backendAvailable() then
+        initializeStorage()
+        return true, false
+    elseif type(pendingPlan) == "table"
+        and pendingPlan.generation == generation
+        and retryAtMs == 0
+        and activeOperation == nil
+        and backendAvailable()
     then
-        sweep.selected_done = true
-        ensureProviderPreview(sweep.provider, sweep.selected_identifier, sweep.selected_url)
-        return true, false
-    end
-    previewSweep = nil
-    return true, isOpen
-end
-
-local function previewHasDeferredWork()
-    return previewInitializationRequested
-        or previewInitialization ~= nil
-        or #previewCompletions > 0
-        or #previewRetiredPaths > 0
-        or previewManifestDirty
-        or (previewSweep ~= nil and #previewQueue < PREVIEW_MAX_QUEUE)
-        or (isOpen and previewCacheReady and previewActive < PREVIEW_MAX_CONCURRENT and #previewQueue > 0)
-end
-
-local function stepPreviewWork()
-    if previewInitializationRequested then
-        initializePreviewCache()
-        return true, false
-    end
-    if previewInitialization ~= nil then
-        local finished = stepPreviewInitialization()
-        return true, finished and isOpen
-    end
-    if #previewCompletions > 0 then
-        local completion = table.remove(previewCompletions, 1)
-        return true, finishPreviewTask(completion.task, completion.result)
-    end
-    if #previewRetiredPaths > 0 then
-        local path = table.remove(previewRetiredPaths, 1)
-        previewRetiredPathSet[path] = nil
-        noctalia.removeFile(path)
-        return true, false
-    end
-    if previewSweep ~= nil and #previewQueue < PREVIEW_MAX_QUEUE then
-        return stepPreviewSweep()
-    end
-    if previewManifestDirty then
-        -- A failed best-effort flush is retried by the next cache touch rather
-        -- than spinning this panel callback at the active cadence.
-        previewManifestDirty = false
-        savePreviewManifest()
-        return true, false
-    end
-    if startOnePreviewTask() then
-        return true, false
+        local nextPlan = pendingPlan
+        pendingPlan = nil
+        return launchPlan(nextPlan), false
     end
     return false, false
 end
 
-preview.ensure = ensureProviderPreview
-preview.node = providerPreviewNode
-preview.plan = planProviderPreviews
--- Absolute-path validation is also needed outside this lexical scope; the
--- local itself is invisible there and would resolve to a nil global.
-preview.absolutePath = previewAbsolutePath
-preview.retryDue = previewRetryDue
-preview.retry = restartPreviewSweep
-preview.retryPollMs = PREVIEW_RETRY_POLL_MS
-preview.activePollMs = PREVIEW_ACTIVE_POLL_MS
-preview.wake = wakePreviewWork
-preview.step = stepPreviewWork
-preview.hasBoundedWork = previewHasDeferredWork
+preview.plan = plan
+preview.node = node
+preview.absolutePath = absolutePath
 preview.refreshClock = function()
-    previewClockSeconds = math.max(0, math.floor(tonumber(noctalia.formatTime("%s")) or 0))
+    clockMs = math.max(0, math.floor(tonumber(noctalia.nowMs()) or 0))
 end
-preview.requestRender = function()
-    previewRenderPending = true
-    setPreviewUpdateInterval(PREVIEW_ACTIVE_POLL_MS)
+preview.retryDue = function()
+    return retryAtMs > 0 and clockMs >= retryAtMs and currentPlan ~= nil and backendAvailable()
 end
+preview.retry = function()
+    if currentPlan ~= nil then
+        retryAtMs = 0
+        local items = {}
+        for _, item in ipairs(currentPlan.items) do
+            local record = previewRecords[item.key]
+            if type(record) ~= "table" or record.state == "pending" then
+                table.insert(items, item)
+            end
+        end
+        if #items > 0 then
+            pendingPlan = { generation = currentPlan.generation, items = items }
+            wakeUpdate()
+        else
+            pendingCount = 0
+        end
+    end
+end
+preview.step = step
+preview.hasBoundedWork = hasWork
+preview.wake = function()
+    wakeUpdate()
+end
+preview.requestRender = requestRender
 preview.takeRender = function()
-    if not previewRenderPending then
+    if not renderPending then
         return false
     end
-    previewRenderPending = false
+    renderPending = false
     return true
 end
 preview.settle = function(otherBoundedWork)
-    if otherBoundedWork == true or previewHasDeferredWork() then
-        wakePreviewWork()
+    panel.setNeedsFrameTick(otherBoundedWork == true)
+    if otherBoundedWork == true or renderPending or hasWork() then
+        wakeUpdate()
+    elseif retryAtMs > 0 then
+        setUpdateInterval(math.min(IDLE_POLL_MS, math.max(ACTIVE_POLL_MS, retryAtMs - clockMs)))
     else
-        panel.setNeedsFrameTick(false)
-        setPreviewUpdateInterval(if previewRenderPending then PREVIEW_ACTIVE_POLL_MS else PREVIEW_RETRY_POLL_MS)
+        setUpdateInterval(IDLE_POLL_MS)
     end
 end
 preview.debugSnapshot = function(key)
     local entries = 0
     local paths = 0
-    for _ in pairs(previewCache.entries) do
-        entries += 1
-    end
-    for _ in pairs(previewPaths) do
-        paths += 1
-    end
-    local entry = previewCache.entries[tostring(key or "")]
+    for _ in pairs(previewRecords) do entries += 1 end
+    for _ in pairs(previewPaths) do paths += 1 end
+    local record = previewRecords[tostring(key or "")]
     return {
-        initialized = previewCacheInitialized,
-        ready = previewCacheReady,
-        initialization_phase = if type(previewInitialization) == "table"
-            then tostring(previewInitialization.phase or "")
-            else "nil",
-        initialization_requested = previewInitializationRequested,
-        queue_depth = #previewQueue,
-        active = previewActive,
-        manifest_dirty = previewManifestDirty,
-        render_pending = previewRenderPending,
+        initialized = storageInitialized,
+        ready = storageReady and backendAvailable(),
+        initialization_phase = if storageInitialized then "nil" else "storage",
+        initialization_requested = not storageInitialized and currentPlan ~= nil,
+        queue_depth = if pendingPlan ~= nil then 1 else 0,
+        active = if activeOperation ~= nil then 1 else 0,
+        manifest_dirty = false,
+        render_pending = renderPending,
         is_open = isOpen,
         active_page = activePage,
         active_subpage = activeSubpage,
         entries = entries,
         paths = paths,
-        key_last_used = if type(entry) == "table" then tonumber(entry.last_used) else nil,
-        clock = previewClockSeconds,
-        update_interval = previewUpdateInterval,
-        scope = previewScope,
-        sweep_index = if type(previewSweep) == "table" then previewSweep.index else 0,
-        sweep_limit = if type(previewSweep) == "table" then previewSweep.limit else 0,
+        key_last_used = nil,
+        clock = math.floor(clockMs / 1000),
+        update_interval = updateInterval,
+        scope = scopeName,
+        sweep_index = 0,
+        sweep_limit = if type(currentPlan) == "table" then #currentPlan.items else 0,
+        pending_count = pendingCount,
+        retry_count = retryCount,
+        backend_available = backendAvailable(),
+        last_error = lastError,
+        record_state = if type(record) == "table" then record.state else "",
         drag_tokens_dirty = dragTokensDirty,
     }
 end
 preview.initializeScheduler = function()
-    -- PluginPanel's periodic timer is opt-in and fixed at one second. The
-    -- runtime interval below then throttles those idle retry checks to 5 s.
     panel.setWantsSecondTicks(true)
-    setPreviewUpdateInterval(PREVIEW_RETRY_POLL_MS)
+    setUpdateInterval(IDLE_POLL_MS)
 end
-preview.cancel = function()
-    resetPreviewQueue(previewScope)
+preview.setBackendStatus = function(nextStatus)
+    local wasAvailable = backendAvailable()
+    local previousBinary = safeBinary(backendStatus)
+    backendStatus = nextStatus
+    local available = backendAvailable()
+    local changed = wasAvailable ~= available or previousBinary ~= safeBinary(backendStatus)
+    if changed and activeOperation ~= nil then
+        activeOperation.cancelled = true
+        cancelRequested = true
+    end
+    if available and type(currentPlan) == "table" and currentPlan.enabled and #currentPlan.items > 0 then
+        pendingPlan = currentPlan
+        retryAtMs = 0
+    end
+    if changed then
+        wakeUpdate()
+    end
+    return changed
 end
+preview.backendStatusKey = BACKEND_STATUS_KEY
+preview.cancel = cancel
 preview.close = function()
-    resetPreviewQueue("")
-    setPreviewUpdateInterval(PREVIEW_RETRY_POLL_MS)
+    cancel()
+    if activeOperation == nil then
+        setUpdateInterval(IDLE_POLL_MS)
+    end
 end
 end
 
@@ -1581,9 +1364,16 @@ local function paletteInventory()
     return root, values
 end
 
+local paletteEntryIndexes = {}
+
 local function paletteNames(source)
     local _root, inventory = paletteInventory()
     local values = type(inventory[source]) == "table" and inventory[source] or {}
+    local cacheKey = "names\0" .. tostring(source or "")
+    local cached = paletteEntryIndexes[cacheKey]
+    if type(cached) == "table" and cached.source == values then
+        return cached.names
+    end
     local names = {}
     for _, entry in ipairs(values) do
         local name = if type(entry) == "table" then tostring(entry.name or "") else tostring(entry or "")
@@ -1591,10 +1381,9 @@ local function paletteNames(source)
             table.insert(names, name)
         end
     end
+    paletteEntryIndexes[cacheKey] = { source = values, names = names }
     return names
 end
-
-local paletteEntryIndexes = {}
 
 local function paletteInventoryEntry(source, selection)
     local _root, inventory = paletteInventory()
@@ -2393,12 +2182,15 @@ local function beginPairingEditor(kind, pairing)
 end
 
 local function closePairingEditor()
+    local hadEditorState = pairingEditorOpen == true or editingPairingId ~= ""
     pairingEditorOpen = false
     editingPairingId = ""
     pendingResetPairingId = ""
     pairingStillPickerPage = 1
     pairingManualStillOpen = false
-    resetEntryDraft()
+    if hadEditorState then
+        resetEntryDraft()
+    end
 end
 
 local function preferredPairingForLibraryEntry(existing, candidate)
@@ -2437,6 +2229,13 @@ local function indexedLibraryPairings()
             and pairings == libraryPairingCache.source
         else pairings == libraryPairingCache.source
     if unchanged then
+        return libraryPairingCache.index
+    end
+
+    -- Configuration reconciliation already builds this index incrementally on
+    -- frame ticks. Keep serving the last complete snapshot until that atomic
+    -- replacement commits instead of walking every pairing during a render.
+    if dragTokensDirty then
         return libraryPairingCache.index
     end
 
@@ -4376,7 +4175,7 @@ function panelUi.mediumSettingsSection(kind)
         local motionStatus = motionBgsData()
         local helperPath = tostring(type(motionStatus) == "table" and motionStatus.binary_path or "")
         if helperPath == "" then
-            helperPath = tostring(configuration.motionbgs_binary_path or "")
+            helperPath = tostring(configuration.backend_binary_path or "")
         end
         addPath(
             "terminal-2",
@@ -4943,7 +4742,11 @@ local function pairingEditor(kind)
         end
     end
     if entryThemeSelectionDraft ~= "" and not selectionFound then
-        table.insert(selectionNames, 1, entryThemeSelectionDraft)
+        local namesWithCurrent = { entryThemeSelectionDraft }
+        for _, name in ipairs(selectionNames) do
+            table.insert(namesWithCurrent, name)
+        end
+        selectionNames = namesWithCurrent
     end
 
     local children = {
@@ -6211,7 +6014,6 @@ local function playlistsSection(outputOverride)
                     playlistNameDraft = ""
                     playlistIntervalDraft = ""
                     playlistEntryPage = 1
-                    resetEntryDraft()
                     scheduleEditorOpen = false
                     resetScheduleDraft(selectedPlaylistId)
                     render()
@@ -6926,7 +6728,6 @@ function panelPages.selectPlaylistPage(playlistId)
     playlistNameDraft = ""
     playlistIntervalDraft = ""
     playlistEntryPage = 1
-    resetEntryDraft()
     closePairingEditor()
     scheduleEditorOpen = false
     resetScheduleDraft(playlistId)
@@ -7837,8 +7638,8 @@ end
 
 function onClose()
     isOpen = false
-    -- Let the at-most-four in-flight atomic fetches finish, but do not keep
-    -- draining thumbnails for rows the user can no longer see.
+    -- Removing the current RPC guard is deferred to update(); the async
+    -- callback itself only queues its completion for bounded cleanup there.
     preview.close()
     panel.close()
 end
@@ -7855,6 +7656,10 @@ function update()
     if isOpen and preview.retryDue() then
         preview.retry()
     end
+    local _, redraw = preview.step()
+    if redraw then
+        preview.requestRender()
+    end
     if preview.takeRender() then
         panelPages.renderNow()
     end
@@ -7862,16 +7667,11 @@ function update()
 end
 
 function onFrameTick(_deltaMs)
-    -- Frame callbacks may advance one bounded state-machine step. Full UI tree
-    -- construction belongs exclusively to update(), whose requests coalesce.
+    -- Frame callbacks are reserved for the bounded drag-token reconciler.
+    -- Provider RPC completion and every full UI render run only from update().
     preview.refreshClock()
     if isOpen and dragTokensDirty then
         if stepDragTokenReconciliation() then
-            render()
-        end
-    else
-        local _, redraw = preview.step()
-        if redraw then
             render()
         end
     end
@@ -7956,6 +7756,7 @@ refreshPanelState = function()
 end
 
 reloadSharedState = function()
+    preview.setBackendStatus(noctalia.state.get(preview.backendStatusKey))
     lifecycleStatus = noctalia.state.get(STATUS_KEY)
     configState = noctalia.state.get(CONFIG_STATE_KEY)
     runtimeState = noctalia.state.get(RUNTIME_STATE_KEY)
@@ -8012,6 +7813,11 @@ end)
 noctalia.state.watch(RENDERER_STATUS_KEY, function(nextState)
     rendererState = nextState
     refreshPanelState()
+end)
+noctalia.state.watch(preview.backendStatusKey, function(nextState)
+    if preview.setBackendStatus(nextState) and isOpen then
+        render()
+    end
 end)
 noctalia.state.watch(MOTIONBGS_STATUS_KEY, function(nextState)
     motionBgsState = nextState

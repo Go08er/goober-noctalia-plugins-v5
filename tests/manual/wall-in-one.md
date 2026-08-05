@@ -1,4 +1,4 @@
-# Wall-in-One 0.7 manual test
+# Wall-in-One 0.8 manual test
 
 Use the VM test or a genuinely separate nested Wayland/Noctalia session. A
 fresh profile launched into the active desktop is not isolation: Noctalia's CLI
@@ -26,19 +26,22 @@ slideshow/automation on every controlled output. Plugin API 17 has no public
 pause or coordination command for that separate timer; leaving it enabled
 creates a second wallpaper writer and invalidates transition results.
 Disable every foreign wallpaper plugin/application on outputs used for
-**internal** backend tests as well; `auto` intentionally prefers a detected
-external owner.
+renderer tests as well. Wall-in-One intentionally has no extension-to-extension
+ownership protocol and cannot coordinate another wallpaper writer.
 
 ## Install and customization
 
 1. Import the repository through Noctalia's Git source flow and enable
-   `goober/wall-in-one` from its catalog entry. Confirm all five services
-   (`coordinator`, `renderer`, the thin `motionbgs` bridge, `palettes`, and
-   `wallhaven`) start and the hub, shortcut, and
+   `goober/wall-in-one` from its catalog entry. Confirm all six services
+   (`coordinator`, the generic `backend` bridge, `renderer`, the thin
+   `motionbgs` bridge, `palettes`, and `wallhaven`) start and the hub, shortcut, and
    `goober/wall-in-one:wall-in-one` widget load without undeclared-setting,
    glyph, or Luau errors. Do this once without installing the external
-   `wall-in-one-motionbgs` program: only the MotionBGS page should be degraded,
-   with **Open MotionBGS** and **Get helper** still available.
+   `wall-in-one-backend` program: fresh local-library and external palette
+   inventory, provider previews, and the integrated Wallhaven/MotionBGS pages
+   should be degraded, while the panel, configured playlists, adaptive palette
+   previews, renderer controls, host wallpaper/palette application, and
+   direct-site links remain available.
 2. Add two widget placements. Give them different glyphs, labels, label
    visibility, and colors. Open Noctalia's native searchable icon selector from
    each placement, choose different icons, reload, and confirm each placement
@@ -49,37 +52,20 @@ external owner.
 4. Add the Control Center shortcut. Left and right mappings must work; the
    shortcut must not synthesize a middle-click callback.
 
-## Backend policy and ownership
+## Owned renderer policy
 
-Test W Engine and mpvpaper independently with `auto`, `external`, and
-`internal` backend selection.
-
-| Selection | External plugin enabled | Expected effective backend |
-| --- | --- | --- |
-| `auto` | Yes | `external`; Wall-in-One routes only documented panel/service controls |
-| `auto` | No, command installed | `internal`; apply controls are enabled |
-| `external` | Yes | `external` |
-| `external` | No | `none`; fail closed |
-| `internal` | No, command installed | `internal` |
-| `internal` | Yes | conflict, `none`; fail closed without launching a second renderer |
-
-For each provider, disable its `Use …` switch and confirm both external and
-internal actions become unavailable. Re-enabling it must require a fresh
-provider probe. Exact-token parsing must reject `enabled-ish`, `disabled`, and
-`enabled incompatible` plugin-list fixtures.
-
-While an internal child is running, make the provider-ownership probe fail.
-`probe_ok` must become false, both effective backends and apply capabilities
-must fail closed, and the exact owned child must stop while an unrelated
-sentinel remains alive. No internal child may restart until a successful probe
-establishes that no external owner exists.
+Wall-in-One starts `mpvpaper` and `linux-wallpaperengine` directly. It does not
+detect, call, or exchange state with another wallpaper extension. Disable each
+medium for one display and confirm its applies become unavailable there without
+changing another display. Remove each renderer command in turn and confirm only
+that medium degrades with a bounded diagnostic.
 
 Disconnect an output, then send an action carrying that stale explicit output
 name. The action must fail for the missing output; it must not silently retarget
 the currently focused display.
 
-In internal mode, apply one Workshop item and one video on each available
-output. Check the child command lines:
+Apply one Workshop item and one video on each available output. Check the child
+command lines:
 
 - `linux-wallpaperengine` receives the validated discovered project directory
   (or numeric Workshop-ID fallback), selected scaling/clamp, bounded
@@ -95,10 +81,10 @@ output. Check the child command lines:
   fail closed;
 - pause, resume, toggle, replacement, and stop affect only the exact PID owned
   for that output;
-- disconnecting an owned output, changing its effective backend, disabling the
+- disconnecting an owned output, changing its engine settings, disabling the
   plugin, reloading its renderer service, or exiting Noctalia stops every owned
   child and removes that instance's FIFO/socket/log files;
-- an unrelated long-running process and an external provider process keep the
+- an unrelated long-running process and a foreign renderer process keep the
   same PID throughout.
 
 Run mpvpaper once with an empty disposable `XDG_CONFIG_HOME`, then repeat with
@@ -118,7 +104,7 @@ output from video to Wallpaper Engine and back: its old exact PID must exit
 before the replacement is registered, while the other output and every foreign
 process keep their PIDs. Do not accept same-output overlap as a hot-swap. Force
 the replacement to fail and confirm the break-before-make path does not pretend
-the old child resumed. An independently started foreign provider of the other
+the old child resumed. An independently started foreign renderer of the other
 type remains outside Wall-in-One's same-output exclusion guarantee.
 Also inspect the owned child's descendant process tree during each replacement;
 no helper spawned by that owned renderer may survive after its parent is
@@ -137,46 +123,28 @@ not republish unchanged status unless the heartbeat acknowledges a pending FIFO
 write or reports recovery. Stop must forget the child; resume must work only
 for a still-owned paused child, not silently relaunch a stopped source.
 
-## Provider discovery and cooperative capture
+## Capture ownership
 
-With W Engine and mpvpaper fixtures enabled, open their panels and exercise
-their documented service controls. The optional official Wallhaven panel may
-also appear, but Wall-in-One's own Wallhaven browser must not depend on it. W
-Engine capability/current state must come only from the versioned cooperative
-adapter. Suppress its response, probe again, and confirm the lease expires
-after the grace period.
+The optional official Wallhaven plugin may also be installed, but Wall-in-One's
+browser and capture paths must not depend on it. No request is sent to W Engine
+or another wallpaper extension.
 
-For a cooperative rendered capture, require a unique
-`pluginDataDir()/staging/*.png` request path. Reject a stale request ID, an
-alternate returned path, an empty file, or a late response. Accept only the
-exact requested PNG after decode validation, atomically install it in the
-capture destination, drain queued work, and remove staging files on every
-terminal path.
-
-Queue requests A, B, and C for the same output while A is still running. Only
-the newest waiting request, C, may run after A; B must receive a replaced
-result and any staging file it owned must be removed. Repeat with cooperative
-adapter requests and confirm the queued scene ID is likewise latest-wins.
-Disconnect the output or change its provider/current-scene observation before
-a capture completes: the durable export may finish, but it must not become the
-output's pair or start a stale renderer.
-
-Without an adapter, a configured numeric Workshop item may use a validated
-local source frame or preview. It must be described as a source/preview
-fallback, not as proof of the currently rendered scene. The coordinator must
-not inspect process arguments or another plugin's private files.
-
-In internal mode, test the separate native screenshot route with both an idle
-output and an already running Workshop item. The exact command must include the
+Test the native screenshot route with both an idle output and an already
+running Workshop item. The exact command must include the
 numeric item identity in status plus its validated absolute project directory
 as `--bg` (or the numeric-ID fallback), output, configured `background` or
 `bottom` layer, validated render options, a unique private
 `staging/capture-*.png` path, `--screenshot`, and a one-to-five-frame internal
-delay. Preserve the existing setting default 15 and range 1–120: a cooperative
-adapter receives the full configured value, while the internal command clamps
-it to linux-wallpaperengine's upstream maximum of five. Confirm one owned child
-at a time: capture may sequentially replace Wall-in-One's live child, but must
-never overlap it or touch a foreign provider process.
+delay. Preserve the setting default 15 and range 1–120 while clamping the
+`linux-wallpaperengine` command to its upstream maximum of five. Confirm one
+owned child at a time: capture may sequentially replace Wall-in-One's live
+child, but must never overlap it or touch a foreign renderer process.
+
+Queue requests A, B, and C for the same output while A is still running. Only
+the newest waiting request, C, may run after A; B must receive a replaced result
+and any staging file it owned must be removed. Disconnect the output or change
+the current owned scene before a capture completes: the durable export may
+finish, but it must not become the output's pair or start a stale renderer.
 
 While a different Workshop or mpvpaper child is active, apply a new Workshop
 whose native still is not cached. Wall-in-One should extract the new project's
@@ -187,20 +155,20 @@ the previous child remains alive.
 Accept a result only after the private PNG is non-empty and stable, validate it
 through the normal atomic export path, and record
 `linux-wallpaperengine-fbo-v1`. A successful capture of a previously running
-item should restore that item only if the output, ID, backend generation, and
-provider policy remain current. Force empty, partial, late, timed-out, and
+item should restore that item only if the output, ID, renderer generation, and
+engine policy remain current. Force empty, partial, late, timed-out, and
 cancelled results; each must clean staging and use only a valid source/preview
 fallback. It must not claim that fallback is a rendered screenshot.
 
 ## Pairing, colors, and capture
 
-1. Leave `capture_directory` empty and confirm the image root resolves to
-   Noctalia's configured wallpaper directory (with `pluginDataDir()/captures`
-   only as an API fallback). Manual exports go directly to that root; default-on
-   automatic video/Workshop stills go to
-   `Wall-in-One/Automatic Stills` with adjacent ownership sidecars. Then choose
-   an absolute directory and confirm subsequent destinations follow it. A
-   relative path, dot-segment path, or `/` must fail closed.
+1. Leave `capture_directory` empty and confirm Wall-in-One performs no image
+   scan, managed-directory creation, automatic capture, export, or Wallhaven
+   download. It must not borrow Noctalia's wallpaper directory. Choose an
+   existing absolute directory and confirm manual exports go directly to it,
+   while default-on automatic video/Workshop stills go to
+   `Wall-in-One/Automatic Stills` with adjacent ownership sidecars. A relative
+   path, dot-segment path, nonexistent directory, or `/` must fail closed.
 2. Export the public `wallpaper-get <output>` backing while all live-provider
    integrations are disabled. It should copy the validated image without
    pairing it back or accessing provider-private state.
@@ -287,9 +255,14 @@ fallback. It must not claim that fallback is a rendered screenshot.
    With no configured leader, the sorted due-output batch must elect one writer
    instead of making every output race the global palette.
 13. Refresh palette inventory twice inside its six-hour TTL. The second refresh
-   should rescan local custom palettes without another community-network
-   request. Corrupt the primary cache and confirm the bounded last-known-good
-   backup is surfaced as degraded, not silently discarded.
+   should run one bounded `palettes.inventory` process, rescan local custom
+   palettes, and avoid another community-network request. Corrupt the primary
+   cache and confirm the bounded last-known-good backup is surfaced as degraded,
+   not silently discarded. The Luau service must not parse the catalog or walk
+   the custom directory itself. Repeat with a Home Manager-style symlinked
+   palette directory and JSON file (including a root-owned Nix-store target):
+   read-only inventory must succeed, while FIFO/non-regular targets and symlinks
+   at transport, cache, download, or media write boundaries must still fail.
 14. Test both lock-screen configurations: a lock screen following the persisted
    wallpaper follows the pair; an explicit lock-screen image remains an
    external override and is never rewritten by this plugin.
@@ -397,9 +370,11 @@ respect the provider's request interval.
    IDs, unsupported CDN hosts, mismatched MIME/extensions, and stale command
    nonces. A second operation while one is active must report busy rather than
    silently replacing it; clear may invalidate the result set.
-4. Download a selected PNG and JPEG. The coordinator, not the panel request,
-   must derive `Wall-in-One/Wallhaven/wallhaven-<id>.<ext>` and the exact
-   nonce-bound staging path. Confirm the 64 MiB ceiling, advertised-size and
+4. Download a selected PNG and JPEG. The bridge must derive, and the backend
+   must independently revalidate,
+   `Wall-in-One/Wallhaven/wallhaven-<id>.<ext>` and the exact nonce-bound staging
+   path rather than accepting panel-supplied authority. Confirm the 64 MiB
+   ceiling, advertised-size and
    image-signature validation, no-overwrite behavior, atomic promotion, and an
    adjacent `.wallhaven.json` record containing provider, ID, source page,
    bytes, and timestamp.
@@ -408,39 +383,51 @@ respect the provider's request interval.
    user-owned/non-deletable. A valid managed item may be removed only through a
    fresh opaque library ID; deletion must remove its exact playlist references
    and any owned automatic still while preserving selected user stills.
-6. Disable or break the native API service and test without the optional
+6. Disable or break the backend Wallhaven capability and test without the optional
    official Wallhaven plugin. **Open wallhaven.cc** must still launch
    `https://wallhaven.cc/` through the desktop URL opener. If no opener exists,
    report that limitation visibly; API, parser, authentication, or panel
    availability must never remove the direct-site fallback.
 
-## MotionBGS external helper
+## External backend and provider work
 
 MotionBGS exposes public pages rather than a stable API. Its HTTP, parser,
-cache, and download work now belongs to the separately installed one-shot
-Python 3.11+ program, not Noctalia's Luau service. Begin with the offline helper
-and VM fixtures; live-site behavior is exploratory.
+cache, and download work belongs to the separately installed one-shot Python
+3.11+ backend, not Noctalia's Luau service. The same executable owns the generic
+library scan, external palette inventory, provider-preview cache maintenance,
+and Wallhaven transport/result/download work. Begin with offline backend and VM
+fixtures; live-site behavior is exploratory.
 
-1. With the helper absent, confirm only MotionBGS search/download is degraded.
-   The page must explain the missing binary and retain working **Open
-   MotionBGS** and **Get helper** buttons. Wallhaven, local libraries,
-   playlists, palettes, Workshop discovery, and renderer controls must remain
-   unchanged.
-2. Obtain `motionbgs-helper/wall-in-one-motionbgs` through the **Get helper**
-   link. First install it as the exact executable name
-   `wall-in-one-motionbgs` on the isolated session's `PATH`, mark it executable,
-   leave the advanced path setting empty, and request a reprobe. Then remove it
-   from that test PATH, select its absolute executable with **MotionBGS helper
-   program**, and reprobe again. Relative paths, a directory, a renamed
-   arbitrary command, malformed probe output, or incompatible capabilities must
-   fail closed for MotionBGS only.
-3. Capture one successful `WIO-MBGS-PROBE1` schema-1 probe and one
-   `WIO-MBGS-RPC1` schema-1 operation. Confirm each action starts a fresh process
-   and exits; requests never exceed 8 KiB, responses never exceed 128 KiB, and
-   transport files are private regular files beneath
-   `pluginDataDir()/motionbgs-bridge-v1/cache/rpc`. Cache data must stay beneath
-   `pluginDataDir()/motionbgs-bridge-v1/cache`; the retired in-process cache
-   location must not be restored or reused.
+1. With the backend absent, confirm fresh library/external-palette inventory,
+   provider previews, and integrated Wallhaven/MotionBGS search/download are
+   degraded. The pages must explain the missing binary and retain working
+   direct-provider and **Get backend** actions. Last complete inventories must
+   not be replaced by partial results; configured playlists, adaptive palette
+   preview, host wallpaper/palette application, and renderer controls remain
+   usable.
+2. Obtain `wall-in-one-backend/wall-in-one-backend` through **Get backend**.
+   Verify `wall-in-one-backend.sha256` before running `chmod` or `install`.
+   First expose the exact executable name `wall-in-one-backend` on the isolated
+   session's PATH, leave the advanced path setting empty, and reprobe. Then
+   remove it from that test PATH, select its absolute executable with
+   **Wall-in-One backend program**, and reprobe. Relative paths, a directory, a
+   renamed arbitrary command, malformed probe output, or incompatible
+   capabilities must fail closed. The generic probe must advertise
+   `library.scan`, `palettes.inventory`, `preview.sync`, and all four
+   `wallhaven.*` actions. Setting only the invisible retired
+   `motionbgs_binary_path` key must not affect discovery.
+3. Capture successful `WIO-BACKEND-PROBE1`/`WIO-BACKEND-RPC1` schema-1 library,
+   palette, preview, and Wallhaven operations. Confirm one-shot exit, the 64 KiB
+   request limit, the 128 KiB
+   manifest/page limits, private files beneath
+   `pluginDataDir()/backend-bridge-v1/rpc`, fixed 12-record pages, and atomic
+   inventory publication after bounded Luau validation. Confirm the stable
+   `palettes-cache.json`/`.bak`, `provider-previews/v1`, and
+   `wallhaven-bridge-v2/rpc` locations and cancellation cleanup. Then capture one
+   successful `WIO-MBGS-PROBE1`/`WIO-MBGS-RPC1` compatibility operation.
+   MotionBGS requests remain at most 8 KiB and responses at most 128 KiB under
+   `pluginDataDir()/motionbgs-bridge-v1/cache/rpc`; metadata cache data remains
+   in its parent directory.
 4. Search a fixture containing same-origin cards, thumbnails, and numeric media
    IDs. Result count must obey the configured 1–48 bound. Open details
    containing same-origin HD/4K `/dl/<quality>/<id>/` links, then repeat the
@@ -525,16 +512,17 @@ confirm their known staging paths are removed without touching unrelated
 files. Repeat with an active generic capture; its tracked staging path must be
 removed on exit, and neither it nor its `.part` file may survive.
 
-Finally reload, disable, and uninstall Wall-in-One with an internal child, an
-external provider child, and an unrelated sentinel running. Only the plugin's
-exact owned child may stop. The persisted still and Noctalia wallpaper surface
-must remain intact.
+Finally reload, disable, and uninstall Wall-in-One with an owned child and an
+unrelated foreign-renderer sentinel running. Only the plugin's exact owned
+child may stop. The persisted still and Noctalia wallpaper surface must remain
+intact.
 
 The offline headless equivalent is
 [`tests/vm/wall-in-one.nix`](../vm/wall-in-one.nix). Run it with
 `nix build -L path:.#vm-test-wall-in-one`. The current schema-5/runtime-6,
-palette, native-Wallhaven, external-MotionBGS bridge/helper, and named-playlist
-tree are covered by that full integration VM. Repeat it after any code or
+palette, unified backend library/palette/preview/Wallhaven bridge, MotionBGS
+compatibility bridge, and named-playlist tree are covered by that full
+integration VM. Repeat it after any code or
 harness change before using this checklist on a disposable live profile; the VM
 does not certify real GPU, audio, lock-screen, compositor-layer, or shell-theme
 behavior. In particular, mpvpaper is not installed on the current host, so this

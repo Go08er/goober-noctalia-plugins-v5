@@ -3,7 +3,7 @@
 --
 -- Noctalia loads this entry in an isolated ScriptRuntime. Network access,
 -- HTML parsing, provider caching, and media installation therefore live in
--- the one-shot wall-in-one-motionbgs program. This bridge only validates
+-- the one-shot wall-in-one-backend program. This bridge only validates
 -- settings, serializes bounded requests, validates bounded normalized results,
 -- and preserves the plugin's versioned state protocol.
 
@@ -14,8 +14,8 @@ local COMMAND_ACK_KEY = "wall_in_one_motionbgs_command_ack_v1"
 local STATUS_KEY = "wall_in_one_motionbgs_status_v1"
 local RESULTS_KEY = "wall_in_one_motionbgs_results_v1"
 local BASE_URL = "https://motionbgs.com"
-local INSTALL_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/motionbgs-helper"
-local BINARY_NAME = "wall-in-one-motionbgs"
+local INSTALL_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/wall-in-one-backend"
+local BINARY_NAME = "wall-in-one-backend"
 local PROBE_PROTOCOL = "WIO-MBGS-PROBE1"
 local RPC_PROTOCOL = "WIO-MBGS-RPC1"
 local MAX_NONCE = 9007199254740991
@@ -557,7 +557,7 @@ local function initializeStorage()
 end
 
 local function configuredBinary()
-    local configured = settingString("motionbgs_binary_path", "")
+    local configured = settingString("backend_binary_path", "")
     if configured ~= "" then
         local expanded = noctalia.expandPath(configured)
         local info = validAbsolutePath(expanded) and noctalia.fileInfo(expanded) or nil
@@ -569,7 +569,7 @@ local function configuredBinary()
     if noctalia.commandExists(BINARY_NAME) then
         return BINARY_NAME, "path", ""
     end
-    return "", "path", "Install wall-in-one-motionbgs or select its absolute path"
+    return "", "path", "Install wall-in-one-backend or select its absolute path"
 end
 
 local function cleanupOperationFiles(operation)

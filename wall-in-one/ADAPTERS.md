@@ -1,11 +1,11 @@
 # Wall-in-One provider and renderer architecture
 
-Wall-in-One `0.7.1` has four integration boundaries: Noctalia's public wallpaper
+Wall-in-One `0.8.0` has four integration boundaries: Noctalia's public wallpaper
 and theme APIs, provider services shipped by Wall-in-One, the separately
-installed MotionBGS helper program, and dynamic wallpaper processes started and
+installed one-shot backend program, and dynamic wallpaper processes started and
 supervised by Wall-in-One. It does not discover, open, signal, or exchange state
-with separate wallpaper extensions. The optional MotionBGS program is a
-one-shot provider adapter, not a renderer or long-lived plugin service.
+with separate wallpaper extensions. The external backend performs bounded bulk
+computation; it is not a renderer or long-lived plugin service.
 
 ## Routed panel
 
@@ -47,9 +47,10 @@ queues representative preparation through the coordinator rather than doing
 capture or palette extraction in a panel callback.
 
 Shop routes render fixed 12-card local pages even when a provider returns 36–48
-items. Preview URL/path validation is memoized for the current result generation
-and a one-item-at-a-time frame scheduler populates the private cache. Frame
-callbacks never construct a complete panel tree. Result cards own their direct
+items. Preview identity validation is memoized for the current result generation
+and one bounded `preview.sync` request advances from the normal update path;
+frames handle only bounded drag work and never construct a complete panel tree.
+Result cards own their direct
 download/quality controls and expose installed, queued, and active state; no
 duplicated selected-item hero is rendered above the grid.
 
@@ -68,7 +69,10 @@ referenced by revision:
 The panel accepts a domain snapshot only when its service instance and revision
 match the lifecycle object. Commands carry monotonically increasing nonces and
 are never replayed automatically. The renderer, palette, Wallhaven, and
-MotionBGS bridge use their own bounded versioned state keys.
+MotionBGS bridge use their own bounded versioned state keys. The generic
+`backend` bridge publishes a separate status/result pair for asynchronous
+library scans; the palette, preview, and Wallhaven consumers use the same exact
+backend executable through their own bounded state/transport contracts.
 
 The lifecycle snapshot's bounded `captures` map is also presentation state for
 the item editor. The dedicated `pairing-preview` slot reports preparation in
@@ -226,21 +230,80 @@ video may also remove only its managed automatic still. Missing files, root
 changes, and Workshop unsubscribe events are observations, not deletion
 instructions.
 
+## External computation backend
+
+Noctalia applies a CPU budget to every Luau callback. Bulk filesystem walks,
+metadata parsing, sorting, and inventory paging are therefore delegated to the
+separately installed Python 3.11+ executable `wall-in-one-backend`. The
+`backend` service contains only fixed-command discovery, bounded transport,
+nonce/cancellation handling, incremental result validation, and state
+publication.
+
+The service accepts the exact executable name `wall-in-one-backend` from PATH,
+or one user-selected absolute executable through `backend_binary_path`. It does
+not accept a shell command. The retired `motionbgs_binary_path` manifest key is
+invisible and inert; it exists only because API 17 cannot delete an old host
+setting override.
+
+The bundled `scripts/backend-provider` launcher probes
+`WIO-BACKEND-PROBE1` schema 1 for the exact capability set `library.scan`,
+`palettes.inventory`, `preview.sync`, `wallhaven.search`,
+`wallhaven.detail`, `wallhaven.download`, and `wallhaven.clear`. Requests are
+at most 64 KiB; every action has an exact schema, a revocable guard, a bounded
+deadline, and current-user-owned direct-child transport files. Responses and
+inventory pages are at most 128 KiB. The Luau bridges validate bounded batches
+and publish only complete nonce-matched results.
+
+Generic interface 1 moves user/managed image and video inventory, sidecar
+ownership, Workshop metadata, representative lookup, sorting/paging, external
+custom/community palette inventory, provider-preview cache maintenance, and
+Wallhaven network/result/download work. Stable storage remains
+`pluginDataDir()/backend-bridge-v1/rpc` for library transport,
+`pluginDataDir()/palettes-cache.json` plus `.bak` for the palette catalog,
+`pluginDataDir()/provider-previews/v1` for preview files and its LRU manifest,
+and `pluginDataDir()/wallhaven-bridge-v2/rpc` for Wallhaven transport.
+
+Custom palette discovery has one narrow read-only exception to the normal
+no-symlink boundary. The configured palette directory and individual JSON files
+may resolve through NixOS/Home Manager symlinks, including root-owned Nix-store
+targets. The backend holds a stable directory descriptor, opens each exact name
+relative to it, validates regular-file identity and bounded size with `fstat`
+before and after reading, and reads only from the opened descriptor. Transport,
+cache, response, marker, download, and media write boundaries still reject
+symlinks and foreign ownership.
+
+Noctalia wallpaper/palette calls, adaptive `noctalia theme` palette preview and
+source hashing, coordinator IPC, renderer child lifecycle, and exact-PID
+ownership remain host-coupled. Schedule resolution stays local because it is a
+small time-sensitive calculation; config normalization and managed deletion
+remain coupled to coordinated persistence/commit checks. A one-shot process for
+those paths would add serialization or race cost without removing a measured
+callback hotspot.
+
+If the backend is absent or incompatible, fresh library and external palette
+inventory, provider preview refresh, and integrated Wallhaven/MotionBGS work
+are unavailable; the last complete library and palette inventories remain
+intact. Configured playlists, wallpaper/palette application, adaptive palette
+preview, renderer controls, and direct provider links are not disabled.
+
 ## Wallhaven shop service
 
-The `wallhaven` service owns the complete Wallhaven integration. It uses only
-documented `https://wallhaven.cc/api/v1` routes and validated Wallhaven
-image/thumbnail hosts. Supported commands are `search`, `detail`, `download`,
-and `clear` on the schema-1 command/status/result keys.
+The `wallhaven` service is a thin host bridge over the backend's complete
+Wallhaven integration. The Python action uses only documented
+`https://wallhaven.cc/api/v1` routes and validated Wallhaven image/thumbnail
+hosts. The Luau service retains the schema-1 command/status/result keys and
+incrementally validates normalized `search`, `detail`, `download`, and `clear`
+responses; it performs no provider network I/O or image parsing.
 
 Search accepts Wallhaven query syntax, category and purity masks, sort/order,
 top-list range, minimum or exact resolution, ratios, color, and page. Stable
-random pagination retains the returned seed. Responses are limited to 512 KiB
+random pagination retains the returned seed. Responses are limited to 128 KiB
 and 24 normalized results; starts are serialized by at least two seconds.
 Downloads are capped at 64 MiB, must match a current result and advertised
 JPG/PNG type, and atomically install both image and provenance without
-overwriting an existing pair. The optional API key is supplied only through a
-private header file. Public SFW browsing works without it.
+overwriting an existing pair. The optional API key crosses the process boundary
+only through a private mode-0600 handoff file and is then sent as an HTTP
+header. Public SFW browsing works without it.
 
 Status includes the current download's `active_id`. The panel intersects that
 identifier with managed-library `provider_id` records, so a card moves from
@@ -249,20 +312,19 @@ item again.
 
 ## MotionBGS process boundary
 
-MotionBGS has no stable public API. Version 0.7 therefore removes its network,
+MotionBGS has no stable public API. Version 0.7 removed its network,
 HTML parser, provider cache, and download implementation from Noctalia's Luau
 runtime. The `motionbgs` service is now a thin bridge: it has no `update()`
 callback, watches the existing schema-1 command key, validates settings and
 normalized results, serializes a bounded queue, and publishes the existing
 schema-1 acknowledgement/status/result state.
 
-The provider implementation is the separately installed one-shot Python 3.11+
-program `wall-in-one-motionbgs`, currently staged in the repository's top-level
-`motionbgs-helper/` directory. The bridge accepts only that fixed command name
-when Noctalia finds it on `PATH`, or a user-selected absolute executable path
-from the advanced `motionbgs_binary_path` setting. This prevents the setting
-from becoming an arbitrary shell-command surface. The program may later move
-to a dedicated repository without changing the process interface.
+Version 0.8 folds that implementation into the separately installed one-shot
+Python 3.11+ program `wall-in-one-backend`, staged in the repository's top-level
+`wall-in-one-backend/` directory. Both Luau bridges use the authoritative
+`backend_binary_path`/fixed PATH command; the provider bridge invokes
+`motionbgs-*` compatibility subcommands so its existing state protocol does not
+change.
 
 Bridge status publishes `active_slug`, `active_quality`, and a queue-bounded
 `queued_downloads` list. Exact slug/quality duplicates are rejected while
@@ -276,7 +338,7 @@ ambient Python path injection, creates private bounded stdout/stderr files, and
 applies an OS file-size limit before execution. A compatibility check runs:
 
 ```text
-wall-in-one-motionbgs probe --protocol 1
+wall-in-one-backend motionbgs-probe --protocol 1
 ```
 
 The exact probe record is `WIO-MBGS-PROBE1`, schema 1, and must advertise
@@ -325,9 +387,11 @@ A same-origin download redirect is accepted only when its final `/dl/...` or
 different ID, unexpected query, or unrelated same-origin route fails before a
 file can be installed.
 
-Missing, unreadable, or protocol-incompatible programs set a bounded degraded
-state for MotionBGS only. The rest of Wall-in-One continues normally, and the
-panel retains independent direct-site and helper-download links.
+Missing, unreadable, or protocol-incompatible programs set bounded degraded
+states for MotionBGS, Wallhaven, provider previews, and fresh library/external
+palette inventory. Host-coupled wallpaper, adaptive palette preview, playlist,
+and renderer actions continue normally, and the panel retains independent
+direct-site and backend-download links.
 
 The selector profile was independently implemented from the public site, with
 WaifuX revision `ff44ecba11227ff965074ad3320096fa5827781c` used only as a
@@ -337,15 +401,21 @@ not a license grant.
 
 ## Palette service
 
-The `palettes` service discovers bounded built-in, wallpaper-generator,
-community, and custom choices but never applies the active shell theme. The
-coordinator remains the only entry executor and applies a validated still,
-theme mode, palette selection, then owned dynamic renderer in that order.
+The `palettes` service keeps pinned built-in/wallpaper-generator choices and
+delegates bounded community/custom inventory work to the backend's
+`palettes.inventory` action. The backend scans custom JSON, fetches and shapes
+the community catalog, maintains its six-hour last-known-good cache, and emits
+bounded inventory pages. The Luau bridge incrementally validates those pages
+and never applies the active shell theme. The coordinator remains the only
+entry executor and applies a validated still, theme mode, palette selection,
+then owned dynamic renderer in that order.
 
 Adaptive preview uses
 `noctalia theme <image> --scheme <scheme> --both -o <file>` against a private
 bounded output path. A 16-entry memory cache includes path, size, mtime,
-SHA-256, and scheme. Community metadata uses a six-hour TTL and last-known-good
-cache; opening a panel route does not create a network poller. Noctalia has one
+SHA-256, and scheme. This adaptive preview and source hashing deliberately stay
+in Luau because they call Noctalia's host CLI; they are not part of
+`palettes.inventory`. Opening a panel route does not create a network poller.
+Noctalia has one
 global palette, so the configured display leader is the sole writer; without
 one, deterministic transition order decides the latest writer.

@@ -102,6 +102,7 @@
     "apply_callback": "A deferred wallpaper transition callback failed: {detail}",
     "apply_queue_full": "The bounded post-wallpaper transition queue is full; the live renderer was not started.",
     "audio_volume": "Wallpaper volume must be an integer from 0 to 100.",
+    "backend_unavailable": "Install wall-in-one-backend from the Wall-in-One repository or a published release, or select its absolute path with backend_binary_path. Last complete inventories remain visible; library and external palette refresh, provider previews, and integrated Wallhaven/MotionBGS operations degrade.",
     "backup": "Could not create the last-known-good backup.",
     "backing_query": "Could not read the current Noctalia backing wallpaper: {detail}",
     "backing_query_start": "Could not start the current-backing query.",
@@ -143,8 +144,8 @@
     "managed_sidecar_delete": "The wallpaper was removed, but its managed metadata sidecar could not be deleted.",
     "native_switch": "Static wallpaper switch failed: {detail}",
     "native_switch_start": "Could not start the Noctalia wallpaper command.",
-    "motionbgs_helper_open": "Could not open the MotionBGS helper download page: {detail}",
-    "motionbgs_helper_start": "Could not launch the desktop browser for the MotionBGS helper download page.",
+    "motionbgs_helper_open": "Could not open the Wall-in-One backend download page: {detail}",
+    "motionbgs_helper_start": "Could not launch the desktop browser for the Wall-in-One backend download page.",
     "motionbgs_open": "Could not open MotionBGS: {detail}",
     "motionbgs_action": "The MotionBGS browser received an unsupported request.",
     "motionbgs_start": "Could not launch the desktop browser for MotionBGS.",
@@ -352,7 +353,7 @@
       "automatic_stills": "Automatic stills",
       "image_defaults": "Defaults — automatic stills: {automatic} · color sync: {colors} · generator: {scheme}",
       "image_title": "Image settings and locations",
-      "motionbgs_helper": "MotionBGS helper program",
+      "motionbgs_helper": "Wall-in-One backend program",
       "motionbgs_library": "Managed MotionBGS library",
       "open_settings": "Edit these values in plugin settings",
       "video_defaults": "Defaults — MotionBGS download: {quality} · still frame: {second}s · automatic stills: {automatic} · color sync: {colors}",
@@ -376,8 +377,8 @@
       "download_hd": "Download HD",
       "empty": "Search or catalog-page results will appear here. No background crawling or bulk detail requests are performed.",
       "error": "MotionBGS browser: {error}",
-      "fallback": "Permanent fallback: https://motionbgs.com/ — use it whenever the external helper is unavailable or the site changes.",
-      "get_helper": "Get helper",
+      "fallback": "Permanent fallback: https://motionbgs.com/ — use it whenever the external backend is unavailable or the site changes.",
+      "get_helper": "Get backend",
       "genre_placeholder": "Genre/tag slug, e.g. nature or anime",
       "genre_presets": {
         "animal": "Animals",
@@ -400,11 +401,11 @@
       "hd_unpaged": "MotionBGS currently redirects HD page 2 into its unfiltered catalog, so Wall-in-One deliberately exposes only the trustworthy first HD page.",
       "helper_disabled": "MotionBGS browsing is disabled in plugin settings. Other Wall-in-One features and the direct site link remain available.",
       "helper_chip_disabled": "MotionBGS disabled",
-      "helper_chip_missing": "MotionBGS helper needed",
-      "helper_chip_ready": "MotionBGS helper {version} ready",
-      "helper_chip_unavailable": "MotionBGS helper unavailable",
-      "helper_missing": "MotionBGS browsing needs the separately installed wall-in-one-motionbgs helper. Set its path in plugin settings or install it on PATH; other Wall-in-One features remain available.",
-      "helper_ready": "External helper {version} ready: {path}",
+      "helper_chip_missing": "Wall-in-One backend needed",
+      "helper_chip_ready": "Wall-in-One backend {version} ready",
+      "helper_chip_unavailable": "Wall-in-One backend unavailable",
+      "helper_missing": "MotionBGS browsing needs the separately installed wall-in-one-backend program. Set backend_binary_path in plugin settings or install wall-in-one-backend on PATH; host-coupled Wall-in-One features remain available.",
+      "helper_ready": "External backend {version} ready",
       "latest_note": "Pageable newest-wallpapers catalog",
       "mode_4k": "4K catalog",
       "mode_genre": "Genre / tag",
@@ -416,15 +417,15 @@
       "previous_page": "Previous page",
       "quality_4k_note": "Pageable 4K catalog",
       "quality_hd_note": "HD catalog (first page only)",
-      "ready": "External public-page helper ready. Requests are serialized, cached, same-origin, and size/time limited.",
-      "retry_helper": "Detect the MotionBGS helper again",
+      "ready": "External public-page backend ready. Requests are serialized, cached, same-origin, and size/time limited.",
+      "retry_helper": "Detect the Wall-in-One backend again",
       "results_count": "{count} results",
       "search": "Search",
       "search_meta": "{count} results in MotionBGS's single search response",
       "search_placeholder": "Search video wallpapers",
       "search_unpaged": "MotionBGS does not expose pagination for text search. Latest, genre/tag, and 4K catalog modes have real page navigation.",
       "title": "MotionBGS video wallpapers",
-      "unavailable": "The browser is unavailable; the direct site fallback remains independent. Check the external helper path, settings, and Diagnostics."
+      "unavailable": "The browser is unavailable; the direct site fallback remains independent. Check the external backend path, settings, and Diagnostics."
     },
     "palettes": {
       "builtin": "Built-in palettes",
@@ -814,6 +815,10 @@
       "description": "Choose a glyph with Noctalia's native searchable glyph selector.",
       "label": "Glyph"
     },
+    "backend_binary_path": {
+      "description": "Optional absolute path to the separately installed wall-in-one-backend program. Leave blank to detect wall-in-one-backend on PATH. Without it, library and external palette refresh, provider previews, and integrated Wallhaven/MotionBGS operations degrade; configured playlists, adaptive palette previews, host wallpaper/palette application, and renderer controls remain available.",
+      "label": "Wall-in-One backend program"
+    },
     "label": {
       "description": "Text displayed beside the glyph for this placement.",
       "label": "Label"
@@ -825,10 +830,6 @@
     "motionbgs_cache_minutes": {
       "description": "Keep bounded search, catalog-page, and detail results locally for this many minutes before fetching their public pages again.",
       "label": "MotionBGS cache duration (minutes)"
-    },
-    "motionbgs_binary_path": {
-      "description": "Optional absolute path to the separately installed wall-in-one-motionbgs program. Leave blank to detect wall-in-one-motionbgs on PATH. Only MotionBGS browsing is disabled when it is absent or incompatible.",
-      "label": "MotionBGS helper program"
     },
     "motionbgs_max_download_mb": {
       "description": "Reject a MotionBGS download above this hard size cap before atomically installing it.",

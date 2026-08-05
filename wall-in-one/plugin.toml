@@ -1,6 +1,6 @@
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "0.7.1"
+version = "0.8.0"
 plugin_api = 17
 author = "goober"
 license = "MIT"
@@ -34,12 +34,11 @@ description_key = "settings.use_motionbgs.description"
 default = true
 
 [[setting]]
-key = "motionbgs_binary_path"
+key = "backend_binary_path"
 type = "file"
-label_key = "settings.motionbgs_binary_path.label"
-description_key = "settings.motionbgs_binary_path.description"
+label_key = "settings.backend_binary_path.label"
+description_key = "settings.backend_binary_path.description"
 default = ""
-visible_when = { key = "use_motionbgs", values = ["true"] }
 advanced = true
 
 [[setting]]
@@ -226,7 +225,7 @@ default = false
 
 # Noctalia currently exposes plugin settings to Luau as read-only data and has
 # no API for removing retired overrides from a user's configuration. These
-# invisible string declarations keep pre-0.7 configurations valid without
+# invisible declarations keep retired configuration keys valid without
 # restoring the removed global backend controls to the settings UI. Per-display
 # engine settings in Wall-in-One's hub remain authoritative.
 [[setting]]
@@ -265,9 +264,26 @@ default = ""
 advanced = true
 visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
 
+# Wall-in-One 0.8 replaces the MotionBGS-only program path with one backend
+# program path shared by library indexing and MotionBGS. Keep the old key
+# invisible so an existing host override does not become an unknown setting.
+# Runtime code never reads it; backend_binary_path and PATH are authoritative.
+[[setting]]
+key = "motionbgs_binary_path"
+type = "string"
+label_key = "settings.retired_compatibility.label"
+description_key = "settings.retired_compatibility.description"
+default = ""
+advanced = true
+visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
+
 [[service]]
 id = "coordinator"
 entry = "service.luau"
+
+[[service]]
+id = "backend"
+entry = "backend.luau"
 
 [[service]]
 id = "renderer"

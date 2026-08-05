@@ -1,6 +1,6 @@
 # Wall-in-One test record
 
-Wall-in-One `0.7.1` is tested as one owned wallpaper stack: routed UI, provider
+Wall-in-One `0.8.0` is tested as one owned wallpaper stack: routed UI, provider
 services, persisted item-profile/playback state, and exact renderer children.
 Tests must not require another wallpaper plugin, private state, or cross-plugin
 IPC.
@@ -11,21 +11,26 @@ Run from the repository root:
 
 ```bash
 noctalia plugins lint wall-in-one
+python3 tools/validate.py --require-shellcheck
 python3 wall-in-one/tests/test_contract.py
+bash wall-in-one/scripts/backend-provider self-test
 bash wall-in-one/scripts/motionbgs-provider self-test
-python3 motionbgs-helper/wall-in-one-motionbgs self-test
-python3 -m unittest discover -s motionbgs-helper/tests -p 'test_*.py' -v
+bash wall-in-one/scripts/provider-thumbnail self-test
+./wall-in-one-backend/wall-in-one-backend self-test
+python3 -m unittest discover -s wall-in-one-backend/tests -p 'test_*.py' -v
 nix build -L path:.#vm-test-wall-in-one
 ```
 
-The offline contract checks manifest/state schemas, translations, helper
+The offline contract checks manifest/state schemas, translations, backend
 self-tests, bounded files and provider routes, exact renderer argv/PID cleanup,
 root ownership, migration, and source-level Luau invariants. The standalone
-MotionBGS self-test checks local URL and parser invariants. Its unittest suite
-exercises parser, cache, protocol, and install boundaries without network
-access. The VM compiles and loads all five services, including the thin
-MotionBGS bridge, plus the real panel; it exercises state commands against
-disposable fixtures and rejects callback CPU-budget errors.
+backend self-test checks generic capability and MotionBGS URL/parser invariants.
+Its unittest suite exercises library/palette paging, provider parsing, preview
+cache, protocol, and install boundaries without network access. The VM compiles
+and loads all six
+services, including the generic backend and thin MotionBGS bridges, plus the
+real panel; it exercises state commands against disposable fixtures and rejects
+callback CPU-budget errors.
 
 ## Routed panel contract
 
@@ -70,8 +75,9 @@ renderer.
 
 Navigate into MotionBGS with a 36-result fixture and a full preview backlog.
 Render the production route as three fixed 12-card local pages, drive sustained
-frame callbacks, and prove that each frame advances at most one preview or drag
-step. Full `panel.render` tree construction belongs only to `update()`. The
+frame callbacks, and prove that frames advance only bounded drag work. Preview
+synchronization and full `panel.render` tree construction belong only to
+`update()`. The
 journal must contain no panel callback CPU-budget overrun or timeout-disable
 sequence.
 
@@ -103,6 +109,50 @@ cache location. Direct-root files are user-owned.
 Managed deletion requires a direct child, expected marker, matching adjacent
 sidecar, and a current opaque library ID. Path substitution, nested paths,
 tampered sidecars, and stale IDs fail closed.
+
+## External backend
+
+Test binary discovery through the exact `wall-in-one-backend` name on PATH and
+through a readable absolute `backend_binary_path`. Reject relative paths,
+directories, symlinks, control characters, arbitrary shell commands, malformed
+probe output, incompatible schemas, and a probe missing any of `library.scan`,
+`palettes.inventory`, `preview.sync`, or the four `wallhaven.*` actions. The
+invisible retired `motionbgs_binary_path` key must not influence discovery.
+
+Pin `WIO-BACKEND-PROBE1` and `WIO-BACKEND-RPC1` interface schema 1. Requests are
+at most 64 KiB and the manifest plus each page are at most 128 KiB. Transport
+files must be current-user-owned, regular, non-symlink direct children of their
+fixed private transport. Remove the exact guard while a request waits for its
+private `flock` or is active; no operation may publish a response, partial
+inventory, preview, or downloaded media after cancellation.
+
+Build fixtures containing user images/videos, managed Wallhaven/MotionBGS
+media, automatic stills, valid and tampered sidecars, shared image/video roots,
+and multiple Workshop roots. Assert non-recursive discovery, GIF de-duplication
+for a shared root, stable IDs, ownership/deletion fields, representative lookup,
+case-insensitive sorting, hard candidate/item limits, and fixed 12-record page
+files. The Luau bridge must validate those pages in bounded update batches and
+publish one complete replacement only after every page passes.
+
+Exercise `palettes.inventory` with valid/invalid custom JSON, fresh/stale/corrupt
+community cache and backup, a bounded offline catalog response, pagination, and
+cancellation. Cover both a symlinked custom-palette directory and a symlinked
+JSON entry, including a root-owned Nix-store-style target; they must pass only
+through the palette inventory's stable, bounded read-only descriptor path. A
+FIFO or changing/non-regular target must fail without blocking. Confirm that
+transport, cache, response, marker, download, and media paths continue to reject
+symlinks. Exercise `preview.sync` with 36 provider results, cache hits,
+one-at-a-time misses, LRU pruning, corrupt/oversized manifests, invalid URLs,
+and cancellation. Stable cache roots are `pluginDataDir()/palettes-cache.json`
+plus `.bak` and `pluginDataDir()/provider-previews/v1`; temporary library and
+palette pages are direct children of `pluginDataDir()/backend-bridge-v1/rpc`.
+
+With the backend absent, refresh must fail visibly without clearing the last
+complete library or palette inventory. Provider previews and integrated
+Wallhaven/MotionBGS actions degrade, but configured playlists, renderer control,
+Noctalia wallpaper/palette application, adaptive palette preview, and direct
+site links remain usable. The plugin must never download or chmod the backend
+itself.
 
 ## Per-display engine settings
 
@@ -156,7 +206,7 @@ apply.
 
 Offline fixtures cover query, category/purity masks, sort/order/top range,
 minimum/exact resolution, ratio, color, page, stable random seed, detail,
-download, and clear. Pin 512 KiB/24-result responses, two-second request spacing,
+download, and clear. Pin 128 KiB/24-result responses, two-second request spacing,
 64 MiB image limit, documented origins, redirects disabled, and private-header
 API authentication.
 
@@ -185,14 +235,16 @@ show queued/active/on-disk state, reject an exact active or pending duplicate,
 and keep a persistent queue summary visible while work remains. Do not assert a
 byte percentage because the one-shot helper protocol does not stream one.
 
-Test binary discovery in both supported forms: the exact
-`wall-in-one-motionbgs` name on `PATH`, and a readable absolute
-`motionbgs_binary_path`. Reject relative paths, directories, control characters,
-arbitrary command strings, missing executables, malformed probe output,
-incompatible schema, and incomplete capabilities. Missing or incompatible
-programs must degrade only MotionBGS; local libraries, Wallhaven, palettes,
-playlists, and renderers must stay usable, and the panel must retain both the
-direct-site and **Get helper** actions.
+Test MotionBGS compatibility discovery through the same authoritative forms as
+the generic bridge: exact `wall-in-one-backend` on PATH or a readable absolute
+`backend_binary_path`. Reject relative paths, directories, control characters,
+arbitrary command strings, missing executables, malformed compatibility-probe
+output, incompatible schema, and incomplete capabilities. The retired
+`motionbgs_binary_path` key is inert. Missing or incompatible programs must
+degrade every backend-owned capability: MotionBGS, Wallhaven, provider
+previews, and fresh library/external palette inventory. Configured playlists,
+adaptive palette preview, renderers, and direct-site/**Get backend** actions
+remain available.
 
 Pin `WIO-MBGS-PROBE1` and `WIO-MBGS-RPC1` interface schema 1. The probe must
 advertise exactly search/details/download/clear. RPC request files are capped at
@@ -281,7 +333,8 @@ schedule, and no burst replay of missed swaps.
 
 Palette previews use a real validated still, exact non-applying Noctalia theme
 CLI, SHA-256-aware bounded caching, stale callback rejection, and one global
-palette leader. Missing community/custom choices preserve requested intent and
+palette leader. The host CLI and source hashing remain Luau-owned; inventory
+discovery is backend-owned. Missing community/custom choices preserve intent and
 report the visible fallback.
 
 ## Persistence and manual desktop boundary

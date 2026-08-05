@@ -16,7 +16,7 @@ catalogs; add it as a custom Git source using one of the methods below.
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
 | `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
-| `goober/wall-in-one` | `0.7.1` | v5.0.0/API 17 mixed wallpaper staging |
+| `goober/wall-in-one` | `0.8.0` | v5.0.0/API 17 mixed wallpaper staging |
 
 ## Repository layout
 
@@ -44,6 +44,7 @@ wall-in-one/
   README.md
   thumbnail.webp
   service.luau
+  backend.luau
   renderer.luau
   motionbgs.luau
   palettes.luau
@@ -55,10 +56,13 @@ wall-in-one/
   scripts/capture-still
   scripts/bounded-fetch
   scripts/renderer-supervisor
+  scripts/backend-provider
   scripts/motionbgs-provider
   scripts/provider-thumbnail
-motionbgs-helper/
-  wall-in-one-motionbgs
+wall-in-one-backend/
+  wall-in-one-backend
+  wall-in-one-backend.sha256
+  tests/test_backend.py
 tools/validate.py
 flake.nix
 flake.lock
@@ -115,11 +119,11 @@ The available bar entries are `goober/hydra-update-examiner:hydra`,
 `goober/wall-in-one:wall-in-one`. The Wall-in-One Control Center entry is
 `goober/wall-in-one:wall-in-one-shortcut`. The source is cloned and
 managed by Noctalia; a separate manual checkout is not required for the
-plugins. Noctalia does not install Wall-in-One's optional external MotionBGS
-program; its **Get helper** link opens the separately staged
-[`motionbgs-helper/`](motionbgs-helper/) source. The
-[`wall-in-one/README.md`](wall-in-one/README.md#motionbgs-external-helper-and-fallback)
-describes user-local installation and the degraded fallback.
+plugins. Noctalia does not install Wall-in-One's optional external backend;
+its **Get backend** link opens the separately staged
+[`wall-in-one-backend/`](wall-in-one-backend/) source. The
+[`wall-in-one/README.md`](wall-in-one/README.md#external-backend-installation)
+describes checksum-verified user-local installation and degraded behavior.
 
 ### Declarative configuration
 
@@ -217,17 +221,20 @@ boundary.
 
 ### Wall-in-One coordination and pairing
 
-Wall-in-One `0.7.1` coordinates Noctalia stills and palettes, local video,
+Wall-in-One `0.8.0` coordinates Noctalia stills and palettes, local video,
 Wallpaper Engine projects, pageable Wallhaven search, and optional MotionBGS
-text/latest/genre/4K browsing in one hub. MotionBGS browsing uses the separately
-installed `wall-in-one-motionbgs` Python 3.11+ program; the plugin detects that
-fixed command on `PATH`, or accepts its absolute path in the advanced setting.
-An absent or incompatible program disables only MotionBGS, while the panel
-retains both **Open MotionBGS** and **Get helper** links. Each indexed source is
-automatically its own pairing, with an editable static representative and
-complete theme policy. Visual rotate/shuffle playlists can mix all media types,
-run independently per output, and select lower-listed month/weekday/time rules
-when schedules overlap.
+text/latest/genre/4K browsing in one hub. Filesystem discovery, external
+palette inventory, provider-preview cache work, Wallhaven transport/downloads,
+and MotionBGS provider work use the separately installed
+`wall-in-one-backend` Python 3.11+ program; the plugin detects that fixed
+command on `PATH`, or accepts its absolute path in the advanced setting. An
+absent or incompatible program degrades those backend-owned capabilities,
+while configured playlists, adaptive palette previews, host-coupled renderer,
+wallpaper/palette application, and direct-site controls remain available. Each
+indexed source is automatically its own pairing, with
+an editable static representative and complete theme policy. Visual
+rotate/shuffle playlists can mix all media types, run independently per output,
+and select lower-listed month/weekday/time rules when schedules overlap.
 
 Wall-in-One starts only renderers it owns and switches them by exact PID. The
 last pairing's static backing, theme mode, and palette remain configured when a
@@ -299,7 +306,7 @@ not vendored here while these beta plugin implementations are changing quickly.
 
 This repository is a directly importable custom Git source for native v5
 testing. Hydra Update Examiner and NocVox are ready for direct testing here.
-The Wall-in-One 0.7 staging tree remains a beta test target; run its current
+The Wall-in-One 0.8 staging tree remains a beta test target; run its current
 offline contract and NixOS VM gate for the exact checkout under review. The
 disposable-desktop gate remains pending, so it should not yet be treated as
 unattended daily-driver software. None of the

@@ -2,20 +2,24 @@
 set -uo pipefail
 
 # Bounded launcher and protocol gate for the separately installed
-# wall-in-one-backend program's MotionBGS compatibility interface. This script
-# performs no provider network
-# work and parses no provider markup.  Its only jobs are to validate the
-# configured executable and transport paths, apply a file-size backstop, and
-# pass through one exact bounded probe or RPC completion record.
+# wall-in-one-backend program. The launcher performs no library scan or
+# provider parsing; it validates the process and file boundary and applies a
+# kernel file-size backstop.
 
-readonly probe_wire='WIO-MBGS-PROBE1'
-readonly rpc_wire='WIO-MBGS-RPC1'
-readonly legacy_self_test_wire='WIO-MBG1'
-readonly guard_wire='WIO-MBGS-GUARD1'
-readonly max_request_bytes=$((8 * 1024))
+readonly probe_wire='WIO-BACKEND-PROBE1'
+readonly rpc_wire='WIO-BACKEND-RPC1'
+readonly self_test_wire='WIO-BACKEND-SELFTEST1'
+readonly guard_wire='WIO-BACKEND-GUARD1'
+readonly max_request_bytes=$((64 * 1024))
 readonly max_response_bytes=$((128 * 1024))
 readonly max_protocol_bytes=4096
-readonly max_rpc_file_kib=$((512 * 1024 + 128))
+# The generic surface includes a 64 MiB Wallhaven payload.  Bash's `ulimit -f`
+# is expressed in KiB on the supported hosts, so leave 128 KiB of headroom for
+# that single file while the backend's action-specific limits remain tighter
+# (128 KiB metadata, 2 MiB palette/preview data, or 64 MiB media).  This outer
+# ceiling is inherited by child curl processes and therefore must not be lower
+# than any live action's declared maximum.
+readonly max_rpc_file_kib=$((64 * 1024 + 128))
 
 stdout_file=''
 stderr_file=''
@@ -65,8 +69,8 @@ valid_absolute_path() {
   local value=${1:-}
   [[ $value == /* && $value != / && ${#value} -le 4096 ]] || return 1
   has_controls "$value" && return 1
-  [[ $value != *\\* && $value != *'//'*
-    && $value != *'/./'* && $value != */.
+  [[ $value != *\\* && $value != *'//'* \
+    && $value != *'/./'* && $value != */. \
     && $value != *'/../'* && $value != */.. ]]
 }
 
@@ -90,12 +94,17 @@ owned_writable_directory() {
   [[ $owner == "$(id -u)" ]]
 }
 
+same_parent() {
+  local first=$1
+  local second=$2
+  [[ ${first%/*} == "${second%/*}" ]]
+}
+
 guard_ready() {
   local path=$1
-  local bytes lines value
-  owned_regular_file "$path" $(( ${#guard_wire} + 1 )) $(( ${#guard_wire} + 1 )) || return 1
-  bytes=$(stat -c '%s' -- "$path" 2>/dev/null) || return 1
-  [[ $bytes == $(( ${#guard_wire} + 1 )) ]] || return 1
+  local expected_bytes=$(( ${#guard_wire} + 1 ))
+  local lines value
+  owned_regular_file "$path" "$expected_bytes" "$expected_bytes" || return 1
   lines=$(wc -l <"$path") || return 1
   (( lines == 1 )) || return 1
   IFS= read -r value <"$path" || return 1
@@ -116,14 +125,14 @@ resolve_binary() {
   else
     return 1
   fi
-  [[ -f $candidate && -x $candidate ]] || return 1
+  [[ -f $candidate && ! -L $candidate && -x $candidate ]] || return 1
   printf '%s' "$candidate"
 }
 
 allocate_transport_files() {
   local directory=$1
-  stdout_file=$(mktemp -- "$directory/.wall-in-one-motionbgs-stdout.XXXXXX") || return 1
-  stderr_file=$(mktemp -- "$directory/.wall-in-one-motionbgs-stderr.XXXXXX") || {
+  stdout_file=$(mktemp -- "$directory/.wall-in-one-backend-stdout.XXXXXX") || return 1
+  stderr_file=$(mktemp -- "$directory/.wall-in-one-backend-stderr.XXXXXX") || {
     rm -f -- "$stdout_file"
     stdout_file=''
     return 1
@@ -149,15 +158,15 @@ run_bounded() {
 }
 
 protocol_line() {
-  local bytes lines
+  local bytes lines value
   bytes=$(stat -c '%s' -- "$stdout_file" 2>/dev/null) || return 1
   [[ $bytes =~ ^[0-9]+$ ]] || return 1
   (( bytes >= 2 && bytes <= max_protocol_bytes )) || return 1
   lines=$(wc -l <"$stdout_file") || return 1
   (( lines == 1 )) || return 1
-  IFS= read -r protocol_value <"$stdout_file" || return 1
-  [[ -n $protocol_value ]] || return 1
-  printf '%s' "$protocol_value"
+  IFS= read -r value <"$stdout_file" || return 1
+  [[ -n $value ]] || return 1
+  printf '%s' "$value"
 }
 
 bounded_failure_detail() {
@@ -168,7 +177,7 @@ bounded_failure_detail() {
   if [[ -z $detail && -n $stdout_file && -f $stdout_file ]]; then
     detail=$(LC_ALL=C head -c 600 -- "$stdout_file" 2>/dev/null || true)
   fi
-  clean_field "${detail:-external MotionBGS program returned no valid protocol record}"
+  clean_field "${detail:-external Wall-in-One backend returned no valid protocol record}"
 }
 
 valid_error_line() {
@@ -183,7 +192,7 @@ probe_binary() {
   local configured=$1
   local binary
   binary=$(resolve_binary "$configured") || {
-    emit_error "$probe_wire" missing-binary 'configured MotionBGS program is absent or not executable'
+    emit_error "$probe_wire" missing-binary 'configured Wall-in-One backend is absent or not executable'
     return 127
   }
   allocate_transport_files /tmp || {
@@ -191,7 +200,7 @@ probe_binary() {
     return 73
   }
   local result=0 line=''
-  run_bounded 8 "$binary" motionbgs-probe --protocol 1 || result=$?
+  run_bounded 8 "$binary" probe --protocol 1 || result=$?
   line=$(protocol_line 2>/dev/null || true)
   if (( result != 0 )); then
     if valid_error_line "$probe_wire" "$line"; then
@@ -203,9 +212,10 @@ probe_binary() {
   fi
   local wire outcome schema version capabilities extra
   IFS=$'\t' read -r wire outcome schema version capabilities extra <<<"$line"
-  if [[ $wire != "$probe_wire" || $outcome != ok || $schema != 1
-    || ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9._-]+)?$
-    || $capabilities != 'search,details,download,clear' || -n ${extra:-} ]]; then
+  if [[ $wire != "$probe_wire" || $outcome != ok || $schema != 1 \
+    || ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9._-]+)?$ \
+    || ! $capabilities =~ ^[a-z][a-z0-9.-]*(,[a-z][a-z0-9.-]*)*$ \
+    || ,$capabilities, != *,library.scan,* || -n ${extra:-} ]]; then
     emit_error "$probe_wire" incompatible 'external program returned an incompatible capability probe'
     return 70
   fi
@@ -228,43 +238,46 @@ rpc_binary() {
   local request=$2
   local response=$3
   local guard=$4
-  local binary response_directory
+  local binary transport
   binary=$(resolve_binary "$configured") || {
-    emit_error "$rpc_wire" missing-binary 'configured MotionBGS program is absent or not executable'
+    emit_error "$rpc_wire" missing-binary 'configured Wall-in-One backend is absent or not executable'
     return 127
   }
-  if ! valid_absolute_path "$request" || ! owned_regular_file "$request" 1 "$max_request_bytes"; then
-    emit_error "$rpc_wire" invalid-request 'request must be a current-user regular file of at most 8 KiB'
+  if ! valid_absolute_path "$request" || ! owned_regular_file "$request" 2 "$max_request_bytes"; then
+    emit_error "$rpc_wire" invalid-request 'request must be a current-user regular file of at most 64 KiB'
     return 64
   fi
-  if ! valid_absolute_path "$response"; then
-    emit_error "$rpc_wire" invalid-path 'response path must be a safe absolute path'
-    return 64
-  fi
-  response_directory=${response%/*}
-  if ! owned_writable_directory "$response_directory"; then
-    emit_error "$rpc_wire" invalid-path 'response parent must be a current-user writable directory'
+  transport=${request%/*}
+  if ! owned_writable_directory "$transport" \
+    || ! valid_absolute_path "$response" \
+    || ! valid_absolute_path "$guard" \
+    || ! same_parent "$request" "$response" \
+    || ! same_parent "$request" "$guard"; then
+    emit_error "$rpc_wire" invalid-path 'request, response, and guard must share one owned writable transport directory'
     return 72
+  fi
+  if [[ ${request##*/} != request-*.json \
+    || ${response##*/} != response-*.json \
+    || ! ${guard##*/} =~ ^\.wall-in-one-backend-guard-[A-Za-z0-9._-]{1,160}$ ]]; then
+    emit_error "$rpc_wire" invalid-path 'transport filenames do not match the backend protocol'
+    return 64
   fi
   if [[ -e $response || -L $response ]]; then
     emit_error "$rpc_wire" conflict 'response path already exists'
     return 73
   fi
-  if ! valid_absolute_path "$guard" \
-    || [[ ${guard%/*} != "$response_directory" ]] \
-    || [[ ! ${guard##*/} =~ ^\.wall-in-one-motionbgs-guard-[A-Za-z0-9._-]{1,160}$ ]] \
-    || ! guard_ready "$guard"; then
+  if ! guard_ready "$guard"; then
     emit_error "$rpc_wire" cancelled 'RPC cancellation guard is absent or invalid'
     return 75
   fi
-  allocate_transport_files "$response_directory" || {
+  allocate_transport_files "$transport" || {
     emit_error "$rpc_wire" local-io 'could not allocate bounded RPC transport files'
     return 73
   }
 
   local result=0 line=''
   run_bounded "$max_rpc_file_kib" \
-    "$binary" motionbgs-rpc --protocol 1 --request "$request" --response "$response" --guard "$guard" || result=$?
+    "$binary" rpc --protocol 1 --request "$request" --response "$response" --guard "$guard" || result=$?
   line=$(protocol_line 2>/dev/null || true)
   if (( result != 0 )); then
     discard_invalid_response "$response"
@@ -275,7 +288,6 @@ rpc_binary() {
     fi
     return "$result"
   fi
-
   if ! guard_ready "$guard"; then
     discard_invalid_response "$response"
     emit_error "$rpc_wire" cancelled 'RPC cancellation guard was removed before completion'
@@ -284,9 +296,9 @@ rpc_binary() {
 
   local wire outcome request_id installed reported_bytes extra actual_bytes
   IFS=$'\t' read -r wire outcome request_id installed reported_bytes extra <<<"$line"
-  if [[ $wire != "$rpc_wire" || $outcome != ok
-    || ! $request_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$
-    || $installed != "$response" || ! $reported_bytes =~ ^[0-9]+$
+  if [[ $wire != "$rpc_wire" || $outcome != ok \
+    || ! $request_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ \
+    || $installed != "$response" || ! $reported_bytes =~ ^[0-9]+$ \
     || -n ${extra:-} ]]; then
     discard_invalid_response "$response"
     emit_error "$rpc_wire" protocol 'external program returned a malformed RPC completion record'
@@ -312,14 +324,14 @@ rpc_binary() {
 }
 
 self_test() {
-  valid_absolute_path '/tmp/wall-in-one-motionbgs/request-1.json' || return 1
-  ! valid_absolute_path '/tmp/wall-in-one-motionbgs/../escape' || return 1
-  ! valid_absolute_path $'/tmp/wall-in-one-motionbgs/bad\npath' || return 1
+  valid_absolute_path '/tmp/wall-in-one-backend/request-1.json' || return 1
+  ! valid_absolute_path '/tmp/wall-in-one-backend/../escape' || return 1
+  ! valid_absolute_path $'/tmp/wall-in-one-backend/bad\npath' || return 1
   resolve_binary '/definitely/missing/wall-in-one-backend' >/dev/null 2>&1 && return 1
-  valid_error_line "$rpc_wire" $'WIO-MBGS-RPC1\terror\tfixture\tbounded failure' || return 1
-  ! valid_error_line "$rpc_wire" $'WIO-MBGS-PROBE1\terror\tfixture\twrong wire' || return 1
-  [[ $(( ${#guard_wire} + 1 )) == 16 ]] || return 1
-  printf '%s\tok\tself-test\n' "$legacy_self_test_wire"
+  valid_error_line "$rpc_wire" $'WIO-BACKEND-RPC1\terror\tfixture\tbounded failure' || return 1
+  ! valid_error_line "$rpc_wire" $'WIO-BACKEND-PROBE1\terror\tfixture\twrong wire' || return 1
+  [[ $(( ${#guard_wire} + 1 )) == 19 ]] || return 1
+  printf '%s\tok\tself-test\n' "$self_test_wire"
 }
 
 case ${1:-} in
@@ -343,7 +355,7 @@ case ${1:-} in
       exit 64
     }
     self_test || {
-      emit_error "$rpc_wire" self-test 'motionbgs-provider launcher self-test failed'
+      emit_error "$rpc_wire" self-test 'backend-provider launcher self-test failed'
       exit 1
     }
     ;;

@@ -31,7 +31,41 @@ All notable staging changes will be recorded here.
 - Remove the now-empty plugin-settings button from the details panel and point
   users to the exact per-placement editor instead.
 
-## Unreleased — Wall-in-One 0.7.1
+## Unreleased — Wall-in-One 0.8.0
+
+- Consolidate the separately installed process boundary into one Python 3.11+
+  executable, `wall-in-one-backend`. Its exact generic schema-1 interface owns
+  `library.scan`, `palettes.inventory`, `preview.sync`, and Wallhaven
+  search/detail/download/clear; its `motionbgs-*` compatibility commands
+  preserve the existing MotionBGS wire without moving network or parser work
+  back into Noctalia.
+- Move non-recursive image/video inventory construction, managed-sidecar
+  validation, Workshop metadata indexing, representative lookup, sorting, and
+  result paging out of the coordinator's Luau callback budget. The new
+  `backend` service remains a bounded process/file bridge and validates the
+  paged response incrementally before one atomic library publication.
+- Move custom/community palette discovery and cache shaping, provider-preview
+  LRU maintenance and thumbnail fetch coordination, and Wallhaven API/CDN
+  transport, response shaping, validation, and no-replace downloads into the
+  same backend. Keep private bounded caches at their stable plugin-data paths.
+- Replace the visible MotionBGS-only program setting with one advanced
+  **Wall-in-One backend program** path and fixed `wall-in-one-backend` PATH
+  fallback. Retain `motionbgs_binary_path` only as an invisible migration key;
+  runtime code does not read the retired key.
+- Document a checksum-verified release download plus explicit `chmod`/install
+  flow with HTTPS-only bounded redirects. Wall-in-One never downloads, updates,
+  or executes newly downloaded code automatically. A missing backend degrades
+  library/external-palette refresh, provider previews, and integrated provider
+  shops without disabling host-coupled renderer, wallpaper/palette application,
+  adaptive previews, configured playlists, or direct-site controls.
+- Record the process boundary explicitly: Noctalia host APIs, IPC dispatch,
+  adaptive `noctalia theme` preview/source hashing, exact-PID renderer
+  ownership, and UI stay in Luau. Schedule resolution remains a small
+  time-sensitive calculation; configuration normalization and managed deletion
+  remain coupled to coordinated persistence/commit checks rather than gaining a
+  lossy one-shot boundary.
+
+## Wall-in-One 0.7.1 - Bounded panel work and download UX
 
 - Keep full panel rendering out of `onFrameTick`; frame callbacks now advance
   only one bounded drag or preview-cache state-machine step. Memoize provider
@@ -45,7 +79,7 @@ All notable staging changes will be recorded here.
   the managed library, reject exact duplicates, and retain a compact MotionBGS
   queue summary without claiming unavailable byte-level progress.
 - Remove duplicated selected-item hero cards, full result URLs, long scraper
-  implementation narration, and the MotionBGS helper's absolute filesystem path
+  implementation narration, and the external backend's absolute filesystem path
   from the main shop surface. Keep detailed state in Diagnostics.
 - Replace the ordinary custom-still path field with a paged picker over indexed
   user and Wallhaven images, retaining a manual-path escape hatch. Eagerly
@@ -69,14 +103,15 @@ All notable staging changes will be recorded here.
 
 - Move MotionBGS HTTP, HTML parsing, metadata caching, and downloads out of
   Noctalia's in-process Luau callbacks into the separately installed,
-  one-shot `wall-in-one-motionbgs` Python 3.11+ program. Keep
+  one-shot Python 3.11+ adapter (consolidated into `wall-in-one-backend` in
+  0.8). Keep
   `motionbgs.luau` as a thin bridge with no update tick or provider parser.
-- Detect only the fixed `wall-in-one-motionbgs` command on `PATH`, with an
+- Detect only the fixed adapter command on `PATH`, with an
   advanced absolute-path override. Probe the external program for the schema-1
   search/details/download/clear interface, bound request files to 8 KiB and
   response files to 128 KiB, and degrade only MotionBGS when the program is
-  missing or incompatible. Keep independent **Open MotionBGS** and **Get
-  helper** links in the panel.
+  missing or incompatible. Keep independent **Open MotionBGS** and backend
+  source links in the panel.
 - Preserve the provider boundary's same-origin redirect validation, disabled
   ambient curl configuration, file-size backstop, MIME/signature cross-checks,
   bounded cache, atomic no-replace media installation, and sidecar ownership.
@@ -85,9 +120,9 @@ All notable staging changes will be recorded here.
   selected detail record before installation. Reject successful responses with
   missing or contradictory cache/source/time metadata, receipt provenance, or
   clear acknowledgement before publishing them to the coordinator.
-  The staged helper currently lives in the repository's top-level
-  `motionbgs-helper/` directory and can move to a dedicated repository without
-  changing the plugin RPC contract.
+  The staged source now lives in the repository's top-level
+  `wall-in-one-backend/` directory; its 0.8 compatibility commands preserve
+  this provider RPC contract.
 - Fix fresh, non-customized Library-card editing by declaring the `panelUi`
   namespace before `openLibraryEntryPairing` closes over it. Add source-order
   and real fresh-Workshop callback coverage for the branch that previously
@@ -216,7 +251,7 @@ All notable staging changes will be recorded here.
   strict-origin bounded helper with redirects and ambient curl config disabled,
   private header-file credentials, resource/file-size limits, cancellation
   cleanup, response validation, and atomic no-replace installation.
-- Disable ambient curl configuration in the bounded MotionBGS helper so its
+- Disable ambient curl configuration in the bounded MotionBGS backend so its
   explicit same-origin redirect loop remains authoritative, and use bounded
   regular-file reads consistently for transport responses and stored backups.
 - Keep managed roots authoritative when image/video roots overlap, require

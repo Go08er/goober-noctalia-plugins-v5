@@ -20,6 +20,7 @@ let
   clonedRepoRoot = "${sourceStorageRoot}/repo";
   pluginId = "goober/wall-in-one";
   serviceId = "${pluginId}:coordinator";
+  backendServiceId = "${pluginId}:backend";
   rendererServiceId = "${pluginId}:renderer";
   motionServiceId = "${pluginId}:motionbgs";
   palettesServiceId = "${pluginId}:palettes";
@@ -117,18 +118,18 @@ let
     fileset = lib.fileset.unions [
       (pluginRoot + "/wall-in-one")
       # Separately installed, but the guest still needs it on disk.
-      (pluginRoot + "/motionbgs-helper")
+      (pluginRoot + "/wall-in-one-backend")
       # The offline contract asserts repository-root documentation parity.
       (pluginRoot + "/README.md")
       (pluginRoot + "/CHANGELOG.md")
     ];
   };
   stagedSource = pkgs.runCommand "noctalia-wall-in-one-vm-source" { } ''
-    mkdir -p "$out/wall-in-one" "$out/motionbgs-helper"
+    mkdir -p "$out/wall-in-one" "$out/wall-in-one-backend"
     cp -R ${rawPluginSource}/wall-in-one/. "$out/wall-in-one/"
-    # The MotionBGS program is installed separately from the plugin, but the
-    # contract test and the RPC fixture both invoke it from the guest tree.
-    cp -R ${rawPluginSource}/motionbgs-helper/. "$out/motionbgs-helper/"
+    # The unified backend is installed separately from the plugin, but its
+    # self-tests and offline contract still run from the staged guest tree.
+    cp -R ${rawPluginSource}/wall-in-one-backend/. "$out/wall-in-one-backend/"
     cp ${rawPluginSource}/README.md ${rawPluginSource}/CHANGELOG.md "$out/"
     cp ${catalog} "$out/catalog.toml"
   '';
@@ -193,15 +194,15 @@ let
     '';
   };
 
-  # The plugin keeps its production launcher. This separately configured fake
-  # executable implements the public schema-1 process boundary and returns
-  # pinned normalized records, keeping the VM offline without moving provider
-  # parsing or cache work back into Noctalia's Luau runtime.
-  fakeMotionBgsProgram = pkgs.writeShellApplication {
-    name = "wall-in-one-motionbgs";
+  # The plugin keeps both production launchers. This separately configured
+  # unified executable delegates generic, local-only library RPC to the real
+  # Python backend while returning pinned MotionBGS records offline.
+  fakeUnifiedBackend = pkgs.writeShellApplication {
+    name = "wall-in-one-backend";
     runtimeInputs = [
       pkgs.coreutils
       pkgs.jq
+      pkgs.python3
     ];
     text = ''
       umask 077
@@ -345,14 +346,18 @@ let
 
       mode=$(cat /tmp/wall-in-one-vm-motion-mode 2>/dev/null || printf good)
       case ''${1:-} in
-        probe)
+        probe|rpc|self-test)
+          exec ${lib.getExe pkgs.python3} \
+            ${rawPluginSource}/wall-in-one-backend/wall-in-one-backend "$@"
+          ;;
+        motionbgs-probe)
           if (( $# != 3 )) || [[ $2 != --protocol || $3 != 1 ]]; then
             protocol_error WIO-MBGS-PROBE1 usage 'fixture probe expects --protocol 1' 64
           fi
           printf 'probe\t1\n' >> "$calls"
           printf 'WIO-MBGS-PROBE1\tok\t1\t1.0.0-fixture\tsearch,details,download,clear\n'
           ;;
-        rpc)
+        motionbgs-rpc)
           if (( $# != 9 )) \
             || [[ $2 != --protocol || $3 != 1 || $4 != --request || $6 != --response || $8 != --guard ]]; then
             protocol_error WIO-MBGS-RPC1 usage \
@@ -614,7 +619,8 @@ let
           esac
           ;;
         *)
-          protocol_error WIO-MBGS-RPC1 usage 'fixture expected probe or rpc' 64
+          protocol_error WIO-MBGS-RPC1 usage \
+            'fixture expected a generic backend or motionbgs-* command' 64
           ;;
       esac
     '';
@@ -1013,6 +1019,18 @@ let
                             and type(paletteStatus.counts) == "table"
                             and paletteStatus.counts.builtin
                             or 0
+                    )
+                    .. " palette_community=" .. tostring(
+                        type(paletteStatus) == "table"
+                            and type(paletteStatus.counts) == "table"
+                            and paletteStatus.counts.community
+                            or 0
+                    )
+                    .. " palette_cache_source=" .. tostring(
+                        type(paletteStatus) == "table"
+                            and type(paletteStatus.cache) == "table"
+                            and paletteStatus.cache.source
+                            or ""
                     )
                     .. " wallhaven_schema=" .. tostring(
                         type(wallhavenStatus) == "table" and wallhavenStatus.schema or 0
@@ -1454,22 +1472,36 @@ let
                     )
                     .. " capture_active=" .. tostring(type(captureInFlight["HEADLESS-1"]) == "table")
             )
+        elseif event == "vm-backend-probe" then
+            noctalia.log(
+                "WALL_IN_ONE_VM_BACKEND "
+                    .. tostring(payload or "")
+                    .. " ready=" .. tostring(type(backendStatus) == "table" and backendStatus.ready == true)
+                    .. " available=" .. tostring(
+                        type(backendStatus) == "table" and backendStatus.available == true
+                    )
+                    .. " busy=" .. tostring(type(backendStatus) == "table" and backendStatus.busy == true)
+                    .. " compatible=" .. tostring(
+                        type(backendStatus) == "table" and backendStatus.binary_compatible == true
+                    )
+                    .. " version=" .. tostring(
+                        type(backendStatus) == "table" and backendStatus.binary_version or ""
+                    )
+            )
         elseif event == "vm-library-refresh" then
-            wallInOne.refreshLibrary()
-            local completed = wallInOne.stepLibraryScan()
-            local scan = type(libraryScan) == "table" and libraryScan or {}
+            local accepted = wallInOne.refreshLibrary()
             noctalia.log(
                 "WALL_IN_ONE_VM_LIBRARY_REFRESH "
                     .. tostring(payload or "")
-                    .. " completed=" .. tostring(completed == true)
+                    .. " accepted=" .. tostring(accepted == true)
                     .. " scanning=" .. tostring(library.scanning == true)
-                    .. " queued_media=" .. tostring(type(scan.media_entries) == "table" and #scan.media_entries or 0)
-                    .. " consumed_media=" .. tostring(math.max(0, (tonumber(scan.media_index) or 1) - 1))
-                    .. " accepted_media=" .. tostring(
-                        (type(scan.stills) == "table" and #scan.stills or 0)
-                            + (type(scan.videos) == "table" and #scan.videos or 0)
+                    .. " backend_available=" .. tostring(
+                        type(backendStatus) == "table" and backendStatus.available == true
                     )
-                    .. " phase=" .. tostring(scan.phase or "")
+                    .. " backend_busy=" .. tostring(
+                        type(backendStatus) == "table" and backendStatus.busy == true
+                    )
+                    .. " nonce_set=" .. tostring((tonumber(libraryScanNonce) or 0) > 0)
             )
         elseif event == "vm-library-probe" then
             local motionManaged = false
@@ -1501,6 +1533,11 @@ let
                     .. " user_managed=" .. tostring(userManaged)
                     .. " user_deletable=" .. tostring(userDeletable)
                     .. " user_provider=" .. userProvider
+                    .. " backend_scan_complete=" .. tostring(
+                        (tonumber(libraryScanNonce) or 0) > 0
+                            and (tonumber(backendStatus.last_completed_nonce) or 0)
+                                >= (tonumber(libraryScanNonce) or 0)
+                    )
             )
         elseif event == "vm-motion-search" or event == "vm-motion-search-force" then
             vmHandle({
@@ -1575,6 +1612,7 @@ let
             render = render,
             renderNow = panelPages.renderNow,
             onIpc = onIpc,
+            update = update,
             frameTick = onFrameTick,
             sustained = false,
             frameTicks = 0,
@@ -1610,11 +1648,28 @@ let
             }))
         end
 
+        update = function()
+            vmPreview.update()
+            -- update() normally turns frame delivery off once bounded work is
+            -- idle. Keep pressure enabled for this probe until its explicit
+            -- stop command so the interval cannot collapse after one frame.
+            if vmPreview.sustained then
+                panel.setNeedsFrameTick(true)
+            end
+        end
+
         onFrameTick = function(deltaMs)
             if vmPreview.sustained then
                 vmPreview.frameTicks += 1
             end
             vmPreview.frameTick(deltaMs)
+            -- The production callback deliberately disables frame delivery
+            -- once its bounded drag work settles. Re-arm it only in this VM
+            -- pressure probe so an accidental full render on every frame is
+            -- observable under the same 36-result route that failed live.
+            if vmPreview.sustained then
+                panel.setNeedsFrameTick(true)
+            end
         end
 
         onIpc = function(event, payload)
@@ -1648,7 +1703,10 @@ let
                 return
             elseif event == "vm-wallhaven-route-cache" then
                 local items = {}
-                for index = 0, 11 do
+                -- Exercise a full provider-sized result set. Production still
+                -- materializes only the current 12-card page, so navigation
+                -- and preview planning must not scale with all 48 records.
+                for index = 0, 47 do
                     local identifier = string.format("aa%04d", index)
                     table.insert(items, {
                         id = identifier,
@@ -1682,10 +1740,16 @@ let
                 activePage = "main"
                 activeSubpage = ""
                 panelPages.selectShopPage("wallhaven")
+                local visible = panelUi.providerItems(
+                    items,
+                    providerResultPages.wallhaven,
+                    PROVIDER_RESULT_CHUNK
+                )
                 noctalia.log(
                     "WALL_IN_ONE_VM_WALLHAVEN_ROUTE_CACHE "
                         .. tostring(payload or "")
                         .. " items=" .. tostring(#items)
+                        .. " visible=" .. tostring(#visible)
                         .. " page=" .. tostring(activePage)
                         .. " subpage=" .. tostring(activeSubpage)
                 )
@@ -1748,6 +1812,7 @@ let
                 activePage = "shops"
                 activeSubpage = "motionbgs"
                 render()
+                panel.setNeedsFrameTick(true)
                 local visible = panelUi.providerItems(items, providerResultPages.motionbgs, PROVIDER_RESULT_CHUNK)
                 noctalia.log(
                     "WALL_IN_ONE_VM_MOTION_SUSTAINED_START "
@@ -1791,6 +1856,7 @@ let
                 return
             elseif event == "vm-motion-sustained-stop" then
                 vmPreview.sustained = false
+                panel.setNeedsFrameTick(false)
                 vmPreview.provider = ""
                 preview.cancel()
                 vmPreview.render()
@@ -1957,7 +2023,7 @@ let
     [plugin_settings."${pluginId}"]
     use_wallhaven = true
     use_motionbgs = true
-    motionbgs_binary_path = "${lib.getExe fakeMotionBgsProgram}"
+    backend_binary_path = "${lib.getExe fakeUnifiedBackend}"
     capture_directory = "${captureRoot}"
     video_directory = "${videoRoot}"
     motionbgs_quality = "hd"
@@ -2511,6 +2577,28 @@ pkgs.testers.runNixOSTest (
           "observed_at": "2026-07-31 00:00:00",
           "last_error": "",
       })
+      # Keep palettes.inventory fully offline and deterministic. A current
+      # schema-1 cache exercises the real Python reader and paged RPC response
+      # without allowing the backend to attempt api.noctalia.dev during boot.
+      palette_cache = json.dumps({
+          "schema": 1,
+          "fetched_at": int(machine.succeed("date +%s").strip()),
+          "fetched_at_text": "VM fresh cache",
+          "entries": [{
+              "name": "VM Community",
+              "md5": "0123456789abcdef0123456789abcdef",
+              "preview": {
+                  "dark": {
+                      "surface": "#101820",
+                      "accents": ["#11AA22", "#22BB33", "#33CC44", "#DD3344"],
+                  },
+                  "light": {
+                      "surface": "#F4F5F6",
+                      "accents": ["#2255AA", "#3366BB", "#4477CC", "#CC2233"],
+                  },
+              },
+          }],
+      })
       machine.succeed(
           "install -d -o ${testUser} -g users ${pluginDataRoot}; "
           "printf '%s\\n' "
@@ -2519,7 +2607,11 @@ pkgs.testers.runNixOSTest (
           "printf '%s\\n' "
           + shlex.quote(legacy_runtime)
           + " > ${pluginDataRoot}/runtime.json; "
-          "chown ${testUser}:users ${pluginDataRoot}/config.json ${pluginDataRoot}/runtime.json"
+          "printf '%s\\n' "
+          + shlex.quote(palette_cache)
+          + " > ${pluginDataRoot}/palettes-cache.json; "
+          "chown ${testUser}:users ${pluginDataRoot}/config.json "
+          "${pluginDataRoot}/runtime.json ${pluginDataRoot}/palettes-cache.json"
       )
       machine.succeed(
           "install -d -o ${testUser} -g users ${pluginDataRoot}/staging; "
@@ -2530,6 +2622,7 @@ pkgs.testers.runNixOSTest (
       )
       assert noctalia_msg("plugins enable ${pluginId}").strip().startswith("ok")
       wait_log("started service '${serviceId}'")
+      wait_log("started service '${backendServiceId}'")
       wait_log("started service '${rendererServiceId}'")
       wait_log("started service '${motionServiceId}'")
       wait_log("started service '${palettesServiceId}'")
@@ -2551,19 +2644,35 @@ pkgs.testers.runNixOSTest (
           "| grep -Fx $'WIO-MBG1\\tok\\tself-test'"
       )
       machine.succeed(
-          "runuser -u ${testUser} -- python3 "
-          "${pluginRoot}/motionbgs-helper/wall-in-one-motionbgs self-test "
-          "| grep -Fx $'WIO-MBGS-SELFTEST1\\tok\\t1.0.0'"
+          "runuser -u ${testUser} -- bash "
+          "${materializedRoot}/scripts/backend-provider self-test "
+          "| grep -Fx $'WIO-BACKEND-SELFTEST1\\tok\\tself-test'"
       )
       machine.succeed(
-          "runuser -u ${testUser} -- ${lib.getExe fakeMotionBgsProgram} "
+          "runuser -u ${testUser} -- python3 "
+          "${guestSourceRoot}/wall-in-one-backend/wall-in-one-backend self-test "
+          "| grep -Fx $'WIO-BACKEND-SELFTEST1\\tok\\t0.1.0'"
+      )
+      machine.succeed(
+          "runuser -u ${testUser} -- ${lib.getExe fakeUnifiedBackend} "
           "probe --protocol 1 "
+          "| grep -F $'WIO-BACKEND-PROBE1\\tok\\t1\\t0.1.0\\tlibrary.scan'"
+      )
+      machine.succeed(
+          "runuser -u ${testUser} -- bash "
+          "${materializedRoot}/scripts/backend-provider probe "
+          "${lib.getExe fakeUnifiedBackend} "
+          "| grep -F $'WIO-BACKEND-PROBE1\\tok\\t1\\t0.1.0\\tlibrary.scan'"
+      )
+      machine.succeed(
+          "runuser -u ${testUser} -- ${lib.getExe fakeUnifiedBackend} "
+          "motionbgs-probe --protocol 1 "
           "| grep -Fx $'WIO-MBGS-PROBE1\\tok\\t1\\t1.0.0-fixture\\tsearch,details,download,clear'"
       )
       machine.succeed(
           "runuser -u ${testUser} -- bash "
           "${materializedRoot}/scripts/motionbgs-provider probe "
-          "${lib.getExe fakeMotionBgsProgram} "
+          "${lib.getExe fakeUnifiedBackend} "
           "| grep -Fx $'WIO-MBGS-PROBE1\\tok\\t1\\t1.0.0-fixture\\tsearch,details,download,clear'"
       )
       machine.succeed(
@@ -2590,8 +2699,10 @@ pkgs.testers.runNixOSTest (
       wait_log("hot reload: reloaded service '${serviceId}'")
       wait_log("hot reload: reloaded service '${palettesServiceId}'")
       machine.succeed(
+          "${pkgs.luau}/bin/luau-compile --null ${materializedRoot}/service.luau && "
           "${pkgs.luau}/bin/luau-compile --null ${materializedRoot}/panel.luau && "
-          "${pkgs.luau}/bin/luau-compile --null ${materializedRoot}/palettes.luau"
+          "${pkgs.luau}/bin/luau-compile --null ${materializedRoot}/palettes.luau && "
+          "${pkgs.luau}/bin/luau-compile --null ${materializedRoot}/backend.luau"
       )
       wait_direct(
           wallhaven=True,
@@ -2641,6 +2752,8 @@ pkgs.testers.runNixOSTest (
           "palettes_ready=true",
           "palettes_degraded=true",
           "palette_builtin=10",
+          "palette_community=1",
+          "palette_cache_source=primary",
           "wallhaven_schema=1",
           "wallhaven_ready=true",
           "wallhaven_action=clear",
@@ -2656,30 +2769,47 @@ pkgs.testers.runNixOSTest (
           + standalone_filters
       )
 
-      # Refresh performs only bounded candidate collection synchronously. One
-      # explicit production scan step consumes exactly the four-item budget;
-      # normal update ticks finish the remaining media and Workshop metadata.
-      # Managed-directory markers and subdirectories may also be queued, so
-      # accepted media is deliberately not asserted at this intermediate point.
-      library_refresh_token = "bounded-library-refresh"
+      # Refresh now crosses the process boundary. The coordinator only publishes
+      # one nonce-bound request; the backend service validates paged results and
+      # atomically replaces the library on later bounded update ticks.
+      backend_ready_token = "process-backend-ready"
+      backend_ready_filters = journal
+      for fragment in (
+          f"WALL_IN_ONE_VM_BACKEND {backend_ready_token}",
+          "ready=true",
+          "available=true",
+          "compatible=true",
+          "version=0.1.0",
+      ):
+          backend_ready_filters += f" | grep -F -- {shlex.quote(fragment)}"
+      machine.wait_until_succeeds(
+          noctalia_command(
+              f"plugin ${serviceId} all vm-backend-probe {backend_ready_token}"
+          )
+          + " >/dev/null && "
+          + backend_ready_filters,
+          timeout=60,
+      )
+      library_refresh_token = "process-library-refresh"
       noctalia_msg(
           f"plugin ${serviceId} all vm-library-refresh {library_refresh_token}"
       )
       for fragment in (
           f"WALL_IN_ONE_VM_LIBRARY_REFRESH {library_refresh_token}",
-          "completed=false",
+          "accepted=true",
           "scanning=true",
-          "consumed_media=4",
-          "phase=media",
+          "backend_available=true",
+          "nonce_set=true",
       ):
           wait_log(fragment)
-      library_done_token = "bounded-library-done"
+      library_done_token = "process-library-done"
       library_filters = journal
       for fragment in (
           f"WALL_IN_ONE_VM_LIBRARY {library_done_token}",
           "scanning=false",
           "videos=6",
           "workshops=1",
+          "backend_scan_complete=true",
       ):
           library_filters += f" | grep -F -- {shlex.quote(fragment)}"
       machine.wait_until_succeeds(
@@ -2688,6 +2818,10 @@ pkgs.testers.runNixOSTest (
           )
           + " >/dev/null && "
           + library_filters
+      )
+      machine.fail(
+          "find ${pluginDataRoot}/backend-bridge-v1/rpc -mindepth 1 -maxdepth 1 "
+          "-type f ! -name '.wall-in-one-backend-library.lock' | grep -q ."
       )
 
       # The explicit schema-3 fixture is upgraded to schema 5 without losing
@@ -4073,7 +4207,7 @@ pkgs.testers.runNixOSTest (
       ).strip() == "ok: dispatched 1"
       wait_log(
           "WALL_IN_ONE_VM_WALLHAVEN_ROUTE_CACHE stale-64 "
-          "items=12 page=shops subpage=wallhaven"
+          "items=48 visible=12 page=shops subpage=wallhaven"
       )
       route_touch_predicate = (
           ".schema == 1 and (.entries | length) == 64 and (["
@@ -4254,9 +4388,9 @@ pkgs.testers.runNixOSTest (
       assert len(machine.succeed("cat " + shlex.quote(thumbnail_log)).splitlines()) == 2
 
       # Regression for the live 0.7.0 failure: a 36-result MotionBGS set must
-      # remain a fixed 12-card production route while its page-scoped thumbnail
-      # sweep advances one bounded scheduler step per frame callback. Any render
-      # reached from that scheduler remains capped at the current 12-card page.
+      # remain a fixed 12-card production route. The VM deliberately keeps frame
+      # callbacks armed after thumbnail work settles; those callbacks must not
+      # trigger any further full panel renders or trip Noctalia's CPU watchdog.
       machine.succeed("printf '%s\\n' good > " + shlex.quote(thumbnail_mode))
       sustained_token = "motion-36"
       assert noctalia_msg(
@@ -4400,24 +4534,26 @@ pkgs.testers.runNixOSTest (
           url for _key, url in nature_entries
       }, nature_calls
       settled_frames = int(sustained_fields["frames"])
-      machine.sleep(2)
-      idle_token = "motion-36-idle"
+      settled_renders = int(sustained_fields["renders"])
+      machine.sleep(3)
+      driven_token = "motion-36-driven"
       assert noctalia_msg(
-          f"plugin ${pluginId}:hub all vm-motion-sustained-probe {idle_token}"
+          f"plugin ${pluginId}:hub all vm-motion-sustained-probe {driven_token}"
       ).strip() == "ok: dispatched 1"
-      idle_line = machine.wait_until_succeeds(
+      driven_line = machine.wait_until_succeeds(
           journal
           + " | grep -F -- "
-          + shlex.quote(f"WALL_IN_ONE_VM_MOTION_SUSTAINED {idle_token}")
+          + shlex.quote(f"WALL_IN_ONE_VM_MOTION_SUSTAINED {driven_token}")
           + " | tail -n 1",
           timeout=10,
       ).strip()
-      idle_fields = {
+      driven_fields = {
           part.split("=", 1)[0]: part.split("=", 1)[1]
-          for part in idle_line.split()
+          for part in driven_line.split()
           if "=" in part
       }
-      assert int(idle_fields["frames"]) - settled_frames <= 2, idle_line
+      assert int(driven_fields["frames"]) - settled_frames >= 10, driven_line
+      assert int(driven_fields["renders"]) == settled_renders, driven_line
       machine.fail(f"{journal} | grep -F -- 'exceeded its CPU budget'")
       machine.fail(
           f"{journal} | grep -F -- \"plugin panel '${pluginId}:hub' disabled after repeated timeouts\""

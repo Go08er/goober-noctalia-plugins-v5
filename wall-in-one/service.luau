@@ -23,8 +23,6 @@ local MAX_SCHEDULES_PER_OUTPUT = 32
 local MAX_TOTAL_SCHEDULES = 512
 local MAX_PLAYLIST_RUNS = 4096
 local MAX_HISTORY_ENTRIES = 64
-local MAX_LIBRARY_CANDIDATES = 1024
-local LIBRARY_SCAN_BATCH = 4
 local MAX_RUNTIME_OUTPUTS = 64
 local MAX_PAIR_REGISTRY_ENTRIES = 1024
 local MAX_PERSISTED_PATH_BYTES = 4096
@@ -62,8 +60,11 @@ local PALETTES_STATUS_KEY = "wall_in_one_palettes_status_v1"
 local WALLHAVEN_COMMAND_KEY = "wall_in_one_wallhaven_command_v1"
 local WALLHAVEN_STATUS_KEY = "wall_in_one_wallhaven_status_v1"
 local WALLHAVEN_RESULTS_KEY = "wall_in_one_wallhaven_results_v1"
+local BACKEND_COMMAND_KEY = "wall_in_one_backend_command_v1"
+local BACKEND_STATUS_KEY = "wall_in_one_backend_status_v1"
+local BACKEND_RESULTS_KEY = "wall_in_one_backend_results_v1"
 local MOTIONBGS_URL = "https://motionbgs.com/"
-local MOTIONBGS_HELPER_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/motionbgs-helper"
+local MOTIONBGS_HELPER_URL = "https://github.com/Go08er/goober-noctalia-plugins-v5/tree/main/wall-in-one-backend"
 local WALLHAVEN_URL = "https://wallhaven.cc/"
 
 local OPEN_TARGETS = {
@@ -161,25 +162,6 @@ local VALID_ENTRY_KINDS = {
     static = true,
     video = true,
     workshop = true,
-}
-
-local SUPPORTED_IMAGE_EXTENSIONS = {
-    [".png"] = true,
-    [".jpg"] = true,
-    [".jpeg"] = true,
-    [".webp"] = true,
-    [".avif"] = true,
-    [".gif"] = true,
-}
-
-local SUPPORTED_VIDEO_EXTENSIONS = {
-    [".mp4"] = true,
-    [".mkv"] = true,
-    [".webm"] = true,
-    [".mov"] = true,
-    [".avi"] = true,
-    [".m4v"] = true,
-    [".gif"] = true,
 }
 
 local VALID_ACTIONS = {
@@ -358,9 +340,10 @@ local library = {
     error = "",
     scanning = false,
 }
-local libraryScan = nil
 local managedDirectoryError = ""
 local libraryRefreshPending = false
+local pendingLibraryResult = nil
+local libraryScanNonce = 0
 local pairingPreviewPending = nil
 local libraryRootsSignature = ""
 local settingsStatusPublishPending = false
@@ -399,6 +382,8 @@ local rendererCommandSequence = 0
 local motionBgsCommandSequence = 0
 local palettesCommandSequence = 0
 local wallhavenCommandSequence = 0
+local backendCommandSequence = 0
+local backendStatus = { ready = false, available = false, busy = false, last_error = "" }
 local cycleApplying = {}
 local cycleGeneration = {}
 local applyGeneration = {}
@@ -713,7 +698,10 @@ end
 function wallInOne.outputEngineSettings(output)
     local outputConfig = type(config.outputs) == "table" and config.outputs[tostring(output or "")] or nil
     local engines = type(outputConfig) == "table" and outputConfig.engines or nil
-    return wallInOne.normalizedOutputEngines(engines) or wallInOne.defaultOutputEngines()
+    -- Config is normalized atomically at every load/save boundary. Renderer
+    -- readiness checks and command construction are hot read paths, so do not
+    -- rerun the fixed seven-flag validator for every lookup.
+    return if type(engines) == "table" then engines else wallInOne.defaultOutputEngines()
 end
 
 function wallInOne.configuredPlaylistOrder()
@@ -892,7 +880,7 @@ function wallInOne.settingsSnapshot()
         motionbgs_cache_minutes = wallInOne.settingInt("motionbgs_cache_minutes", 30, 5, 1440),
         motionbgs_max_download_mb = wallInOne.settingInt("motionbgs_max_download_mb", 256, 16, 512),
         motionbgs_quality = if wallInOne.settingString("motionbgs_quality", "hd") == "4k" then "4k" else "hd",
-        motionbgs_binary_path = wallInOne.settingString("motionbgs_binary_path", ""),
+        backend_binary_path = wallInOne.settingString("backend_binary_path", ""),
         image_directory = wallInOne.captureDirectory(),
         wallhaven_managed_directory = wallInOne.wallhavenManagedDirectory(),
         automatic_stills_directory = wallInOne.automaticStillDirectory(),
@@ -2525,14 +2513,6 @@ function wallInOne.libraryDomainSnapshot()
     return { library = library }
 end
 
-function wallInOne.widgetSettingsSnapshot()
-    return {
-        video_source = wallInOne.configuredVideoSource(),
-        manual_pair_file = wallInOne.configuredManualPair(),
-        workshop_id = wallInOne.configuredWorkshopId(),
-    }
-end
-
 function wallInOne.statusSnapshot()
     return {
         protocol = 4,
@@ -2985,18 +2965,6 @@ function wallInOne.findWorkshopProject(id)
     return nil, nil
 end
 
-function wallInOne.libraryPathToken(path)
-    local hashA = 0
-    local hashB = 0
-    path = tostring(path or "")
-    for index = 1, #path do
-        local byte = string.byte(path, index)
-        hashA = (hashA * 131 + byte) % 2147483647
-        hashB = (hashB * 65599 + byte + index) % 2147483629
-    end
-    return string.format("%08x%08x%08x", hashA, hashB, #path)
-end
-
 function wallInOne.readProviderSidecar(path, suffix, provider)
     local sidecarPath = tostring(path or "") .. suffix
     local raw = wallInOne.readBoundedRegularFile(sidecarPath, MAX_MANAGED_SIDECAR_BYTES)
@@ -3013,123 +2981,26 @@ function wallInOne.readProviderSidecar(path, suffix, provider)
     return record, sidecarPath
 end
 
-function wallInOne.appendLibraryDirectory(target, root, mediaType, ownership, provider, seen)
-    root = wallInOne.normalizedDirectory(root)
-    if root == nil then
-        return
+function wallInOne.nextBackendNonce()
+    local previous = noctalia.state.get(BACKEND_COMMAND_KEY)
+    local previousNonce = if type(previous) == "table" then tonumber(previous.nonce) or 0 else 0
+    local statusNonce = if type(backendStatus) == "table" then tonumber(backendStatus.last_nonce) or 0 else 0
+    backendCommandSequence = math.max(backendCommandSequence, previousNonce, statusNonce) + 1
+    return backendCommandSequence
+end
+
+function wallInOne.backendUnavailableDetail()
+    local detail = type(backendStatus) == "table" and wallInOne.boundedDetail(backendStatus.last_error) or ""
+    if detail ~= "" then
+        return detail
     end
-    local entries = noctalia.listDir(root)
-    if type(entries) ~= "table" then
-        return
-    end
-    for index = 1, math.min(#entries, MAX_LIBRARY_CANDIDATES) do
-        local name = tostring(entries[index] or "")
-        if name ~= "" and not name:find("/", 1, true) and not name:find("[%c]") then
-            local path = root .. "/" .. name
-            local key = mediaType .. "\0" .. path
-            if not seen[key] then
-                seen[key] = true
-                table.insert(target, {
-                    path = path,
-                    name = name,
-                    media_type = mediaType,
-                    ownership = ownership,
-                    provider = provider,
-                })
-            end
-        end
-    end
+    return noctalia.tr("errors.backend_unavailable")
 end
 
 wallInOne.refreshLibrary = function()
-    local imageRoot = wallInOne.captureDirectory()
-    local videoRoot = wallInOne.videoDirectory()
-    local imageRootReady = wallInOne.existingDirectory(imageRoot)
-    local videoRootReady = wallInOne.existingDirectory(videoRoot)
-    local mediaEntries = {}
-    local seenMedia = {}
-    -- Managed roots must claim an overlapping explicit user root first. The
-    -- incremental scan still verifies each sidecar and downgrades unproven
-    -- files to user-owned entries.
-    if imageRootReady then
-        wallInOne.appendLibraryDirectory(
-            mediaEntries,
-            wallInOne.wallhavenManagedDirectory(),
-            "image",
-            "managed-wallhaven",
-            "Wallhaven",
-            seenMedia
-        )
-        wallInOne.appendLibraryDirectory(
-            mediaEntries,
-            wallInOne.automaticStillDirectory(),
-            "image",
-            "managed-auto",
-            "Wall-in-One",
-            seenMedia
-        )
-        wallInOne.appendLibraryDirectory(mediaEntries, imageRoot, "image", "user", "local", seenMedia)
-    end
-    if videoRootReady then
-        wallInOne.appendLibraryDirectory(
-            mediaEntries,
-            wallInOne.motionBgsManagedDirectory(),
-            "video",
-            "managed-motionbgs",
-            "MotionBGS",
-            seenMedia
-        )
-        wallInOne.appendLibraryDirectory(mediaEntries, videoRoot, "video", "user", "local", seenMedia)
-    end
-    table.sort(mediaEntries, function(left, right)
-        return tostring(left.path) < tostring(right.path)
-    end)
-
-    local workshopCandidates = {}
-    local seenIds = {}
-    local workshopNamesExamined = 0
-    if imageRootReady then
-        for _, root in ipairs(wallInOne.candidateWorkshopRoots()) do
-            local ids = noctalia.listDir(root)
-            if type(ids) == "table" then
-                for _, candidate in ipairs(ids) do
-                    workshopNamesExamined += 1
-                    local id = tostring(candidate)
-                    if wallInOne.validWorkshopId(id) and not seenIds[id] then
-                        seenIds[id] = true
-                        table.insert(workshopCandidates, { id = id, directory = root .. id .. "/" })
-                        if #workshopCandidates >= MAX_LIBRARY_CANDIDATES then
-                            break
-                        end
-                    end
-                    if workshopNamesExamined >= MAX_LIBRARY_CANDIDATES then
-                        break
-                    end
-                end
-            end
-            if #workshopCandidates >= MAX_LIBRARY_CANDIDATES or workshopNamesExamined >= MAX_LIBRARY_CANDIDATES then
-                break
-            end
-        end
-    end
-    table.sort(workshopCandidates, function(left, right)
-        return tostring(left.id) < tostring(right.id)
-    end)
-
-    libraryScan = {
-        image_root = imageRoot,
-        video_root = videoRoot,
-        media_entries = mediaEntries,
-        media_index = 1,
-        workshop_candidates = workshopCandidates,
-        workshop_index = 1,
-        stills = {},
-        videos = {},
-        workshops = {},
-        provider_installs = { wallhaven = {}, motionbgs = {} },
-        representative_stills = { video = {}, workshop = {} },
-        phase = "media",
-    }
+    -- Preserve the last complete inventory while the process-isolated scanner
+    -- builds its replacement. Consumers see one atomic swap, never a partially
+    -- populated collection.
     library = {
         stills = type(library.stills) == "table" and library.stills or {},
         videos = type(library.videos) == "table" and library.videos or {},
@@ -3145,168 +3016,97 @@ wallInOne.refreshLibrary = function()
         scanning = true,
     }
     wallInOne.markStateDomain("library")
+    -- Invalidate any result produced for roots that were current before this
+    -- refresh request. A new nonce is installed only after the backend accepts
+    -- a request for the current settings.
+    libraryScanNonce = 0
+    pendingLibraryResult = nil
+
+    if type(backendStatus) ~= "table" or backendStatus.available ~= true then
+        library.scanning = false
+        library.error = wallInOne.backendUnavailableDetail()
+        wallInOne.markStateDomain("library")
+        return false
+    end
+    local pluginDataDirectory = noctalia.pluginDataDir()
+    if wallInOne.normalizedDirectory(pluginDataDirectory) == nil then
+        library.scanning = false
+        library.error = noctalia.tr("errors.data_directory")
+        wallInOne.markStateDomain("library")
+        return false
+    end
+    local workshopRoots = {}
+    for _, root in ipairs(wallInOne.candidateWorkshopRoots()) do
+        root = tostring(root or ""):gsub("/+$", "")
+        if wallInOne.normalizedDirectory(root) ~= nil then
+            table.insert(workshopRoots, root)
+        end
+    end
+    local nonce = wallInOne.nextBackendNonce()
+    libraryScanNonce = nonce
+    noctalia.state.set(BACKEND_COMMAND_KEY, {
+        schema = 1,
+        nonce = nonce,
+        action = "library.scan",
+        instance_id = SERVICE_NONCE,
+        image_root = wallInOne.captureDirectory(),
+        video_root = wallInOne.videoDirectory(),
+        workshop_roots = workshopRoots,
+        wallhaven_directory = wallInOne.wallhavenManagedDirectory(),
+        automatic_stills_directory = wallInOne.automaticStillDirectory(),
+        motionbgs_directory = wallInOne.motionBgsManagedDirectory(),
+    })
+    return true
 end
 
-function wallInOne.stepLibraryScan()
-    local scan = libraryScan
-    if type(scan) ~= "table" then
+function wallInOne.adoptBackendLibraryResult(candidate)
+    if type(candidate) ~= "table"
+        or tonumber(candidate.schema) ~= 1
+        or tostring(candidate.action or "") ~= "library.scan"
+        or tonumber(candidate.nonce) ~= libraryScanNonce
+    then
         return false
     end
-    local budget = LIBRARY_SCAN_BATCH
-    while budget > 0 and scan.phase == "media" do
-        local candidate = scan.media_entries[scan.media_index]
-        if candidate == nil or (#scan.videos >= MAX_PLAYLIST_ENTRIES and #scan.stills >= MAX_PLAYLIST_ENTRIES) then
-            scan.phase = "workshops"
-            break
-        end
-        scan.media_index += 1
-        budget -= 1
-        local path = tostring(candidate.path or "")
-        local name = tostring(candidate.name or path:match("([^/]+)$") or path)
-        local info = noctalia.fileInfo(path)
-        local extension = path:lower():match("(%.[%w]+)$") or ""
-        local expectedMedia = tostring(candidate.media_type or "")
-        local supported = if expectedMedia == "image"
-            then SUPPORTED_IMAGE_EXTENSIONS[extension] == true
-            else SUPPORTED_VIDEO_EXTENSIONS[extension] == true
-        -- When both user roots are the same, classify animated GIF as video
-        -- instead of showing the identical file in both sections.
-        if expectedMedia == "image" and extension == ".gif" and scan.image_root == scan.video_root then
-            supported = false
-        end
-        if type(info) == "table" and info.isDir ~= true and (tonumber(info.size) or 0) > 0 and supported then
-            local entry = {
-                id = expectedMedia .. ":" .. SERVICE_NONCE .. ":" .. wallInOne.libraryPathToken(path),
-                path = path,
-                name = name,
-                size = tonumber(info.size) or 0,
-                mtime = tonumber(info.mtime) or 0,
-                media_type = expectedMedia,
-                -- A path under a managed root is still ordinary user media
-                -- until its exact provider sidecar validates below.
-                provider = "local",
-                ownership = "user",
-                managed = false,
-                deletable = false,
-                sidecar = "",
-            }
-            if candidate.ownership == "managed-auto" then
-                local record, sidecarPath = wallInOne.readManagedStillSidecar(path)
-                if record ~= nil then
-                    entry.ownership = "managed"
-                    entry.managed = true
-                    entry.deletable = true
-                    entry.sidecar = sidecarPath
-                    entry.dynamic_id = tostring(record.dynamic_id or "")
-                    entry.provider = tostring(record.provider or "Wall-in-One")
-                end
-            elseif candidate.ownership == "managed-motionbgs" then
-                local record, sidecarPath = wallInOne.readProviderSidecar(path, ".motionbgs.json", "MotionBGS")
-                if record ~= nil then
-                    entry.ownership = "managed"
-                    entry.managed = true
-                    entry.deletable = true
-                    entry.sidecar = sidecarPath
-                    entry.source_url = tostring(record.source_page or "")
-                    entry.provider = "MotionBGS"
-                    entry.provider_id = entry.source_url:match("^https://motionbgs%.com/([a-z0-9][a-z0-9%-]*)$") or ""
-                    entry.quality = tostring(record.quality or ""):lower()
-                    if entry.provider_id ~= "" and (entry.quality == "hd" or entry.quality == "4k") then
-                        scan.provider_installs.motionbgs[entry.provider_id .. ":" .. entry.quality] = path
-                    end
-                end
-            elseif candidate.ownership == "managed-wallhaven" then
-                local record, sidecarPath = wallInOne.readProviderSidecar(path, ".wallhaven.json", "Wallhaven")
-                if record ~= nil then
-                    entry.ownership = "managed"
-                    entry.managed = true
-                    entry.deletable = true
-                    entry.sidecar = sidecarPath
-                    entry.source_url = tostring(record.source_page or "")
-                    entry.provider = "Wallhaven"
-                    entry.provider_id = tostring(record.id or "")
-                    if entry.provider_id ~= "" then
-                        scan.provider_installs.wallhaven[entry.provider_id:lower()] = path
-                    end
-                end
-            end
-            if expectedMedia == "video" then
-                local pairedPreview = wallInOne.cachedPair("video:" .. path)
-                entry.paired_preview = tostring(pairedPreview or "")
-                if entry.paired_preview ~= "" then
-                    scan.representative_stills.video[path] = entry.paired_preview
-                end
-            end
-            if expectedMedia == "image" and #scan.stills < MAX_PLAYLIST_ENTRIES then
-                table.insert(scan.stills, entry)
-            elseif expectedMedia == "video" and #scan.videos < MAX_PLAYLIST_ENTRIES then
-                table.insert(scan.videos, entry)
-            end
-        end
-    end
-    while budget > 0 and scan.phase == "workshops" do
-        local candidate = scan.workshop_candidates[scan.workshop_index]
-        if candidate == nil or #scan.workshops >= MAX_PLAYLIST_ENTRIES then
-            scan.phase = "done"
-            break
-        end
-        scan.workshop_index += 1
-        budget -= 1
-        local projectPath = candidate.directory .. "project.json"
-        local projectInfo = noctalia.fileInfo(projectPath)
-        if
-            type(projectInfo) == "table"
-            and projectInfo.isDir ~= true
-            and (tonumber(projectInfo.size) or 0) > 0
-            and (tonumber(projectInfo.size) or 0) <= MAX_PROJECT_JSON_BYTES
-        then
-            local raw = noctalia.readFile(projectPath)
-            local project = type(raw) == "string" and noctalia.json.decode(raw) or nil
-            if type(project) == "table" then
-                local preview = wallInOne.safeRelativePath(project.preview or "preview.jpg")
-                local pairedPreview = wallInOne.cachedPair(tostring(candidate.id or ""))
-                local pairedPreviewPath = tostring(pairedPreview or "")
-                if pairedPreviewPath ~= "" then
-                    scan.representative_stills.workshop[tostring(candidate.id or "")] = pairedPreviewPath
-                end
-                table.insert(scan.workshops, {
-                    id = candidate.id,
-                    title = wallInOne.boundedDetail(project.title or ("Workshop " .. candidate.id)),
-                    kind = wallInOne.boundedDetail(project.type or "unknown"),
-                    directory = candidate.directory,
-                    preview = if preview ~= nil then candidate.directory .. preview else "",
-                    paired_preview = pairedPreviewPath,
-                    ownership = "steam",
-                    managed = false,
-                    deletable = false,
-                })
-            end
-        end
-    end
-    if scan.phase ~= "done" then
-        return false
-    end
+    pendingLibraryResult = candidate
+    return true
+end
 
-    table.sort(scan.stills, function(left, right)
-        return tostring(left.name):lower() < tostring(right.name):lower()
-    end)
-    table.sort(scan.videos, function(left, right)
-        return tostring(left.name):lower() < tostring(right.name):lower()
-    end)
-    table.sort(scan.workshops, function(left, right)
-        return tostring(left.title):lower() < tostring(right.title):lower()
-    end)
+function wallInOne.applyPendingLibraryResult()
+    local candidate = pendingLibraryResult
+    pendingLibraryResult = nil
+    if type(candidate) ~= "table" then
+        return false
+    end
+    if candidate.ok ~= true then
+        local failure = type(candidate.error) == "table" and candidate.error or {}
+        library.scanning = false
+        library.error = wallInOne.boundedDetail(failure.message or wallInOne.backendUnavailableDetail())
+        wallInOne.markStateDomain("library")
+        return true
+    end
+    local scanned = candidate.library
+    if type(scanned) ~= "table"
+        or type(scanned.stills) ~= "table"
+        or type(scanned.videos) ~= "table"
+        or type(scanned.workshops) ~= "table"
+        or type(scanned.provider_installs) ~= "table"
+        or type(scanned.representative_stills) ~= "table"
+    then
+        library.scanning = false
+        library.error = noctalia.tr("errors.backend_unavailable")
+        wallInOne.markStateDomain("library")
+        return true
+    end
     library = {
-        stills = scan.stills,
-        videos = scan.videos,
-        workshops = scan.workshops,
-        provider_installs = scan.provider_installs,
-        representative_stills = scan.representative_stills,
+        stills = scanned.stills,
+        videos = scanned.videos,
+        workshops = scanned.workshops,
+        provider_installs = scanned.provider_installs,
+        representative_stills = scanned.representative_stills,
         scanned_at = noctalia.formatTime("%Y-%m-%d %H:%M:%S"),
         error = managedDirectoryError,
         scanning = false,
     }
-    libraryScan = nil
     wallInOne.markStateDomain("library")
     return true
 end
@@ -8717,6 +8517,10 @@ end
 function update()
     noctalia.setUpdateInterval(UPDATE_INTERVAL_MS)
     wallInOne.drainPostApplyQueue()
+    if wallInOne.applyPendingLibraryResult() then
+        wallInOne.publishStatus()
+        return
+    end
     if pairingPreviewPending ~= nil then
         wallInOne.startPendingPairingPreview()
         wallInOne.publishStatus()
@@ -8746,9 +8550,6 @@ function update()
     -- without adding state-bus writes or regressing to an older revision.
     wallInOne.adoptRendererStatus(noctalia.state.get(RENDERER_STATUS_KEY))
     local now = wallInOne.nowSeconds()
-    if wallInOne.stepLibraryScan() then
-        wallInOne.publishStatus()
-    end
     if lastAvailabilityRefreshAt == 0 or now == 0 or now - lastAvailabilityRefreshAt >= AVAILABILITY_REFRESH_SECONDS then
         wallInOne.refreshAvailability()
     end
@@ -9273,6 +9074,16 @@ do
         wallhavenResults = initialWallhavenResults
     end
 end
+do
+    local initialBackendStatus = noctalia.state.get(BACKEND_STATUS_KEY)
+    if type(initialBackendStatus) == "table" then
+        backendStatus = initialBackendStatus
+        backendCommandSequence = math.max(
+            backendCommandSequence,
+            math.floor(tonumber(initialBackendStatus.last_nonce) or 0)
+        )
+    end
+end
 wallInOne.refreshBackendPolicy()
 libraryRootsSignature = wallInOne.currentLibraryRootsSignature()
 do
@@ -9393,6 +9204,22 @@ noctalia.state.watch(WALLHAVEN_STATUS_KEY, function(nextStatus)
 end)
 noctalia.state.watch(WALLHAVEN_RESULTS_KEY, function(nextResults)
     wallhavenResults = if type(nextResults) == "table" then nextResults else { items = {}, selected = {} }
+end)
+noctalia.state.watch(BACKEND_STATUS_KEY, function(nextStatus)
+    local wasAvailable = type(backendStatus) == "table" and backendStatus.available == true
+    backendStatus = if type(nextStatus) == "table"
+        then nextStatus
+        else { ready = false, available = false, busy = false, last_error = "" }
+    backendCommandSequence = math.max(
+        backendCommandSequence,
+        math.floor(tonumber(backendStatus.last_nonce) or 0)
+    )
+    if not wasAvailable and backendStatus.available == true and library.scanning ~= true then
+        libraryRefreshPending = true
+    end
+end)
+noctalia.state.watch(BACKEND_RESULTS_KEY, function(nextResults)
+    wallInOne.adoptBackendLibraryResult(nextResults)
 end)
 wallInOne.handleCommand(noctalia.state.get(COMMAND_KEY))
 wallInOne.refreshAvailability()

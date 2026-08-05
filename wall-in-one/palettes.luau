@@ -1,10 +1,10 @@
 --!nonstrict
 -- Wall-in-One palette inventory service.
 --
--- This entry owns discovery and isolated adaptive-preview generation. It
--- never changes Noctalia's active theme. The coordinator can consume the
--- versioned snapshot below and remains the sole authority for applying an
--- entry's requested palette.
+-- This entry presents the backend's normalized inventory and owns isolated
+-- adaptive-preview generation. It never changes Noctalia's active theme. The
+-- coordinator can consume the versioned snapshot below and remains the sole
+-- authority for applying an entry's requested palette.
 --
 -- Commands are `{ schema=1, nonce, action="refresh", force? }` or
 -- `{ schema=1, nonce, action="preview", key, path, scheme }`. Preview results
@@ -12,19 +12,13 @@
 
 local STATUS_KEY = "wall_in_one_palettes_status_v1"
 local COMMAND_KEY = "wall_in_one_palettes_command_v1"
+local BACKEND_STATUS_KEY = "wall_in_one_backend_status_v1"
+local BACKEND_PALETTE_COMMAND_KEY = "wall_in_one_backend_palette_command_v1"
+local BACKEND_PALETTE_RESULTS_KEY = "wall_in_one_backend_palette_results_v1"
 local PROTOCOL = 1
-local CACHE_SCHEMA = 1
-local CACHE_NAME = "palettes-cache.json"
-local COMMUNITY_URL = "https://api.noctalia.dev/palettes"
-local FETCH_PROTOCOL = "WIO-FETCH1"
+local BACKEND_CAPABILITY = "palettes.inventory"
 
-local MAX_BODY_BYTES = 2 * 1024 * 1024
-local MAX_CACHE_BYTES = 2 * 1024 * 1024
-local MAX_CUSTOM_FILE_BYTES = 512 * 1024
 local MAX_PALETTES = 512
-local MAX_CATALOG_SCAN = 4096
-local MAX_CUSTOM_CANDIDATES = 1024
-local MAX_NAME_BYTES = 160
 local MAX_ERROR_BYTES = 640
 local MAX_NONCE = 9007199254740991
 local MAX_PREVIEW_KEY_BYTES = 160
@@ -33,7 +27,6 @@ local MAX_PREVIEW_OUTPUT_BYTES = 512 * 1024
 local MAX_PREVIEW_CACHE_ENTRIES = 16
 local MAX_PREVIEW_SWEEP_ENTRIES = 512
 local COMMUNITY_TTL_SECONDS = 6 * 60 * 60
-local COMMUNITY_FETCH_TIMEOUT_MS = 40 * 1000
 local PREVIEW_HASH_TIMEOUT_MS = 20 * 1000
 local PREVIEW_TIMEOUT_MS = 20 * 1000
 
@@ -159,9 +152,14 @@ local lastEvent = "starting"
 local lastCommandNonce = 0
 local statusRevision = 0
 local lastPublishedSignature = ""
-local communityGeneration = 1
-local transportSequence = 0
-local activeCommunityOperation = nil
+local inventoryRetryRequested = false
+local inventoryRetryForce = false
+local inventorySignature = ""
+local inventoryCommandSequence = 0
+local pendingInventoryNonce = 0
+local pendingInventoryForce = false
+local lastInventoryResultSequence = 0
+local completedInventoryResult = nil
 local previewGeneration = 1
 local previewSequence = 0
 local activePreviewOperation = nil
@@ -232,13 +230,6 @@ local function shellQuote(value)
     return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
 end
 
-local function validName(value)
-    return type(value) == "string"
-        and value ~= ""
-        and #value <= MAX_NAME_BYTES
-        and value:find("[%c]") == nil
-end
-
 local function validPreviewKey(value)
     return type(value) == "string"
         and value ~= ""
@@ -253,21 +244,14 @@ local function normalizedColor(value)
     return value:upper()
 end
 
-local function modeField(candidate, field, custom)
+local function modeField(candidate, field)
     if type(candidate) ~= "table" then
         return ""
-    end
-    if custom then
-        local prefixed = "m" .. field:sub(1, 1):upper() .. field:sub(2)
-        local value = normalizedColor(candidate[prefixed])
-        if value ~= "" then
-            return value
-        end
     end
     return normalizedColor(candidate[field])
 end
 
-local function normalizedPreviewMode(candidate, custom)
+local function normalizedPreviewMode(candidate)
     if type(candidate) ~= "table" then
         return { surface = "", accents = {} }
     end
@@ -282,7 +266,7 @@ local function normalizedPreviewMode(candidate, custom)
         end
     else
         for _, field in ipairs({ "primary", "secondary", "tertiary", "error" }) do
-            local color = modeField(candidate, field, custom)
+            local color = modeField(candidate, field)
             if color ~= "" then
                 table.insert(accents, color)
             end
@@ -290,13 +274,9 @@ local function normalizedPreviewMode(candidate, custom)
     end
 
     return {
-        surface = modeField(candidate, "surface", custom),
+        surface = modeField(candidate, "surface"),
         accents = accents,
     }
-end
-
-local function previewModePresent(mode)
-    return type(mode) == "table" and type(mode.accents) == "table" and #mode.accents > 0
 end
 
 local function copyPreviewMode(mode)
@@ -337,95 +317,13 @@ local function normalizedAdaptivePreview(candidate)
             secondary = mode.secondary,
             tertiary = mode.tertiary,
             error = mode.error,
-        }, false)
+        })
         if previewMode.surface == "" or #previewMode.accents ~= 4 then
             return nil, "Noctalia's " .. modeName .. " palette preview has invalid color roles"
         end
         normalized[modeName] = previewMode
     end
     return normalized, nil
-end
-
-local function normalizedCommunityEntry(candidate)
-    local name = if type(candidate) == "string"
-        then candidate
-        elseif type(candidate) == "table" then candidate.name
-        else nil
-    if not validName(name) then
-        return nil
-    end
-
-    local md5 = ""
-    local previewRoot = {}
-    if type(candidate) == "table" then
-        local candidateMd5 = tostring(candidate.md5 or "")
-        if candidateMd5:match("^%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x$") then
-            md5 = candidateMd5:lower()
-        end
-        previewRoot = type(candidate.preview) == "table" and candidate.preview or candidate
-    end
-
-    return {
-        name = name,
-        md5 = md5,
-        preview = {
-            dark = normalizedPreviewMode(previewRoot.dark, false),
-            light = normalizedPreviewMode(previewRoot.light, false),
-        },
-    }
-end
-
-local function normalizedCommunityCatalog(candidate)
-    if type(candidate) ~= "table" then
-        return nil, "Community palette catalog is not a JSON object or array"
-    end
-    local values = if type(candidate.palettes) == "table" then candidate.palettes else candidate
-    if type(values) ~= "table" or #values == 0 then
-        return nil, "Community palette catalog contains no palette array"
-    end
-
-    local result = {}
-    local seen = {}
-    for index = 1, math.min(#values, MAX_CATALOG_SCAN) do
-        local entry = normalizedCommunityEntry(values[index])
-        if entry ~= nil and not seen[entry.name] then
-            seen[entry.name] = true
-            table.insert(result, entry)
-            if #result >= MAX_PALETTES then
-                break
-            end
-        end
-    end
-    if #result == 0 then
-        return nil, "Community palette catalog contains no valid bounded entries"
-    end
-    table.sort(result, function(left, right)
-        return tostring(left.name) < tostring(right.name)
-    end)
-    return result, nil
-end
-
-local function normalizedCustomPreview(candidate)
-    if type(candidate) ~= "table" then
-        return nil
-    end
-
-    local dark
-    local light
-    if type(candidate.dark) == "table" or type(candidate.light) == "table" then
-        dark = normalizedPreviewMode(candidate.dark, true)
-        light = normalizedPreviewMode(candidate.light, true)
-        if not previewModePresent(light) and previewModePresent(dark) then
-            light = copyPreviewMode(dark)
-        end
-    else
-        dark = normalizedPreviewMode(candidate, true)
-        light = copyPreviewMode(dark)
-    end
-    if not previewModePresent(dark) and not previewModePresent(light) then
-        return nil
-    end
-    return { dark = dark, light = light }
 end
 
 local function configPalettesDirectory()
@@ -447,237 +345,6 @@ local function configPalettesDirectory()
     end
     base = base:gsub("/+$", "")
     return base .. "/noctalia/palettes", nil
-end
-
-local function refreshCustomPalettes()
-    local directory, directoryError = configPalettesDirectory()
-    customDirectory = tostring(directory or "")
-    customInvalidCount = 0
-    lastCustomRefreshAt = nowText()
-
-    if directory == nil then
-        customPalettes = {}
-        customError = bounded(directoryError, MAX_ERROR_BYTES)
-        lastErrorAt = lastCustomRefreshAt
-        return
-    end
-
-    local info = noctalia.fileInfo(directory)
-    if type(info) ~= "table" then
-        -- An absent palettes directory is Noctalia's normal empty-custom state.
-        customPalettes = {}
-        customError = ""
-        return
-    elseif info.isDir ~= true then
-        customPalettes = {}
-        customError = "Noctalia's palettes path is not a directory"
-        lastErrorAt = lastCustomRefreshAt
-        return
-    end
-
-    local names, listError = noctalia.listDir(directory)
-    if type(names) ~= "table" then
-        customPalettes = {}
-        customError = bounded(listError or "Could not enumerate Noctalia custom palettes", MAX_ERROR_BYTES)
-        lastErrorAt = lastCustomRefreshAt
-        return
-    end
-    table.sort(names, function(left, right)
-        return tostring(left) < tostring(right)
-    end)
-
-    local result = {}
-    local seen = {}
-    local candidateCount = 0
-    local directoryTruncated = #names > MAX_CUSTOM_CANDIDATES
-    for index = 1, math.min(#names, MAX_CUSTOM_CANDIDATES) do
-        local filename = tostring(names[index] or "")
-        if filename:sub(-5) == ".json" then
-            candidateCount += 1
-            local stem = filename:sub(1, -6)
-            local path = directory .. "/" .. filename
-            local fileInfo = validName(stem) and noctalia.fileInfo(path) or nil
-            local preview = nil
-            if
-                type(fileInfo) == "table"
-                and fileInfo.isDir ~= true
-                and (tonumber(fileInfo.size) or 0) > 0
-                and (tonumber(fileInfo.size) or 0) <= MAX_CUSTOM_FILE_BYTES
-            then
-                local raw = noctalia.readFile(path)
-                local decoded = type(raw) == "string" and noctalia.json.decode(raw) or nil
-                preview = normalizedCustomPreview(decoded)
-            end
-            if preview ~= nil and not seen[stem] and #result < MAX_PALETTES then
-                seen[stem] = true
-                table.insert(result, { name = stem, preview = preview })
-            else
-                customInvalidCount += 1
-            end
-        end
-    end
-    table.sort(result, function(left, right)
-        return tostring(left.name) < tostring(right.name)
-    end)
-    customPalettes = result
-
-    local problems = {}
-    if directoryTruncated then
-        table.insert(problems, "custom palette directory exceeded the bounded scan limit")
-    end
-    if candidateCount > MAX_PALETTES then
-        table.insert(problems, "custom palette inventory exceeded the 512-entry limit")
-    end
-    if customInvalidCount > 0 then
-        table.insert(problems, tostring(customInvalidCount) .. " custom palette file(s) were invalid or outside limits")
-    end
-    customError = bounded(table.concat(problems, "; "), MAX_ERROR_BYTES)
-    if customError ~= "" then
-        lastErrorAt = lastCustomRefreshAt
-    end
-end
-
-local function cachePath()
-    local directory, directoryError = noctalia.pluginDataDir()
-    if type(directory) ~= "string" or directory == "" then
-        return nil, tostring(directoryError or "Plugin data directory is unavailable")
-    end
-    return directory .. "/" .. CACHE_NAME, nil
-end
-
-local function readCacheCandidate(path)
-    if not noctalia.fileExists(path) then
-        return nil, "missing"
-    end
-    local info = noctalia.fileInfo(path)
-    if
-        type(info) ~= "table"
-        or info.isDir == true
-        or (tonumber(info.size) or 0) <= 0
-        or (tonumber(info.size) or 0) > MAX_CACHE_BYTES
-    then
-        return nil, "cache file size is invalid"
-    end
-    local raw, readError = noctalia.readFile(path)
-    if type(raw) ~= "string" then
-        return nil, tostring(readError or "cache file could not be read")
-    end
-    local decoded = noctalia.json.decode(raw)
-    if type(decoded) ~= "table" or tonumber(decoded.schema) ~= CACHE_SCHEMA then
-        return nil, "cache schema is invalid"
-    end
-    local fetchedAt = tonumber(decoded.fetched_at)
-    local now = nowSeconds()
-    if
-        fetchedAt == nil
-        or fetchedAt % 1 ~= 0
-        or fetchedAt <= 0
-        or (now > 0 and fetchedAt > now + 300)
-    then
-        return nil, "cache timestamp is invalid"
-    end
-    local entries, entriesError = normalizedCommunityCatalog(decoded.entries)
-    if entries == nil then
-        return nil, entriesError
-    end
-    return {
-        entries = entries,
-        fetched_at = fetchedAt,
-        fetched_at_text = bounded(decoded.fetched_at_text or "", 80),
-    }, nil
-end
-
-local function loadCommunityCache()
-    local path, pathError = cachePath()
-    if path == nil then
-        cacheError = bounded(pathError, MAX_ERROR_BYTES)
-        lastErrorAt = nowText()
-        return
-    end
-
-    local primary, primaryError = readCacheCandidate(path)
-    local selected = primary
-    cacheSource = if primary ~= nil then "primary" else "none"
-    if selected == nil then
-        local backup, backupError = readCacheCandidate(path .. ".bak")
-        if backup ~= nil then
-            selected = backup
-            cacheSource = "backup"
-            cacheError = if primaryError == "missing"
-                then "Primary palette cache is missing; using the last-known-good backup"
-                else "Primary palette cache is invalid; using the last-known-good backup"
-            lastErrorAt = nowText()
-        elseif primaryError ~= "missing" then
-            cacheError = bounded("Palette cache is invalid: " .. tostring(primaryError), MAX_ERROR_BYTES)
-            lastErrorAt = nowText()
-        elseif backupError ~= "missing" then
-            cacheError = bounded("Palette cache backup is invalid: " .. tostring(backupError), MAX_ERROR_BYTES)
-            lastErrorAt = nowText()
-        end
-    end
-
-    if selected ~= nil then
-        communityPalettes = selected.entries
-        cacheLoaded = true
-        cacheFetchedAt = selected.fetched_at
-        cacheFetchedAtText = selected.fetched_at_text
-        lastCommunitySuccessAt = cacheFetchedAtText
-    end
-end
-
-local function atomicWriteCache(entries, fetchedAt, fetchedAtText)
-    local path, pathError = cachePath()
-    if path == nil then
-        return false, pathError
-    end
-    local encoded, encodeError = noctalia.json.encode({
-        schema = CACHE_SCHEMA,
-        fetched_at = fetchedAt,
-        fetched_at_text = fetchedAtText,
-        entries = entries,
-    }, true)
-    if type(encoded) ~= "string" then
-        return false, tostring(encodeError or "Palette cache could not be encoded")
-    end
-    if #encoded + 1 > MAX_CACHE_BYTES then
-        return false, "Palette cache exceeds the 2 MiB storage limit"
-    end
-
-    local temporary = path .. ".tmp"
-    local backup = path .. ".bak"
-    local backupTemporary = backup .. ".tmp"
-    local wrote, writeError = noctalia.writeFile(temporary, encoded .. "\n")
-    if wrote ~= true then
-        return false, tostring(writeError or "Palette cache temporary write failed")
-    end
-
-    local previousCache = readCacheCandidate(path)
-    if previousCache ~= nil then
-        local previous, readError = noctalia.readFile(path)
-        if type(previous) ~= "string" then
-            noctalia.removeFile(temporary)
-            return false, tostring(readError or "Existing palette cache could not be backed up")
-        end
-        local backupWrote, backupWriteError = noctalia.writeFile(backupTemporary, previous)
-        if backupWrote ~= true then
-            noctalia.removeFile(temporary)
-            noctalia.removeFile(backupTemporary)
-            return false, tostring(backupWriteError or "Palette cache backup write failed")
-        end
-        local backupInstalled, backupInstallError = noctalia.renameFile(backupTemporary, backup)
-        if backupInstalled ~= true then
-            noctalia.removeFile(temporary)
-            noctalia.removeFile(backupTemporary)
-            return false, tostring(backupInstallError or "Palette cache backup install failed")
-        end
-    end
-
-    local installed, installError = noctalia.renameFile(temporary, path)
-    if installed ~= true then
-        noctalia.removeFile(temporary)
-        return false, tostring(installError or "Palette cache install failed")
-    end
-    return true, nil
 end
 
 local function cacheIsFresh()
@@ -736,25 +403,6 @@ local function adaptivePreviewSignature(preview)
     return table.concat(parts, "|")
 end
 
-local function paletteListSignature(values)
-    local parts = {}
-    for _, entry in ipairs(values) do
-        local preview = type(entry.preview) == "table" and entry.preview or {}
-        local fields = { entry.name, entry.md5 }
-        for _, modeName in ipairs({ "dark", "light" }) do
-            local mode = type(preview[modeName]) == "table" and preview[modeName] or {}
-            table.insert(fields, mode.surface)
-            for _, color in ipairs(type(mode.accents) == "table" and mode.accents or {}) do
-                table.insert(fields, color)
-            end
-        end
-        for _, field in ipairs(fields) do
-            table.insert(parts, signatureToken(field))
-        end
-    end
-    return table.concat(parts, "|")
-end
-
 local function combinedError()
     local errors = {}
     for _, message in ipairs({ communityError, customError, cacheError, commandError }) do
@@ -792,8 +440,7 @@ local function statusSignature()
         previewStatus.fingerprint,
         previewStatus.error,
         adaptivePreviewSignature(previewStatus.preview),
-        paletteListSignature(communityPalettes),
-        paletteListSignature(customPalettes),
+        inventorySignature,
     }, "\0")
 end
 
@@ -979,10 +626,6 @@ local function sweepOwnedPreviewFiles()
     if type(names) ~= "table" then
         return 0
     end
-    table.sort(names, function(left, right)
-        return tostring(left) < tostring(right)
-    end)
-
     local removed = 0
     for index = 1, math.min(#names, MAX_PREVIEW_SWEEP_ENTRIES) do
         local name = tostring(names[index] or "")
@@ -1343,254 +986,130 @@ local function requestAdaptivePreview(command)
     return startPreviewOperation(request)
 end
 
-local function boundedFetchHelper()
-    local pluginDirectory = noctalia.pluginDir()
-    if type(pluginDirectory) ~= "string" then
-        return nil
-    end
-    pluginDirectory = pluginDirectory:gsub("/+$", "")
-    if not validAbsolutePath(pluginDirectory) then
-        return nil
-    end
-    local path = pluginDirectory .. "/scripts/bounded-fetch"
-    return if validAbsolutePath(path) and noctalia.fileExists(path) then path else nil
+local function backendSupportsPalettes()
+    local status = noctalia.state.get(BACKEND_STATUS_KEY)
+    local capabilities = type(status) == "table" and tostring(status.capabilities or "") or ""
+    return type(status) == "table"
+        and status.available == true
+        and ("," .. capabilities .. ","):find("," .. BACKEND_CAPABILITY .. ",", 1, true) ~= nil
 end
 
-local function transportDirectory()
-    local dataDirectory = noctalia.pluginDataDir()
-    if type(dataDirectory) ~= "string" then
-        return nil, "Plugin transport storage is unavailable"
+local function nextInventoryNonce()
+    local previous = noctalia.state.get(BACKEND_PALETTE_COMMAND_KEY)
+    local previousNonce = type(previous) == "table" and tonumber(previous.nonce) or 0
+    inventoryCommandSequence = math.max(inventoryCommandSequence, previousNonce) + 1
+    if inventoryCommandSequence > MAX_NONCE then
+        inventoryCommandSequence = 1
     end
-    dataDirectory = dataDirectory:gsub("/+$", "")
-    if not validAbsolutePath(dataDirectory) then
-        return nil, "Plugin transport storage is unavailable"
-    end
-    local directory = dataDirectory .. "/bounded-fetch"
-    local made, makeError = noctalia.mkdirAll(directory)
-    if made ~= true then
-        return nil, tostring(makeError or "Could not create plugin transport storage")
-    end
-    local info = noctalia.fileInfo(directory)
-    if type(info) ~= "table" or info.isDir ~= true then
-        return nil, "Plugin transport storage is not a directory"
-    end
-    return directory, nil
+    return inventoryCommandSequence
 end
 
-local function removeTransportFile(path)
-    if validAbsolutePath(path) and noctalia.fileExists(path) then
-        noctalia.removeFile(path)
-    end
-end
-
-local function cleanupCommunityTransport(operation, keepResponse)
-    if type(operation) ~= "table" then
-        return
-    end
-    removeTransportFile(operation.guard_path)
-    if keepResponse ~= true then
-        removeTransportFile(operation.response_path)
-    end
-end
-
-local function allocateCommunityTransport(operation)
-    local directory, directoryError = transportDirectory()
-    if directory == nil then
-        return false, directoryError
-    end
-    for _ = 1, 8 do
-        transportSequence += 1
-        local token = tostring(math.floor(noctalia.nowMs()))
-            .. "-"
-            .. tostring(lastCommandNonce)
-            .. "-"
-            .. tostring(transportSequence)
-        local responsePath = directory .. "/palettes-" .. token .. ".json"
-        local guardPath = directory .. "/.wall-in-one-guard-palettes-" .. token
-        if not noctalia.fileExists(responsePath) and not noctalia.fileExists(guardPath) then
-            local wrote, writeError = noctalia.writeFile(guardPath, FETCH_PROTOCOL .. "\n")
-            if wrote ~= true then
-                return false, tostring(writeError or "Could not create request cancellation guard")
-            end
-            operation.response_path = responsePath
-            operation.guard_path = guardPath
-            return true, nil
-        end
-    end
-    return false, "Could not allocate unique palette transport files"
-end
-
-local function boundedFetchResult(result)
-    if type(result) ~= "table" then
-        return nil, "transport", "Bounded fetch returned no process result"
-    end
-    local output = tostring(result.stdout or ""):match("([^\r\n]+)%s*$") or ""
-    local protocol, outcome, profile, statusCode, effectiveUrl, contentType, bytes, path = output:match(
-        "^([^\t]+)\t([^\t]+)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$"
-    )
-    if
-        protocol == FETCH_PROTOCOL
-        and outcome == "ok"
-        and result.timedOut ~= true
-        and tonumber(result.exitCode) == 0
-    then
-        return {
-            profile = profile,
-            status = math.floor(tonumber(statusCode) or 0),
-            effective_url = effectiveUrl,
-            content_type = contentType,
-            bytes = math.floor(tonumber(bytes) or 0),
-            path = path,
-        },
-            nil,
-            nil
-    end
-
-    local errorProtocol, errorOutcome, kind, _errorStatus, detail =
-        output:match("^([^\t]+)\t([^\t]+)\t([^\t]*)\t([^\t]*)\t(.*)$")
-    if errorProtocol == FETCH_PROTOCOL and errorOutcome == "error" then
-        return nil, bounded(kind, 80), bounded(detail, 400)
-    end
-    if result.timedOut == true then
-        return nil, "timeout", "Bounded fetch exceeded Noctalia's process timeout"
-    end
-    local fallback = bounded(result.stderr or result.stdout, 400)
-    if fallback == "" then
-        fallback = "Bounded fetch exited without a valid protocol result"
-    end
-    return nil, "protocol", fallback
-end
-
-local function communityOperationIsCurrent(operation)
-    return ready
-        and activeCommunityOperation == operation
-        and operation.generation == communityGeneration
-end
-
-local function failCommunityRefresh(message, operation)
-    if type(operation) == "table" and not communityOperationIsCurrent(operation) then
-        cleanupCommunityTransport(operation, false)
-        return
-    end
-    cleanupCommunityTransport(operation, false)
-    if activeCommunityOperation == operation then
-        activeCommunityOperation = nil
-    end
-    communityInFlight = false
-    communityError = bounded(message, MAX_ERROR_BYTES)
-    lastErrorAt = nowText()
-    lastEvent = "refresh-failed"
-    publishStatus(false)
-end
-
-local function refreshCommunity(force, reason)
+local function requestInventory(force, reason)
     if communityInFlight then
         lastEvent = "refresh-in-flight"
         publishStatus(false)
         return false
     end
-    if force ~= true and cacheIsFresh() then
-        lastEvent = "cache-fresh"
+    local customPath, customPathError = configPalettesDirectory()
+    if customPath == nil then
+        customDirectory = ""
+        communityError = bounded(customPathError, MAX_ERROR_BYTES)
+        lastErrorAt = nowText()
+        lastEvent = "backend-unavailable"
         publishStatus(false)
         return false
     end
-
+    customDirectory = customPath
+    if not backendSupportsPalettes() then
+        inventoryRetryRequested = true
+        inventoryRetryForce = inventoryRetryForce or force == true
+        communityError = "Install a compatible wall-in-one-backend or select its executable path"
+        lastErrorAt = nowText()
+        lastEvent = "backend-unavailable"
+        publishStatus(false)
+        return false
+    end
+    local effectiveForce = force == true or inventoryRetryForce
+    inventoryRetryRequested = false
+    inventoryRetryForce = false
+    pendingInventoryNonce = nextInventoryNonce()
+    pendingInventoryForce = effectiveForce
     communityInFlight = true
-    lastRefreshAt = nowText()
     lastEvent = bounded(reason or "refresh-started", 80)
-    local operation = {
-        generation = communityGeneration,
-        url = COMMUNITY_URL,
-    }
-    activeCommunityOperation = operation
-    local allocated, allocationError = allocateCommunityTransport(operation)
-    if allocated ~= true then
-        failCommunityRefresh(allocationError, operation)
+    noctalia.state.set(BACKEND_PALETTE_COMMAND_KEY, {
+        schema = PROTOCOL,
+        nonce = pendingInventoryNonce,
+        action = BACKEND_CAPABILITY,
+        custom_directory = customPath,
+        force_refresh = effectiveForce,
+    })
+    publishStatus(false)
+    return true
+end
+
+local function adoptInventoryResult(candidate)
+    local sequence = type(candidate) == "table" and tonumber(candidate.sequence) or nil
+    if sequence == nil or sequence <= lastInventoryResultSequence then
         return false
     end
-    local helper = boundedFetchHelper()
-    if helper == nil or not noctalia.commandExists("curl") then
-        failCommunityRefresh("The bundled bounded-fetch helper and curl are required", operation)
+    lastInventoryResultSequence = math.floor(sequence)
+    if tostring(candidate.action or "") ~= BACKEND_CAPABILITY
+        or tonumber(candidate.nonce) ~= pendingInventoryNonce
+    then
         return false
     end
-    local command = table.concat({
-        "exec bash",
-        shellQuote(helper),
-        "palette-catalog",
-        shellQuote(COMMUNITY_URL),
-        shellQuote(operation.response_path),
-        shellQuote(operation.guard_path),
-        shellQuote("-"),
-        "0",
-    }, " ")
-    local accepted = noctalia.runAsync(command, function(result)
-        if not communityOperationIsCurrent(operation) then
-            cleanupCommunityTransport(operation, false)
-            return
-        end
-        local transport, transportKind, transportMessage = boundedFetchResult(result)
-        cleanupCommunityTransport(operation, transport ~= nil)
-        if transport == nil then
-            failCommunityRefresh(
-                "Community palette request failed (" .. tostring(transportKind or "transport") .. "): "
-                    .. tostring(transportMessage or "request failed"),
-                operation
-            )
-            return
-        end
-        local info = noctalia.fileInfo(operation.response_path)
-        if
-            transport.profile ~= "palette-catalog"
-            or transport.status ~= 200
-            or transport.effective_url ~= COMMUNITY_URL
-            or transport.content_type ~= "application/json"
-            or transport.path ~= operation.response_path
-            or transport.bytes < 1
-            or transport.bytes > MAX_BODY_BYTES
-            or type(info) ~= "table"
-            or info.isDir == true
-            or math.floor(tonumber(info.size) or 0) ~= transport.bytes
-        then
-            failCommunityRefresh("Community palette transport returned mismatched response metadata", operation)
-            return
-        end
-        local body, readError = noctalia.readFile(operation.response_path)
-        removeTransportFile(operation.response_path)
-        if type(body) ~= "string" or #body ~= transport.bytes or #body > MAX_BODY_BYTES then
-            failCommunityRefresh(readError or "Community palette response could not be read safely", operation)
-            return
-        end
-        local decoded = noctalia.json.decode(body)
-        local entries, parseError = normalizedCommunityCatalog(decoded)
-        if entries == nil then
-            failCommunityRefresh(parseError or "Community palette response was invalid", operation)
-            return
-        end
-
-        activeCommunityOperation = nil
-        communityInFlight = false
-        communityPalettes = entries
-        cacheLoaded = true
-        cacheSource = "network"
-        cacheFetchedAt = nowSeconds()
-        cacheFetchedAtText = nowText()
-        lastCommunitySuccessAt = cacheFetchedAtText
-        communityError = ""
-        lastEvent = "refresh-complete"
-
-        local saved, saveError = atomicWriteCache(entries, cacheFetchedAt, cacheFetchedAtText)
-        if saved then
-            cacheSource = "primary"
-            cacheError = ""
-        else
-            cacheError = bounded(saveError or "Community palette cache could not be saved", MAX_ERROR_BYTES)
-            lastErrorAt = nowText()
-        end
+    local attemptedForce = pendingInventoryForce
+    communityInFlight = false
+    pendingInventoryNonce = 0
+    pendingInventoryForce = false
+    if candidate.ok ~= true then
+        local failure = type(candidate.error) == "table" and candidate.error or {}
+        local kind = tostring(failure.kind or "")
+        inventoryRetryRequested = kind == "unavailable" or kind == "cancelled"
+        inventoryRetryForce = inventoryRetryRequested and (inventoryRetryForce or attemptedForce)
+        communityError = bounded(failure.message or "Palette inventory backend failed", MAX_ERROR_BYTES)
+        lastErrorAt = nowText()
+        lastEvent = "refresh-failed"
         publishStatus(false)
-    end, COMMUNITY_FETCH_TIMEOUT_MS)
-    if accepted ~= true then
-        failCommunityRefresh("Noctalia could not start bounded community palette transport", operation)
-        return false
+        return true
+    end
+    local inventory = candidate.palettes
+    local cache = type(inventory) == "table" and inventory.cache or nil
+    if type(inventory) ~= "table"
+        or type(inventory.community) ~= "table"
+        or type(inventory.custom) ~= "table"
+        or #inventory.community > MAX_PALETTES
+        or #inventory.custom > MAX_PALETTES
+        or type(cache) ~= "table"
+        or type(inventory.signature) ~= "string"
+        or #inventory.signature ~= 64
+        or inventory.signature:match("^%x+$") == nil
+    then
+        communityError = "Palette inventory backend returned an invalid normalized result"
+        lastErrorAt = nowText()
+        lastEvent = "refresh-failed"
+        publishStatus(false)
+        return true
+    end
+    communityPalettes = inventory.community
+    customPalettes = inventory.custom
+    customDirectory = bounded(inventory.custom_directory, 4096)
+    customInvalidCount = math.floor(tonumber(inventory.invalid_custom) or 0)
+    communityError = bounded(inventory.community_error, MAX_ERROR_BYTES)
+    customError = bounded(inventory.custom_error, MAX_ERROR_BYTES)
+    cacheError = bounded(inventory.cache_error, MAX_ERROR_BYTES)
+    cacheLoaded = cache.loaded == true
+    cacheSource = bounded(cache.source, 80)
+    cacheFetchedAt = math.floor(tonumber(cache.fetched_at) or 0)
+    cacheFetchedAtText = bounded(cache.fetched_at_text, 80)
+    lastRefreshAt = bounded(inventory.last_refresh_at, 80)
+    lastCommunitySuccessAt = bounded(inventory.last_success_at, 80)
+    lastCustomRefreshAt = bounded(inventory.custom_refreshed_at, 80)
+    lastEvent = bounded(inventory.last_event, 80)
+    inventorySignature = inventory.signature:lower()
+    inventoryRetryForce = false
+    if combinedError() ~= "" then
+        lastErrorAt = nowText()
     end
     publishStatus(false)
     return true
@@ -1613,6 +1132,7 @@ local function clearInventoryState()
     lastRefreshAt = ""
     lastCommunitySuccessAt = ""
     lastCustomRefreshAt = ""
+    inventorySignature = ""
     pendingPreviewRequest = nil
     previewCache = {}
     previewCacheOrder = {}
@@ -1628,11 +1148,13 @@ local function clearInventoryState()
 end
 
 local function deactivateForMissingImageRoot(reason)
-    communityGeneration += 1
     nextPreviewGeneration()
-    cleanupCommunityTransport(activeCommunityOperation, false)
     cleanupPreviewOperation(activePreviewOperation)
-    activeCommunityOperation = nil
+    inventoryRetryRequested = false
+    inventoryRetryForce = false
+    completedInventoryResult = nil
+    pendingInventoryNonce = 0
+    pendingInventoryForce = false
     activePreviewOperation = nil
     communityInFlight = false
     ready = false
@@ -1649,8 +1171,6 @@ local function initializeForImageRoot(root)
     configurationError = ""
     clearInventoryState()
     sweepOwnedPreviewFiles()
-    loadCommunityCache()
-    refreshCustomPalettes()
     ready = true
     lastEvent = "image-directory-ready"
 end
@@ -1700,13 +1220,26 @@ local function handleCommand(command)
     end
 
     if action == "refresh" then
-        refreshCustomPalettes()
-        refreshCommunity(command.force == true, "refresh-started")
+        requestInventory(command.force == true, "refresh-started")
     else
         requestAdaptivePreview(command)
     end
     publishStatus(false)
     return true
+end
+
+function update()
+    noctalia.setUpdateInterval(if completedInventoryResult ~= nil then 100 else 1000)
+    if completedInventoryResult ~= nil then
+        local candidate = completedInventoryResult
+        completedInventoryResult = nil
+        adoptInventoryResult(candidate)
+    end
+    if inventoryRetryRequested and ready then
+        if backendSupportsPalettes() then
+            requestInventory(inventoryRetryForce, "backend-ready")
+        end
+    end
 end
 
 function onConfigChanged()
@@ -1722,24 +1255,24 @@ function onConfigChanged()
         end
         initializeForImageRoot(configuredRoot)
         -- A newly authorized root gets one normal TTL-gated catalog refresh.
-        refreshCommunity(false, "image-directory-ready")
+        requestInventory(false, "image-directory-ready")
         publishStatus(false)
         return
     end
 
-    -- Unrelated config changes preserve the previous service behavior: custom
-    -- palette inventory is rescanned without bypassing the community TTL.
-    refreshCustomPalettes()
-    lastEvent = "custom-refreshed"
+    -- The backend re-scans custom files while honoring the community TTL.
+    requestInventory(false, "custom-refreshed")
     publishStatus(false)
 end
 
 function onExit(_signal, _reason)
-    communityGeneration += 1
     nextPreviewGeneration()
-    cleanupCommunityTransport(activeCommunityOperation, false)
     cleanupPreviewOperation(activePreviewOperation)
-    activeCommunityOperation = nil
+    inventoryRetryRequested = false
+    inventoryRetryForce = false
+    completedInventoryResult = nil
+    pendingInventoryNonce = 0
+    pendingInventoryForce = false
     activePreviewOperation = nil
     pendingPreviewRequest = nil
     previewCache = {}
@@ -1844,6 +1377,9 @@ noctalia.state.set(STATUS_KEY, {
 })
 
 noctalia.state.watch(COMMAND_KEY, handleCommand)
+noctalia.state.watch(BACKEND_PALETTE_RESULTS_KEY, function(nextResult)
+    completedInventoryResult = if type(nextResult) == "table" then nextResult else nil
+end)
 
 if startupImageRoot ~= nil then
     initializeForImageRoot(startupImageRoot)
@@ -1854,8 +1390,8 @@ end
 -- Watches do not replay a command that landed during service replacement.
 -- Consume it once if its nonce is newer; otherwise perform one TTL-gated
 -- startup refresh. There is intentionally no periodic network poller.
-local consumedCurrentCommand = handleCommand(noctalia.state.get(COMMAND_KEY))
-if ready and not consumedCurrentCommand then
-    refreshCommunity(false, "startup-refresh")
+handleCommand(noctalia.state.get(COMMAND_KEY))
+if ready and not communityInFlight then
+    requestInventory(false, "startup-refresh")
 end
 publishStatus(false)
