@@ -7,7 +7,7 @@ license = "MIT"
 icon = "library-photo"
 description = "Launch and control the Wall-in-One wallpaper app from Noctalia."
 deprecated = false
-tags = ["bar", "panel", "service", "shortcut", "theming", "utility", "video", "wallpaper"]
+tags = ["bar", "panel", "service", "theming", "utility", "video", "wallpaper"]
 dependencies = ["wall-in-one"]
 
 # Both settings belong to the singleton service: it owns the only process that
@@ -39,17 +39,11 @@ entry = "service.luau"
 id = "wall-in-one"
 entry = "widget.luau"
 
-  # API 14+ defaults, all overridable per placement in the widget editor.
-  # Transport lives on the buttons and the wheel; everything stateful lives in
-  # the panel behind the conventional right click.
+  # The widget is deliberately only a way into the playlist menu. Wallpaper
+  # playback policy belongs to the standalone app, not to hidden bar gestures.
   [widget.actions]
-  left = "plugin goober/wall-in-one:control all next"
-  middle = "plugin goober/wall-in-one:control all random"
+  left = "panel-toggle goober/wall-in-one:controls"
   right = "panel-toggle goober/wall-in-one:controls"
-  back = "plugin goober/wall-in-one:control all prev"
-  forward = "plugin goober/wall-in-one:control all dynamics"
-  scroll_up = "plugin goober/wall-in-one:control all prev"
-  scroll_down = "plugin goober/wall-in-one:control all next"
 
   [[widget.setting]]
   key = "display_mode"
@@ -71,13 +65,6 @@ entry = "widget.luau"
   default = "library-photo"
 
   [[widget.setting]]
-  key = "paused_glyph"
-  type = "glyph"
-  label_key = "settings.glyphs.paused"
-  description_key = "settings.glyphs.description"
-  default = "player-pause"
-
-  [[widget.setting]]
   key = "stopped_glyph"
   type = "glyph"
   label_key = "settings.glyphs.stopped"
@@ -89,12 +76,6 @@ entry = "widget.luau"
   type = "color"
   label_key = "settings.colors.active"
   default = "on_surface"
-
-  [[widget.setting]]
-  key = "paused_color"
-  type = "color"
-  label_key = "settings.colors.paused"
-  default = "tertiary"
 
   [[widget.setting]]
   key = "stopped_color"
@@ -111,7 +92,3 @@ placement = "attached"
 position = "auto"
 open_near_click = true
 dismiss_on_outside_click = true
-
-[[shortcut]]
-id = "wallpaper"
-entry = "shortcut.luau"

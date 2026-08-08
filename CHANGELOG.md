@@ -15,32 +15,38 @@ All notable staging changes will be recorded here.
 
 ## Wall-in-One 0.1.0 - Thin client for the standalone application
 
+- Make the plugin deliberately minimal: both widget clicks open one compact
+  playlist menu; remove hidden playback gestures, the next/random shortcut,
+  and the duplicated cycle, dynamics, interval, and palette controls.
+- Add playlist switching, return-to-schedule, current calendar context, and
+  per-display playlist assignment to the bar menu. Editing pairings,
+  playlists, and schedule rules remains in the full application.
+- Start wallpaper automation when the plugin loads. Prefer the packaged
+  `wall-in-one.service` systemd user unit and fall back to a detached
+  `wall-in-one --service`; opening the GUI no longer owns automation lifetime.
 - Replace the in-plugin wallpaper implementation with a client for the
   standalone Wall-in-One GTK4 application. The plugin now owns a bar widget, a
-  controls panel, a Control Center shortcut, and the `palette.json.tmpl`
+  playlist panel, a singleton control service, and the `palette.json.tmpl`
   Noctalia user template, and nothing else.
 - Drive the running app only through `wall-in-one ctl <verb>`, the app's own
   client for its control socket at `$XDG_RUNTIME_DIR/wall-in-one.sock`. The
   singleton `control` service is the only entry that spawns a process; the
-  widget, panel, and shortcut communicate through a shared state channel.
+  widget and panel communicate through shared state channels.
   Captured control invocations carry an 8-second host callback timeout, at most
   one runs at a time, the status poll coalesces across placements, and repeated
   failures are logged once rather than every tick.
-- Start or present the GTK application through the detached, no-callback
-  `wall-in-one` invocation when the user asks. The panel and stopped shortcut
-  expose that action directly; a stopped bar gesture keeps one bounded replay,
-  polls readiness every 250 ms for at most 10 seconds, then restores the normal
-  5–300 second status interval.
+- Present the GTK configuration window through a detached, no-callback plain
+  `wall-in-one` invocation. It activates the already-running service process.
 - Add a focused offline thin-client gate covering the manifest, translations,
   Luau compilation, detached launch, startup deadline, bounded command queue,
   status parsing, and one-shot control replay.
 - Treat a missing socket as the resting state rather than a fault: `ctl` exits
   3 immediately when nothing is listening, so the widget reads `Not running`,
   the panel disables its controls, and nothing spins or notifies.
-- Exercise `next`, `prev`, `random`, and `dynamics` from widget gestures,
-  `shuffle`, `cycle`, `cycle-interval`, `dynamics`, `reload-palette`, and
-  `status` from the panel, and `next`/`random` from the shortcut. `quit` is
-  deliberately not exposed.
+- Exercise only `playlists`, `playlist-use`, `schedule`, `displays`,
+  `display-assign`, `display-clear`, and `status`. Destructive playlist and
+  schedule editing, direct wallpaper navigation, and `quit` are deliberately
+  not exposed by the bar.
 - Remove `backend.luau`, `renderer.luau`, `motionbgs.luau`, `palettes.luau`,
   `wallhaven.luau`, the six provider scripts, the 295 KB offline contract
   suite, `ADAPTERS.md`, `TESTING.md`, and the separately staged

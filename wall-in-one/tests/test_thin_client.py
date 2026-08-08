@@ -1,4 +1,4 @@
-"""Small offline contract test for the Wall-in-One 1.0 thin client."""
+"""Small offline contract test for the Wall-in-One 0.1 thin client."""
 
 from __future__ import annotations
 
@@ -83,7 +83,6 @@ class ThinClientContract(unittest.TestCase):
             "service": [("control", "service.luau")],
             "widget": [("wall-in-one", "widget.luau")],
             "panel": [("controls", "panel.luau")],
-            "shortcut": [("wallpaper", "shortcut.luau")],
         }
         declared: set[str] = set()
         for entry_type, entries in expected.items():
@@ -118,55 +117,58 @@ class ThinClientContract(unittest.TestCase):
                     r'noctalia\.(?:tr|trp)\(\s*["\']([^"\']+)["\']', read(entry_name)
                 )
             )
-        # These keys are selected dynamically or passed through the panel's
-        # shared toggle helper, so a literal tr() scan cannot see them.
+        # These keys are selected dynamically, so a literal tr() scan cannot
+        # see them.
         referenced.update(
             {
-                "panel.cycle",
-                "panel.dynamics",
-                "panel.shuffle",
-                "widget.off",
-                "widget.on",
+                "panel.playlists.empty",
+                "panel.playlists.unavailable",
             }
         )
         missing = referenced - translations.keys()
         self.assertFalse(missing, f"missing translations: {missing}")
 
         actions = manifest["widget"][0]["actions"]
-        for action in actions.values():
-            if action.startswith("plugin "):
-                self.assertRegex(
-                    action,
-                    r"^plugin goober/wall-in-one:control all "
-                    r"(?:next|prev|random|dynamics)$",
-                )
-            elif action.startswith("panel-toggle "):
-                self.assertEqual(action, "panel-toggle goober/wall-in-one:controls")
-            else:
-                self.fail(f"widget action bypasses a declared entry: {action}")
+        self.assertEqual(
+            actions,
+            {
+                "left": "panel-toggle goober/wall-in-one:controls",
+                "right": "panel-toggle goober/wall-in-one:controls",
+            },
+        )
+        self.assertNotIn("shortcut", manifest)
 
     def test_service_launch_and_retry_contract_is_explicit(self) -> None:
         source = read("service.luau")
-        self.assertEqual(source.count("noctalia.runAsync("), 2)
+        self.assertEqual(source.count("noctalia.runAsync("), 4)
 
         begin = source[
             source.index("local function beginLaunch") : source.index(
                 "local function finish"
             )
         ]
-        launch_lines = [
-            line.strip() for line in begin.splitlines() if "noctalia.runAsync(" in line
+        direct = source[
+            source.index("launchDirect = function") : source.index(
+                "local function beginLaunch"
+            )
         ]
-        self.assertEqual(
-            launch_lines,
-            ['if not noctalia.runAsync(shellQuote(command) .. " --service") then'],
+        self.assertIn(
+            'if not noctalia.runAsync(shellQuote(command) .. " --service") then',
+            direct,
         )
-        self.assertNotRegex(launch_lines[0], r"\bctl\b|function\s*\(|[,;&|]")
+        self.assertIn('local SYSTEMD_START = "systemctl --user start wall-in-one.service"', source)
+        self.assertIn('configuredOverride() == "" and noctalia.commandExists("systemctl")', begin)
+        self.assertIn(
+            "local started = noctalia.runAsync(SYSTEMD_START, function(result)", begin
+        )
+        self.assertIn("launchDirect(command)", begin)
 
         invoke = source[
             source.index("invoke = function(job)") : source.index("pump = function()")
         ]
         for fragment in (
+            'if job.verb == "open-app" then',
+            "noctalia.runAsync(shellQuote(command))",
             'local parts = { shellQuote(command), "ctl", job.verb }',
             "table.insert(parts, shellQuote(job.argument))",
             'noctalia.runAsync(table.concat(parts, " "), function(result)',
@@ -177,7 +179,7 @@ class ThinClientContract(unittest.TestCase):
         constants = {
             name: int(value)
             for name, value in re.findall(
-                r"local (CALL_TIMEOUT_MS|STARTUP_CALL_TIMEOUT_MS|STARTUP_POLL_MS|"
+                r"local (CALL_TIMEOUT_MS|STARTUP_CALL_TIMEOUT_MS|SYSTEMD_CALL_TIMEOUT_MS|STARTUP_POLL_MS|"
                 r"STARTUP_TIMEOUT_SECONDS|QUEUE_LIMIT) = (\d+)",
                 source,
             )
@@ -187,6 +189,7 @@ class ThinClientContract(unittest.TestCase):
             {
                 "CALL_TIMEOUT_MS": 8000,
                 "STARTUP_CALL_TIMEOUT_MS": 1500,
+                "SYSTEMD_CALL_TIMEOUT_MS": 3000,
                 "STARTUP_POLL_MS": 250,
                 "STARTUP_TIMEOUT_SECONDS": 10,
                 "QUEUE_LIMIT": 8,
@@ -209,6 +212,25 @@ class ThinClientContract(unittest.TestCase):
             'math.max(5, math.min(300, tonumber(cfg("refresh_interval_seconds")) or 15))',
             source,
         )
+        self.assertTrue(source.rstrip().endswith('enqueue("status", nil, true)'))
+
+        panel = read("panel.luau")
+        for verb in (
+            "playlists",
+            "playlist-use",
+            "display-assign",
+            "display-clear",
+            "open-app",
+        ):
+            self.assertIn(f'"{verb}"', panel)
+        for removed in (
+            'send("next"',
+            'send("random"',
+            'send("cycle"',
+            'send("dynamics"',
+            'send("reload-palette"',
+        ):
+            self.assertNotIn(removed, panel)
 
     def test_luau_entries_compile_when_compiler_is_available(self) -> None:
         compiler = discover_tool("luau-compile")
@@ -240,6 +262,7 @@ class ThinClientContract(unittest.TestCase):
             local watchers = {}
             local now = 100
             local configuredBinary = "/tmp/wall in ' one"
+            local systemctlAvailable = false
             local os = { time = function() return now end }
             local noctalia = {
                 getConfig = function(key)
@@ -254,7 +277,11 @@ class ThinClientContract(unittest.TestCase):
                 },
                 expandPath = function(path) return path end,
                 fileExists = function(path) return path == configuredBinary end,
-                commandExists = function(_name) return false end,
+                commandExists = function(name)
+                    if name == "systemctl" then return systemctlAvailable end
+                    if name == "wall-in-one" then return configuredBinary == "" end
+                    return false
+                end,
                 setUpdateInterval = function(value) table.insert(intervals, value) end,
                 runAsync = function(command, callback, timeout)
                     table.insert(calls, { command = command, callback = callback, timeout = timeout })
@@ -279,74 +306,88 @@ class ThinClientContract(unittest.TestCase):
                 calls[index].callback(result)
             end
 
-            assert(#calls == 1, "initial status poll was not serialized")
-            assert(calls[1].command == quotedBinary .. " ctl status", calls[1].command)
-            assert(calls[1].timeout == 8000, "resting ctl timeout changed")
+            -- The plugin probes first and starts nothing when an existing
+            -- service answers. Exit 3 is the only path that launches one.
+            assert(#calls == 1 and calls[1].command == quotedBinary .. " ctl status")
+            assert(calls[1].timeout == 8000)
             complete(1, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
-
-            onIpc("next", nil)
-            assert(#calls == 2 and calls[2].command == quotedBinary .. " ctl next")
-            assert(calls[2].timeout == 8000 and type(calls[2].callback) == "function")
-            complete(2, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
-
-            assert(#calls == 4, "stopped gesture did not launch and begin readiness polling")
-            assert(calls[3].command == quotedBinary, calls[3].command)
-            assert(calls[3].callback == nil and calls[3].timeout == nil, "app launch is not detached")
-            assert(calls[4].command == quotedBinary .. " ctl status")
-            assert(calls[4].timeout == 1500 and type(calls[4].callback) == "function")
+            assert(#calls == 3, "absent service did not launch and start readiness polling")
+            assert(calls[2].command == quotedBinary .. " --service", calls[2].command)
+            assert(calls[2].callback == nil and calls[2].timeout == nil)
+            assert(calls[3].command == quotedBinary .. " ctl status", calls[3].command)
+            assert(calls[3].timeout == 1500 and type(calls[3].callback) == "function")
             assert(startupDeadline == 110 and intervals[#intervals] == 250)
 
-            now = 109
-            complete(4, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
-            assert(states[STATE_KEY].launching == true, "startup stopped before its deadline")
-            update()
-            assert(#calls == 5 and calls[5].timeout == 1500)
-            now = 110
-            complete(5, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
-            assert(states[STATE_KEY].launching == false, "startup exceeded its deadline")
-            assert(states[STATE_KEY].error == "state.launch_failed")
-            assert(intervals[#intervals] == 15000, "startup poll rate leaked into resting state")
-
-            onIpc("cycle-interval", { argument = "60" })
-            assert(calls[6].command == quotedBinary .. " ctl cycle-interval '60'", calls[6].command)
-            assert(calls[6].timeout == 8000 and type(calls[6].callback) == "function")
-            for _index = 1, 20 do onIpc("random", nil) end
-            assert(#queue == QUEUE_LIMIT and QUEUE_LIMIT == 8, "command queue is not bounded")
-            complete(6, { timedOut = true, exitCode = 0, stdout = "", stderr = "" })
-            assert(states[STATE_KEY].error == "state.timed_out", "ctl timeout was not surfaced")
-
-            -- A fresh stopped gesture gets exactly one detached launch, one
-            -- readiness probe, and one replay after the app reports ready.
-            table.clear(queue)
-            busy = false
-            calls = {}
-            now = 200
-            onIpc("next", nil)
-            assert(#calls == 1 and calls[1].command == quotedBinary .. " ctl next")
-            complete(1, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
-            assert(#calls == 3, "gesture did not create one launch and one readiness probe")
-            assert(calls[2].command == quotedBinary and calls[2].callback == nil)
-            assert(calls[3].command == quotedBinary .. " ctl status" and calls[3].timeout == 1500)
             complete(3, {
                 timedOut = false,
                 exitCode = 0,
                 stdout = "set fixture.jpg; 1 of 1 playable; shuffle=off cycle=off cycle-interval=900 dynamics=on",
                 stderr = "",
             })
-            assert(#calls == 4 and calls[4].command == quotedBinary .. " ctl next")
-            assert(calls[4].timeout == 8000, "replayed control kept the startup timeout")
-            complete(4, { timedOut = false, exitCode = 0, stdout = "next", stderr = "" })
-            assert(#calls == 5 and calls[5].command == quotedBinary .. " ctl status")
+            assert(states[STATE_KEY].running == true and states[STATE_KEY].launching == false)
+            assert(intervals[#intervals] == 15000, "successful startup did not restore resting polling")
+
+            -- One playlists request refreshes the whole compact menu in a
+            -- serialized playlists -> schedule -> displays chain.
+            onIpc("playlists", nil)
+            assert(#calls == 4 and calls[4].command == quotedBinary .. " ctl playlists")
+            complete(4, {
+                timedOut = false,
+                exitCode = 0,
+                stdout = "# playlists: 2\n# fields: name, entries, active\nDay set\t4\tyes\nNight\t2\tno",
+                stderr = "",
+            })
+            assert(#calls == 5 and calls[5].command == quotedBinary .. " ctl schedule")
             complete(5, {
                 timedOut = false,
                 exitCode = 0,
-                stdout = "set fixture.jpg; 1 of 1 playable; shuffle=off cycle=off cycle-interval=900 dynamics=on",
+                stdout = "# schedule: 1 rules, default Day set\n# fields: rule, playlist, when, enabled, in-force\nr1\tNight\tweekdays at 22:00-06:00\tyes\tyes",
                 stderr = "",
             })
-            assert(states[STATE_KEY].running == true and states[STATE_KEY].launching == false)
-            assert(states[STATE_KEY].showing == "set fixture.jpg")
-            assert(states[STATE_KEY].playable == 1 and states[STATE_KEY].library == 1)
-            assert(intervals[#intervals] == 15000, "successful startup did not restore resting polling")
+            assert(#calls == 6 and calls[6].command == quotedBinary .. " ctl displays")
+            complete(6, {
+                timedOut = false,
+                exitCode = 0,
+                stdout = "# fields: connector, playlist\neDP-1 (BOE, 2560x1600)\tDay set",
+                stderr = "",
+            })
+            local menu = states[MENU_KEY]
+            assert(#menu.playlists == 2 and menu.playlists[1].name == "Day set")
+            assert(menu.playlists[1].active == true and menu.playlists[1].entries == 4)
+            assert(menu.schedule.default == "Day set" and menu.schedule.rule == "Night")
+            assert(menu.displays[1].connector == "eDP-1" and menu.displays[1].playlist == "Day set")
+
+            -- Arguments and a configured path containing spaces and quotes are
+            -- independently shell-quoted; the graphical app is detached.
+            onIpc("playlist-use", { argument = "Night's set" })
+            assert(calls[7].command == quotedBinary .. " ctl playlist-use 'Night'\"'\"'s set'", calls[7].command)
+            assert(calls[7].timeout == 8000 and type(calls[7].callback) == "function")
+            complete(7, { timedOut = false, exitCode = 0, stdout = "playing Night's set", stderr = "" })
+            assert(calls[8].command == quotedBinary .. " ctl status")
+
+            -- Clear the post-change refresh chain before checking presentation.
+            table.clear(queue)
+            busy = false
+            calls = {}
+            onIpc("open-app", nil)
+            assert(#calls == 1 and calls[1].command == quotedBinary)
+            assert(calls[1].callback == nil and calls[1].timeout == nil)
+
+            -- With no explicit override, systemd is tried once. A missing or
+            -- broken unit falls back to the app's own headless mode.
+            calls = {}
+            table.clear(queue)
+            busy = false
+            clearLaunch()
+            configuredBinary = ""
+            systemctlAvailable = true
+            onIpc("launch", nil)
+            assert(#calls == 1 and calls[1].command == "systemctl --user start wall-in-one.service")
+            assert(calls[1].timeout == 3000 and type(calls[1].callback) == "function")
+            complete(1, { timedOut = false, exitCode = 5, stdout = "", stderr = "unit missing" })
+            assert(#calls == 3, "systemd failure did not use the direct fallback")
+            assert(calls[2].command == "'wall-in-one' --service" and calls[2].callback == nil)
+            assert(calls[3].command == "'wall-in-one' ctl status" and calls[3].timeout == 1500)
         """
 
         with tempfile.TemporaryDirectory(

@@ -5,18 +5,32 @@
     "on_hover": "Show the wallpaper name on hover"
   },
   "panel": {
-    "apply": "Apply",
-    "cycle": "Cycle automatically",
-    "dynamics": "Animate video wallpapers",
-    "interval": "Cycle interval",
-    "interval_invalid": "Enter a whole number of seconds.",
-    "interval_placeholder": "Seconds",
-    "not_running": "Wall-in-One is not running.",
+    "displays": {
+      "choose": "Playlist for this display",
+      "current": "Currently: {playlist}",
+      "follow_default": "Follow the default",
+      "row": "{display} — {playlist}",
+      "title": "Displays"
+    },
+    "not_running": "Starting the Wall-in-One service…",
     "nothing_applied": "No wallpaper applied",
     "open_app": "Open Wall-in-One",
-    "reload_palette": "Reload palette",
+    "playlists": {
+      "empty": "Create a playlist in the app first.",
+      "row": "{name} · {count} entries",
+      "title": "Play now",
+      "unavailable": "Playlists become available when the service is ready."
+    },
+    "schedule": {
+      "active": "Active playlist: {playlist}",
+      "default": "Calendar fallback: {playlist}",
+      "edit": "Edit schedules",
+      "no_playlist": "No active playlist",
+      "resume": "Follow schedule",
+      "rule": "Scheduled now: {playlist} · {when}",
+      "title": "Schedule"
+    },
     "settings": "Plugin settings",
-    "shuffle": "Shuffle order",
     "starting": "Starting Wall-in-One…",
     "summary": "{showing} — {playable} of {total} playable",
     "title": "Wall-in-One"
@@ -28,7 +42,6 @@
     },
     "colors": {
       "active": "Running color",
-      "paused": "Paused color",
       "stopped": "Not-running color"
     },
     "display_mode": {
@@ -38,17 +51,12 @@
     "glyphs": {
       "active": "Running glyph",
       "description": "Use the adjacent Noctalia glyph-picker button to browse and select an icon for this placement.",
-      "paused": "Paused glyph",
       "stopped": "Not-running glyph"
     },
     "refresh": {
       "description": "How often the shared service asks the app for its state.",
       "label": "Refresh seconds"
     }
-  },
-  "shortcut": {
-    "label": "Next wallpaper",
-    "open": "Open Wall-in-One"
   },
   "state": {
     "failed": "The wall-in-one control command failed.",
@@ -57,17 +65,12 @@
     "timed_out": "Wall-in-One did not answer its control socket in time."
   },
   "widget": {
-    "cycle": "Cycle: {value} every {seconds}s",
-    "dynamics": "Dynamics: {value}",
-    "gestures": "Click: next · Middle: random · Right: controls · Wheel: browse",
+    "gestures": "Click to choose a playlist or open the app.",
     "nothing_applied": "No wallpaper applied",
-    "off": "off",
-    "on": "on",
     "playable": "{playable} of {total} playable",
-    "shuffle": "Shuffle: {value}",
     "starting": "Starting…",
     "stopped": "Not running",
-    "stopped_hint": "Start Wall-in-One to control wallpapers from here.",
+    "stopped_hint": "The plugin will start the Wall-in-One service.",
     "title": "Wall-in-One"
   }
 }

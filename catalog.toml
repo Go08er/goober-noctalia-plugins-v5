@@ -36,5 +36,5 @@ icon = "library-photo"
 description = "Launch and control the Wall-in-One wallpaper app from Noctalia."
 deprecated = false
 plugin_api = 17
-tags = ["bar", "panel", "service", "shortcut", "theming", "utility", "video", "wallpaper"]
+tags = ["bar", "panel", "service", "theming", "utility", "video", "wallpaper"]
 dependencies = ["wall-in-one"]

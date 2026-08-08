@@ -1,6 +1,6 @@
 --!nonstrict
--- Bar client. Presentation only: the singleton service owns every call to the
--- app, and the declared widget actions route gestures straight to it.
+-- Bar client. Presentation only: every configured click opens the same small
+-- playlist menu, and the singleton service owns every call to the app.
 
 local STATE_KEY = "wall_in_one_state"
 local MAX_TEXT = 22
@@ -38,16 +38,9 @@ local function shorten(value)
     return if cut == nil then value else string.sub(value, 1, cut - 1) .. "…"
 end
 
-local function onOff(value)
-    return noctalia.tr(if value == true then "widget.on" else "widget.off")
-end
-
 local function presentation()
     if not running() then
         return glyphCfg("stopped_glyph", "photo-off"), widgetCfg("stopped_color")
-    end
-    if state.dynamics ~= true then
-        return glyphCfg("paused_glyph", "player-pause"), widgetCfg("paused_color")
     end
     return glyphCfg("glyph", "library-photo"), widgetCfg("color")
 end
@@ -69,9 +62,6 @@ local function tooltip()
         noctalia.tr("widget.title"),
         if showing ~= "" then showing else noctalia.tr("widget.nothing_applied"),
         noctalia.tr("widget.playable", { playable = tostring(state.playable), total = tostring(state.library) }),
-        noctalia.tr("widget.shuffle", { value = onOff(state.shuffle) }),
-        noctalia.tr("widget.cycle", { value = onOff(state.cycle), seconds = tostring(state.interval) }),
-        noctalia.tr("widget.dynamics", { value = onOff(state.dynamics) }),
         "",
         noctalia.tr("widget.gestures"),
     }, "\n")

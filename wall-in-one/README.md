@@ -6,7 +6,7 @@
 > requires the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which
 > is itself pre-alpha — this plugin is only ever as ready as that is.
 
-Bar controls, a Control Center shortcut, and a palette template for the
+An intentionally small bar menu and a palette template for the
 [Wall-in-One](https://github.com/Go08er/wall-in-one) wallpaper manager. All of
 the wallpaper logic lives in that standalone GTK4 application; this plugin is a
 thin client that drives it over its control socket, so nothing here downloads,
@@ -14,17 +14,24 @@ decodes, or renders anything.
 
 ## Plugin
 
-Plugin id `goober/wall-in-one`, with four entries:
+Plugin id `goober/wall-in-one`, with three entries:
 
 - `control` — the singleton service. It is the only thing that talks to the
-  app, starting `wall-in-one --service` when requested, running
+  app, preferring the packaged `wall-in-one.service` systemd user unit and
+  falling back to `wall-in-one --service`, running
   `wall-in-one ctl <verb>`, and republishing the answer on a shared state
   channel that every other entry reads.
-- `wall-in-one` — the bar widget. Presentation only.
-- `controls` — the panel behind the widget's right click. Open it from
+- `wall-in-one` — the bar widget. Presentation only; clicks open its menu.
+- `controls` — the playlist, schedule, and display menu. Open it from
   anywhere with `noctalia msg panel-toggle goober/wall-in-one:controls`.
-- `wallpaper` — the Control Center shortcut, so a keybind can change the
-  wallpaper without the bar.
+
+The plugin deliberately chooses the **minimal** side of “minimal or fully
+configurable.” It does not hide playback commands behind middle-click, wheel,
+or mouse-button gestures, and it does not duplicate the application's cycle,
+pairing, or schedule editors. The bar menu keeps only the common decisions
+that make sense there: choose the active playlist, resume calendar control,
+inspect display assignments, change a display's playlist, or open the full
+application.
 
 ### How it talks to the app
 
@@ -34,16 +41,17 @@ one JSON object per line in each direction — a request is `{"verb": ...,
 not implement that protocol. `wall-in-one ctl` is the app's own client for it,
 and every plugin control is one asynchronous invocation of a `ctl` verb.
 
-The service being stopped is an ordinary state rather than an error. `ctl` exits 3
-immediately when nothing is listening, so a poll against a dead socket costs
-one failed `connect(2)`. The panel and Control Center shortcut can start or
-present the application, and a bar gesture made while it is closed starts it
-and retries that one gesture once. The long-lived application uses Noctalia's
-detached subprocess call; captured `ctl` invocations remain serialized and
-carry an 8-second host callback timeout. Startup readiness polling runs at
-250 ms for at most 10 seconds and never becomes the resting poll rate. Launching
-the graphical `wall-in-one` command later attaches to that service process and
-presents its configuration window.
+The plugin starts the service when its singleton entry loads. If the packaged
+systemd user unit is available, `systemctl --user start wall-in-one.service`
+owns its lifetime; otherwise the plugin starts `wall-in-one --service`
+directly. The window is only configuration: launching the plain `wall-in-one`
+command later attaches to the existing process, and closing it leaves rotation
+and schedules running.
+
+`ctl` exits 3 immediately when nothing is listening, so a readiness probe
+against a dead socket costs one failed `connect(2)`. Captured calls remain
+serialized and carry an 8-second callback timeout. Startup readiness polling
+runs at 250 ms for at most 10 seconds and never becomes the resting poll rate.
 
 ## Requirements
 
@@ -52,6 +60,10 @@ presents its configuration window.
   This plugin does nothing without it: every entry here is a client of that
   app's control socket.
 - Noctalia 5 with plugin API 17 or newer.
+
+When `systemctl` is available, the plugin uses it to prefer the app's packaged
+user unit. It is optional: a failed or unavailable unit falls back to a
+detached `wall-in-one --service`.
 
 Install the app first. It is a Nix flake:
 
@@ -67,31 +79,26 @@ that is not on `PATH` — a checkout's `result/bin/wall-in-one`, say — set the
 ## Usage
 
 Place the **Wall-in-One** widget on a bar. It shows what is on screen now, or
-`Not running` when the app is closed. Use **Open Wall-in-One** in the panel or
-the Control Center shortcut to launch it. A wallpaper gesture from the stopped
-widget also launches the application and replays that one action after its
-socket becomes ready.
+`Starting` while the service comes up. Either primary or secondary click opens
+the same compact menu; no other gesture changes wallpaper state.
 
 | gesture | action |
 |---|---|
-| left click | next wallpaper |
-| middle click | random wallpaper |
-| right click | open the controls panel |
-| back button | previous wallpaper |
-| forward button | pause or resume video wallpapers |
-| wheel up / down | previous / next wallpaper |
+| left click | open the playlist menu |
+| right click | open the playlist menu |
 
-Every one of those is a Noctalia action default and can be remapped per
-placement in the widget editor.
+The menu lists named playlists with their entry counts and marks the active
+one. Choosing another invokes `playlist-use <name>`; **Follow schedule** invokes
+`playlist-use none`. It also shows the calendar rule currently in force and
+the app's default, and lists displays with their current assignment. Open a
+display row to assign a playlist or return it to the default. **Edit schedules**
+opens the application, where schedule rules can be changed safely on the full
+Display schedules page.
 
-The controls panel can open/present the application and holds the settings that
-persist: shuffle order, automatic cycling, the cycle interval in seconds, the
-dynamics pause, and a palette reload. State-changing controls remain disabled
-until the application's socket is ready.
-
-The Control Center shortcut opens the application when it is stopped. Once it
-is running, a left click advances the wallpaper and a right click picks a
-random one, which is what a compositor keybind ends up driving.
+The app does not currently expose a control-socket or command-line deep link
+for selecting that page, so the plugin can present the window but cannot force
+its active tab. That small app-side API is the remaining piece needed for a
+true “open directly on Display schedules” action.
 
 ### Colour sync
 
@@ -134,8 +141,5 @@ Plugin settings, owned by the singleton service:
 Widget settings, per bar placement:
 
 - **Wallpaper name** — always, on hover, or never.
-- **Running / paused / not-running glyph** — the icon for each state.
-- **Running / paused / not-running color** — the colour for each state.
-
-The paused state is what you see when video wallpapers are paused and their
-paired stills are showing instead.
+- **Running / not-running glyph** — the icon for each state.
+- **Running / not-running color** — the colour for each state.
