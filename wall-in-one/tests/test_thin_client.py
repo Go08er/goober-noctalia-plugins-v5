@@ -75,7 +75,7 @@ class ThinClientContract(unittest.TestCase):
         manifest = tomllib.loads(manifest_source)
         self.assertEqual(manifest["id"], "goober/wall-in-one")
         self.assertEqual(manifest["name"], "Wall-in-One")
-        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["version"], "0.1.0")
         self.assertEqual(manifest["plugin_api"], 17)
         self.assertEqual(manifest["dependencies"], ["wall-in-one"])
 

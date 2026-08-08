@@ -17,7 +17,7 @@ decodes, or renders anything.
 Plugin id `goober/wall-in-one`, with four entries:
 
 - `control` — the singleton service. It is the only thing that talks to the
-  app, starting the plain `wall-in-one` command when requested, running
+  app, starting `wall-in-one --service` when requested, running
   `wall-in-one ctl <verb>`, and republishing the answer on a shared state
   channel that every other entry reads.
 - `wall-in-one` — the bar widget. Presentation only.
@@ -34,14 +34,16 @@ one JSON object per line in each direction — a request is `{"verb": ...,
 not implement that protocol. `wall-in-one ctl` is the app's own client for it,
 and every plugin control is one asynchronous invocation of a `ctl` verb.
 
-The app being closed is an ordinary state rather than an error. `ctl` exits 3
+The service being stopped is an ordinary state rather than an error. `ctl` exits 3
 immediately when nothing is listening, so a poll against a dead socket costs
 one failed `connect(2)`. The panel and Control Center shortcut can start or
 present the application, and a bar gesture made while it is closed starts it
 and retries that one gesture once. The long-lived application uses Noctalia's
 detached subprocess call; captured `ctl` invocations remain serialized and
 carry an 8-second host callback timeout. Startup readiness polling runs at
-250 ms for at most 10 seconds and never becomes the resting poll rate.
+250 ms for at most 10 seconds and never becomes the resting poll rate. Launching
+the graphical `wall-in-one` command later attaches to that service process and
+presents its configuration window.
 
 ## Requirements
 

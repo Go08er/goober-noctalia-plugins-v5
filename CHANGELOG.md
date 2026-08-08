@@ -13,7 +13,7 @@ All notable staging changes will be recorded here.
   Usage, Requirements, and Settings sections, and document why Wall-in-One's
   isolated Luau entries cannot be split into ordinary imported modules yet.
 
-## Wall-in-One 1.0.0 - Thin client for the standalone application
+## Wall-in-One 0.1.0 - Thin client for the standalone application
 
 - Replace the in-plugin wallpaper implementation with a client for the
   standalone Wall-in-One GTK4 application. The plugin now owns a bar widget, a

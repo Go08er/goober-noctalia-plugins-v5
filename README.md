@@ -16,7 +16,7 @@ catalogs; add it as a custom Git source using one of the methods below.
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
 | `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
-| `goober/wall-in-one` | `1.0.0` | **Pre-alpha, in testing.** v5.0.0/API 17 launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
+| `goober/wall-in-one` | `0.1.0` | **Pre-alpha, in testing.** v5.0.0/API 17 launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
 
 ## Repository layout
 
@@ -205,7 +205,7 @@ boundary.
 
 ### Wall-in-One boundary
 
-Wall-in-One `1.0.0` is a thin client. Every wallpaper capability — library
+Wall-in-One `0.1.0` is a thin client. Every wallpaper capability — library
 scanning, still/video pairing, playlists, providers, palette generation, and
 the video renderer — belongs to the standalone
 [Wall-in-One](https://github.com/Go08er/wall-in-one) GTK4 application. The
@@ -291,7 +291,7 @@ not vendored here while these beta plugin implementations are changing quickly.
 
 This repository is a directly importable custom Git source for native v5
 testing. Hydra Update Examiner and NocVox are ready for direct testing here.
-Wall-in-One `1.0.0` is newly rewritten as a client for the standalone
+Wall-in-One `0.1.0` is newly rewritten as a client for the standalone
 application and has not yet been exercised against a live shell; it has no VM
 gate, so treat it as a beta test target rather than unattended daily-driver
 software. None of the

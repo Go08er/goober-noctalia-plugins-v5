@@ -1,6 +1,6 @@
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "1.0.0"
+version = "0.1.0"
 plugin_api = 17
 author = "goober"
 license = "MIT"
