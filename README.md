@@ -16,7 +16,7 @@ catalogs; add it as a custom Git source using one of the methods below.
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
 | `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
-| `goober/wall-in-one` | `1.0.0` | v5.0.0/API 17 launcher and thin client for the Wall-in-One app |
+| `goober/wall-in-one` | `1.0.0` | **Pre-alpha, in testing.** v5.0.0/API 17 launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
 
 ## Repository layout
 

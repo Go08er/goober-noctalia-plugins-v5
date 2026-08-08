@@ -1,5 +1,11 @@
 # Wall-in-One
 
+> [!WARNING]
+> **Pre-alpha — in testing.** The plugin loads and its entries work, but it has
+> had almost no real use. Expect bugs and expect settings to move. It also
+> requires the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which
+> is itself pre-alpha — this plugin is only ever as ready as that is.
+
 Bar controls, a Control Center shortcut, and a palette template for the
 [Wall-in-One](https://github.com/Go08er/wall-in-one) wallpaper manager. All of
 the wallpaper logic lives in that standalone GTK4 application; this plugin is a
