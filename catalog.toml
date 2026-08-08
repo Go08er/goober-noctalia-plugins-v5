@@ -29,12 +29,12 @@ dependencies = ["voxtype"]
 [[plugin]]
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "0.8.0"
+version = "1.0.0"
 author = "goober"
 license = "MIT"
 icon = "library-photo"
-description = "Browse stills, videos, and Workshop scenes; edit shared defaults and schedule mixed playlists per display."
+description = "Launch and control the Wall-in-One wallpaper app from Noctalia."
 deprecated = false
 plugin_api = 17
-tags = ["wallpaper", "bar", "panel", "shortcut", "theming", "video", "service", "utility"]
-dependencies = ["bash", "curl", "sha256sum"]
+tags = ["bar", "panel", "service", "shortcut", "theming", "utility", "video", "wallpaper"]
+dependencies = ["wall-in-one"]

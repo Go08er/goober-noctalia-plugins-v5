@@ -31,17 +31,11 @@
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
       };
-      wallInOneVmTest = import ./tests/vm/wall-in-one.nix {
-        inherit pkgs;
-        pluginRoot = ./.;
-        noctaliaPackage = noctalia.packages.${system}.default;
-      };
     in
     {
       checks.${system} = {
         noctalia-vm = hydraVmTest;
         nocvox-vm = nocvoxVmTest;
-        wall-in-one-vm = wallInOneVmTest;
       };
 
       packages.${system} = {
@@ -49,8 +43,6 @@
         vm-test-driver = hydraVmTest.driverInteractive;
         vm-test-nocvox = nocvoxVmTest;
         vm-test-nocvox-driver = nocvoxVmTest.driverInteractive;
-        vm-test-wall-in-one = wallInOneVmTest;
-        vm-test-wall-in-one-driver = wallInOneVmTest.driverInteractive;
       };
     };
 }

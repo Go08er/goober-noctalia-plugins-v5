@@ -1,354 +1,117 @@
 id = "goober/wall-in-one"
 name = "Wall-in-One"
-version = "0.8.0"
+version = "1.0.0"
 plugin_api = 17
 author = "goober"
 license = "MIT"
 icon = "library-photo"
-description = "Browse stills, videos, and Workshop scenes; edit shared defaults and schedule mixed playlists per display."
+description = "Launch and control the Wall-in-One wallpaper app from Noctalia."
 deprecated = false
-tags = ["wallpaper", "bar", "panel", "shortcut", "theming", "video", "service", "utility"]
-dependencies = ["bash", "curl", "sha256sum"]
+tags = ["bar", "panel", "service", "shortcut", "theming", "utility", "video", "wallpaper"]
+dependencies = ["wall-in-one"]
 
+# Both settings belong to the singleton service: it owns the only process that
+# talks to the app, so a second bar placement must not be able to poll at a
+# different rate or point at a different binary.
 [[setting]]
-key = "use_wallhaven"
-type = "bool"
-label_key = "settings.use_wallhaven.label"
-description_key = "settings.use_wallhaven.description"
-default = true
-
-[[setting]]
-key = "wallhaven_api_key"
-type = "string"
-label_key = "settings.wallhaven_api_key.label"
-description_key = "settings.wallhaven_api_key.description"
-default = ""
-visible_when = { key = "use_wallhaven", values = ["true"] }
-advanced = true
-
-[[setting]]
-key = "use_motionbgs"
-type = "bool"
-label_key = "settings.use_motionbgs.label"
-description_key = "settings.use_motionbgs.description"
-default = true
-
-[[setting]]
-key = "backend_binary_path"
-type = "file"
-label_key = "settings.backend_binary_path.label"
-description_key = "settings.backend_binary_path.description"
-default = ""
-advanced = true
-
-[[setting]]
-key = "capture_directory"
-type = "folder"
-label_key = "settings.capture_directory.label"
-description_key = "settings.capture_directory.description"
-default = ""
-
-[[setting]]
-key = "video_directory"
-type = "folder"
-label_key = "settings.video_directory.label"
-description_key = "settings.video_directory.description"
-default = ""
-
-[[setting]]
-key = "motionbgs_quality"
-type = "select"
-label_key = "settings.motionbgs_quality.label"
-description_key = "settings.motionbgs_quality.description"
-default = "hd"
-visible_when = { key = "use_motionbgs", values = ["true"] }
-options = [
-  { value = "hd", label_key = "settings.motionbgs_quality.options.hd" },
-  { value = "4k", label_key = "settings.motionbgs_quality.options.4k" },
-]
-
-[[setting]]
-key = "motionbgs_result_limit"
+key = "refresh_interval_seconds"
 type = "int"
-label_key = "settings.motionbgs_result_limit.label"
-description_key = "settings.motionbgs_result_limit.description"
-default = 48
-min = 1
-max = 48
-visible_when = { key = "use_motionbgs", values = ["true"] }
-advanced = true
-
-[[setting]]
-key = "motionbgs_cache_minutes"
-type = "int"
-label_key = "settings.motionbgs_cache_minutes.label"
-description_key = "settings.motionbgs_cache_minutes.description"
-default = 30
+label_key = "settings.refresh.label"
+description_key = "settings.refresh.description"
+default = 15
 min = 5
-max = 1440
-visible_when = { key = "use_motionbgs", values = ["true"] }
-advanced = true
+max = 300
+step = 5
 
 [[setting]]
-key = "motionbgs_max_download_mb"
-type = "int"
-label_key = "settings.motionbgs_max_download_mb.label"
-description_key = "settings.motionbgs_max_download_mb.description"
-default = 256
-min = 16
-max = 512
-visible_when = { key = "use_motionbgs", values = ["true"] }
-advanced = true
-
-[[setting]]
-key = "auto_capture"
-type = "bool"
-label_key = "settings.auto_capture.label"
-description_key = "settings.auto_capture.description"
-default = true
-
-[[setting]]
-key = "sync_colors"
-type = "bool"
-label_key = "settings.sync_colors.label"
-description_key = "settings.sync_colors.description"
-default = true
-
-[[setting]]
-key = "color_scheme"
-type = "select"
-label_key = "settings.color_scheme.label"
-description_key = "settings.color_scheme.description"
-default = "m3-content"
-visible_when = { key = "sync_colors", values = ["true"] }
-options = [
-  { value = "m3-content", label_key = "settings.color_scheme.options.m3_content" },
-  { value = "m3-tonal-spot", label_key = "settings.color_scheme.options.m3_tonal_spot" },
-  { value = "m3-fruit-salad", label_key = "settings.color_scheme.options.m3_fruit_salad" },
-  { value = "m3-rainbow", label_key = "settings.color_scheme.options.m3_rainbow" },
-  { value = "m3-monochrome", label_key = "settings.color_scheme.options.m3_monochrome" },
-  { value = "vibrant", label_key = "settings.color_scheme.options.vibrant" },
-  { value = "faithful", label_key = "settings.color_scheme.options.faithful" },
-  { value = "soft", label_key = "settings.color_scheme.options.soft" },
-  { value = "dysfunctional", label_key = "settings.color_scheme.options.dysfunctional" },
-  { value = "muted", label_key = "settings.color_scheme.options.muted" },
-]
-
-[[setting]]
-key = "palette_output"
-type = "string"
-label_key = "settings.palette_output.label"
-description_key = "settings.palette_output.description"
-default = ""
-advanced = true
-
-[[setting]]
-key = "video_source"
+key = "binary_path"
 type = "file"
-label_key = "settings.video_source.label"
-description_key = "settings.video_source.description"
-default = ""
-extensions = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".gif"]
-advanced = true
-
-[[setting]]
-key = "manual_pair_file"
-type = "file"
-label_key = "settings.manual_pair_file.label"
-description_key = "settings.manual_pair_file.description"
-default = ""
-extensions = [".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif"]
-advanced = true
-
-[[setting]]
-key = "video_frame_second"
-type = "int"
-label_key = "settings.video_frame_second.label"
-description_key = "settings.video_frame_second.description"
-default = 1
-min = 0
-max = 3600
-advanced = true
-
-[[setting]]
-key = "workshop_id"
-type = "string"
-label_key = "settings.workshop_id.label"
-description_key = "settings.workshop_id.description"
+label_key = "settings.binary.label"
+description_key = "settings.binary.description"
 default = ""
 advanced = true
-
-[[setting]]
-key = "workshop_directory"
-type = "folder"
-label_key = "settings.workshop_directory.label"
-description_key = "settings.workshop_directory.description"
-default = ""
-advanced = true
-
-[[setting]]
-key = "scene_screenshot_delay"
-type = "int"
-label_key = "settings.scene_screenshot_delay.label"
-description_key = "settings.scene_screenshot_delay.description"
-default = 15
-min = 1
-max = 120
-advanced = true
-
-[[setting]]
-key = "cycle_interval_minutes"
-type = "int"
-label_key = "settings.cycle_interval_minutes.label"
-description_key = "settings.cycle_interval_minutes.description"
-default = 15
-min = 1
-max = 43200
-
-[[setting]]
-key = "cycle_order"
-type = "select"
-label_key = "settings.cycle_order.label"
-description_key = "settings.cycle_order.description"
-default = "sequential"
-options = [
-  { value = "sequential", label_key = "settings.cycle_order.options.sequential" },
-  { value = "shuffle", label_key = "settings.cycle_order.options.shuffle" },
-]
-
-[[setting]]
-key = "cycle_start_on_load"
-type = "bool"
-label_key = "settings.cycle_start_on_load.label"
-description_key = "settings.cycle_start_on_load.description"
-default = false
-
-# Noctalia currently exposes plugin settings to Luau as read-only data and has
-# no API for removing retired overrides from a user's configuration. These
-# invisible declarations keep retired configuration keys valid without
-# restoring the removed global backend controls to the settings UI. Per-display
-# engine settings in Wall-in-One's hub remain authoritative.
-[[setting]]
-key = "w_engine_backend"
-type = "string"
-label_key = "settings.retired_compatibility.label"
-description_key = "settings.retired_compatibility.description"
-default = ""
-advanced = true
-visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
-
-[[setting]]
-key = "mpvpaper_backend"
-type = "string"
-label_key = "settings.retired_compatibility.label"
-description_key = "settings.retired_compatibility.description"
-default = ""
-advanced = true
-visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
-
-[[setting]]
-key = "internal_renderer_layer"
-type = "string"
-label_key = "settings.retired_compatibility.label"
-description_key = "settings.retired_compatibility.description"
-default = ""
-advanced = true
-visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
-
-[[setting]]
-key = "mpv_auto_pause_mode"
-type = "string"
-label_key = "settings.retired_compatibility.label"
-description_key = "settings.retired_compatibility.description"
-default = ""
-advanced = true
-visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
-
-# Wall-in-One 0.8 replaces the MotionBGS-only program path with one backend
-# program path shared by library indexing and MotionBGS. Keep the old key
-# invisible so an existing host override does not become an unknown setting.
-# The MotionBGS bridge still accepts it as its final compatibility-only
-# configured fallback, after backend_binary_path and the backend pointer but
-# before PATH. Other backend capabilities never execute this legacy helper.
-[[setting]]
-key = "motionbgs_binary_path"
-type = "string"
-label_key = "settings.retired_compatibility.label"
-description_key = "settings.retired_compatibility.description"
-default = ""
-advanced = true
-visible_when = { key = "capture_directory", values = ["__wall_in_one_retired_setting__"] }
 
 [[service]]
-id = "coordinator"
+id = "control"
 entry = "service.luau"
-
-[[service]]
-id = "backend"
-entry = "backend.luau"
-
-[[service]]
-id = "renderer"
-entry = "renderer.luau"
-
-[[service]]
-id = "motionbgs"
-entry = "motionbgs.luau"
-
-[[service]]
-id = "palettes"
-entry = "palettes.luau"
-
-[[service]]
-id = "wallhaven"
-entry = "wallhaven.luau"
 
 [[widget]]
 id = "wall-in-one"
 entry = "widget.luau"
 
-  # Wall-in-One owns all three buttons through its persisted gesture map.
+  # API 14+ defaults, all overridable per placement in the widget editor.
+  # Transport lives on the buttons and the wheel; everything stateful lives in
+  # the panel behind the conventional right click.
   [widget.actions]
-  middle = "none"
+  left = "plugin goober/wall-in-one:control all next"
+  middle = "plugin goober/wall-in-one:control all random"
+  right = "panel-toggle goober/wall-in-one:controls"
+  back = "plugin goober/wall-in-one:control all prev"
+  forward = "plugin goober/wall-in-one:control all dynamics"
+  scroll_up = "plugin goober/wall-in-one:control all prev"
+  scroll_down = "plugin goober/wall-in-one:control all next"
+
+  [[widget.setting]]
+  key = "display_mode"
+  type = "select"
+  label_key = "settings.display_mode.label"
+  description_key = "settings.display_mode.description"
+  default = "always"
+  options = [
+    { value = "always", label_key = "display_mode.always" },
+    { value = "on_hover", label_key = "display_mode.on_hover" },
+    { value = "icon_only", label_key = "display_mode.icon_only" },
+  ]
 
   [[widget.setting]]
   key = "glyph"
   type = "glyph"
-  label_key = "settings.glyph.label"
-  description_key = "settings.glyph.description"
+  label_key = "settings.glyphs.active"
+  description_key = "settings.glyphs.description"
   default = "library-photo"
 
   [[widget.setting]]
-  key = "label"
-  type = "string"
-  label_key = "settings.label.label"
-  description_key = "settings.label.description"
-  default = "Wall-in-One"
+  key = "paused_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.paused"
+  description_key = "settings.glyphs.description"
+  default = "player-pause"
 
   [[widget.setting]]
-  key = "show_label"
-  type = "bool"
-  label_key = "settings.show_label.label"
-  description_key = "settings.show_label.description"
-  default = true
+  key = "stopped_glyph"
+  type = "glyph"
+  label_key = "settings.glyphs.stopped"
+  description_key = "settings.glyphs.description"
+  default = "photo-off"
 
   [[widget.setting]]
   key = "color"
   type = "color"
-  label_key = "settings.color.label"
-  description_key = "settings.color.description"
+  label_key = "settings.colors.active"
   default = "on_surface"
 
+  [[widget.setting]]
+  key = "paused_color"
+  type = "color"
+  label_key = "settings.colors.paused"
+  default = "tertiary"
+
+  [[widget.setting]]
+  key = "stopped_color"
+  type = "color"
+  label_key = "settings.colors.stopped"
+  default = "on_surface_variant"
+
 [[panel]]
-id = "hub"
+id = "controls"
 entry = "panel.luau"
-width = 1160
-height = 780
-placement = "floating"
-position = "center"
-open_near_click = false
+width = 340
+height = 440
+placement = "attached"
+position = "auto"
+open_near_click = true
 dismiss_on_outside_click = true
 
 [[shortcut]]
-id = "wall-in-one-shortcut"
+id = "wallpaper"
 entry = "shortcut.luau"

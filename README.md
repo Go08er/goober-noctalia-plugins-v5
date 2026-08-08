@@ -16,7 +16,7 @@ catalogs; add it as a custom Git source using one of the methods below.
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
 | `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
-| `goober/wall-in-one` | `0.8.0` | v5.0.0/API 17 mixed wallpaper staging |
+| `goober/wall-in-one` | `1.0.0` | v5.0.0/API 17 launcher and thin client for the Wall-in-One app |
 
 ## Repository layout
 
@@ -44,25 +44,11 @@ wall-in-one/
   README.md
   thumbnail.webp
   service.luau
-  backend.luau
-  renderer.luau
-  motionbgs.luau
-  palettes.luau
-  wallhaven.luau
   panel.luau
   widget.luau
   shortcut.luau
+  palette.json.tmpl
   translations/en.json
-  scripts/capture-still
-  scripts/bounded-fetch
-  scripts/renderer-supervisor
-  scripts/backend-provider
-  scripts/motionbgs-provider
-  scripts/provider-thumbnail
-wall-in-one-backend/
-  wall-in-one-backend
-  wall-in-one-backend.sha256
-  tests/test_backend.py
 tools/validate.py
 flake.nix
 flake.lock
@@ -117,14 +103,11 @@ noctalia msg plugins list
 The available bar entries are `goober/hydra-update-examiner:hydra`,
 `goober/nocvox:nocvox`, and
 `goober/wall-in-one:wall-in-one`. The Wall-in-One Control Center entry is
-`goober/wall-in-one:wall-in-one-shortcut`. The source is cloned and
-managed by Noctalia; a separate manual checkout is not required for the
-plugins. Noctalia does not install Wall-in-One's optional external backend;
-its **Get backend** link opens the separately staged
-[`wall-in-one-backend/`](wall-in-one-backend/) source, and its setup card runs
-a checksum-verified install in your own terminal on request. The
-[`wall-in-one/README.md`](wall-in-one/README.md#external-backend-installation)
-describes that installation and the degraded behavior without it.
+`goober/wall-in-one:wallpaper`. The source is cloned and managed by Noctalia; a
+separate manual checkout is not required for the plugins. Wall-in-One is a
+client for the standalone [Wall-in-One](https://github.com/Go08er/wall-in-one)
+application and does nothing on its own; install that app separately and see
+[`wall-in-one/README.md`](wall-in-one/README.md) for the palette-template step.
 
 ### Declarative configuration
 
@@ -220,37 +203,35 @@ or notification subsystem. The plugin does not read the clipboard or persist tra
 [`nocvox/README.md`](nocvox/README.md) for the full ownership and privacy
 boundary.
 
-### Wall-in-One coordination and pairing
+### Wall-in-One boundary
 
-Wall-in-One `0.8.0` coordinates Noctalia stills and palettes, local video,
-Wallpaper Engine projects, pageable Wallhaven search, and optional MotionBGS
-text/latest/genre/4K browsing in one hub. Filesystem discovery, external
-palette inventory, provider-preview cache work, Wallhaven transport/downloads,
-and MotionBGS provider work use the separately installed
-`wall-in-one-backend` Python 3.11+ program; the plugin detects that fixed
-command on `PATH`, or accepts its absolute path in the advanced setting. An
-absent or incompatible program degrades those backend-owned capabilities,
-while configured playlists, adaptive palette previews, host-coupled renderer,
-wallpaper/palette application, and direct-site controls remain available. Each
-indexed source is automatically its own pairing, with
-an editable static representative and complete theme policy. Playlist rows can
-be rebound through a paged graphical image/video/Workshop picker without typing
-source paths; representative and palette changes remain shared item defaults.
-Visual
-rotate/shuffle playlists can mix all media types, run independently per output,
-and select lower-listed month/weekday/time rules when schedules overlap.
+Wall-in-One `1.0.0` is a thin client. Every wallpaper capability — library
+scanning, still/video pairing, playlists, providers, palette generation, and
+the video renderer — belongs to the standalone
+[Wall-in-One](https://github.com/Go08er/wall-in-one) GTK4 application. The
+plugin owns a bar widget, a controls panel, a Control Center shortcut, and the
+`palette.json.tmpl` Noctalia user template.
 
-Wall-in-One starts only renderers it owns and switches them by exact PID. The
-last pairing's static backing, theme mode, and palette remain configured when a
-dynamic renderer stops or the plugin is disabled, so Noctalia has a persisted
-desktop and color state on its next start. Disable Noctalia's independent
-wallpaper slideshow on outputs controlled by Wall-in-One to avoid two writers.
+It starts the app with the plain `wall-in-one` command and otherwise reaches it
+only through `wall-in-one ctl <verb>`, the app's own client for its control
+socket at `$XDG_RUNTIME_DIR/wall-in-one.sock`. The singleton `control` service
+is the only entry that spawns processes; the widget, panel, and shortcut read
+and write a shared state channel. Control calls are serialized and bounded by a
+host callback timeout. A missing socket is the ordinary resting state rather
+than an error, so the widget simply reads `Not running` until the user launches
+the application from the plugin.
 
-Open the hub with
-`noctalia msg panel-toggle goober/wall-in-one:hub`. See
-[`wall-in-one/README.md`](wall-in-one/README.md) for user-facing behavior and
-ownership boundaries, [ADAPTERS.md](wall-in-one/ADAPTERS.md) for provider
-protocols, and [TESTING.md](wall-in-one/TESTING.md) for validation coverage.
+Open the controls panel with
+`noctalia msg panel-toggle goober/wall-in-one:controls`. See
+[`wall-in-one/README.md`](wall-in-one/README.md) for the gesture map, settings,
+and the `wall-in-one --install-theme-template` colour-sync step.
+
+The 0.8 tree — a 25k-line in-plugin implementation plus a separately staged
+`wall-in-one-backend` Python program — was retired when the application took
+over that work. Its offline contract suite, provider scripts, and NixOS VM gate
+went with it. The replacement has a focused offline manifest, translation,
+Luau-compile, detached-launch, queue-bound, and control-replay gate; it does not
+yet have a replacement VM gate.
 
 ### Hydra Update Examiner customization
 
@@ -273,7 +254,7 @@ Run the repository checks with:
 python3 tools/validate.py
 noctalia plugins lint hydra-update-examiner nocvox wall-in-one
 python3 nocvox/tests/check.py
-python3 wall-in-one/tests/test_contract.py
+python3 wall-in-one/tests/test_thin_client.py
 ```
 
 `tools/validate.py` mirrors the official plugin-file, README, translation, and
@@ -287,16 +268,16 @@ Run the native v5 integration test in a disposable NixOS VM with:
 ```bash
 nix build -L path:.#vm-test
 nix build -L path:.#vm-test-nocvox
-nix build -L path:.#vm-test-wall-in-one
 ```
 
 The VM harnesses pin Noctalia tag `v5.0.0-beta.7`, whose project/runtime version
 is `5.0.0`. They use in-guest sources, headless Sway, software rendering, and
 deterministic command fixtures without touching the host Noctalia session or
 configuration. The original `vm-test` retains Hydra's render and glyph-picker
-coverage; the two isolated targets exercise the companion/coordinator services,
-failure boundaries, capture/pairing policy, and process-ownership rules. See
-`tests/vm/README.md` for details.
+coverage; `vm-test-nocvox` exercises the companion service, its failure
+boundaries, and its process-ownership rules. See `tests/vm/README.md` for
+details. Wall-in-One has no VM gate since the 0.8 harness was retired with the
+implementation it tested.
 
 ## Editor setup
 
@@ -310,10 +291,10 @@ not vendored here while these beta plugin implementations are changing quickly.
 
 This repository is a directly importable custom Git source for native v5
 testing. Hydra Update Examiner and NocVox are ready for direct testing here.
-The Wall-in-One 0.8 staging tree remains a beta test target; run its current
-offline contract and NixOS VM gate for the exact checkout under review. The
-disposable-desktop gate remains pending, so it should not yet be treated as
-unattended daily-driver software. None of the
+Wall-in-One `1.0.0` is newly rewritten as a client for the standalone
+application and has not yet been exercised against a live shell; it has no VM
+gate, so treat it as a beta test target rather than unattended daily-driver
+software. None of the
 plugins has been submitted to, accepted into, or registered with Noctalia's
 built-in official or community catalogs. See each plugin README for its
 supported behavior, requirements, and remaining test boundaries.

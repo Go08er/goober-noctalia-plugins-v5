@@ -1,121 +1,62 @@
 --!nonstrict
--- Control Center client. Plugin shortcuts currently expose left and right
--- callbacks; the bar widget retains the full three-button mapping.
+-- Control Center shortcut. Plugin shortcuts expose a left and a right
+-- callback, so this is the keyboard-reachable half of the transport: advance
+-- on the left, pick at random on the right.
 
-local STATUS_KEY = "wall_in_one_status"
+local STATE_KEY = "wall_in_one_state"
 local COMMAND_KEY = "wall_in_one_command"
+local READY_KEY = "wall_in_one_ready"
 
-local status = nil
+local state = nil
 local commandSequence = 0
-local pendingGesture = nil
+local pending = nil
 
-local OPEN_TARGETS = {
-    native_open = "wallpaper",
-    hub_open = "goober/wall-in-one:hub",
-}
-
-local function focusedOutput()
-    local output = noctalia.focusedOutputName()
-    return if type(output) == "string" then output else ""
+local function running()
+    return type(state) == "table" and state.running == true
 end
 
 local function render()
-    local valid = type(status) == "table" and status.storage_valid == true
-    shortcut.setLabel(if valid then noctalia.tr("shortcut.label") else noctalia.tr("shortcut.config_error"))
-    shortcut.setIcon("library-photo", "library-photo")
+    shortcut.setLabel(if running() then noctalia.tr("shortcut.label") else noctalia.tr("shortcut.open"))
+    shortcut.setIcon("library-photo", "photo-off")
     shortcut.setActive(false)
     shortcut.setEnabled(true)
 end
 
-local function nextSequence()
+local function send(verb)
+    if noctalia.state.get(READY_KEY) ~= true then
+        -- The service may still be loading; replay once it announces itself.
+        pending = verb
+        return
+    end
     local previous = noctalia.state.get(COMMAND_KEY)
     local previousSequence = if type(previous) == "table" then tonumber(previous.sequence) or 0 else 0
     commandSequence = math.max(commandSequence, previousSequence) + 1
-    return commandSequence
-end
-
-local function gestureAction(button)
-    if type(status) ~= "table" or type(status.config) ~= "table" or type(status.config.gestures) ~= "table" then
-        return ""
-    end
-    return tostring(status.config.gestures[button] or "")
-end
-
-local function actionAvailable(action)
-    if type(status) ~= "table" or status.storage_valid ~= true then
-        return false
-    end
-    local current = type(status.providers) == "table" and status.providers or {}
-    if action == "native_open" or action == "hub_open" or action == "no_action" then
-        return true
-    elseif action == "native_next" or action == "native_previous" or action == "native_random" then
-        return current.noctalia_cli == true
-    elseif action == "motionbgs_open" then
-        return type(current.motionbgs) == "table" and current.motionbgs.browser_available == true
-    elseif action:match("^playback_") or action:match("^audio_") then
-        return focusedOutput() ~= "" or action == "playback_stop_all"
-    elseif action == "capture_backing" then
-        return current.noctalia_cli == true and focusedOutput() ~= ""
-    elseif action == "capture_current" or action == "capture_pair" then
-        local wEngine = type(current.w_engine) == "table" and current.w_engine or {}
-        local activeId = type(wEngine.internal_current) == "table"
-                and tostring(wEngine.internal_current[focusedOutput()] or "")
-            or ""
-        local configuredId = type(status.settings) == "table" and tostring(status.settings.workshop_id or "") or ""
-        return wEngine.allowed == true and (activeId:match("^%d+$") ~= nil or configuredId:match("^%d+$") ~= nil)
-    elseif action == "video_capture" or action == "video_capture_pair" then
-        return type(status.settings) == "table" and tostring(status.settings.video_source or "") ~= ""
-    elseif action == "manual_pair" then
-        return type(status.settings) == "table" and tostring(status.settings.manual_pair_file or "") ~= ""
-    end
-    return false
-end
-
-local function panelTarget(action)
-    return OPEN_TARGETS[action] or ""
-end
-
-local function sendAction(action)
     noctalia.state.set(COMMAND_KEY, {
-        kind = "action",
-        action = action,
-        output = focusedOutput(),
+        verb = verb,
         producer = "shortcut",
-        sequence = nextSequence(),
+        sequence = commandSequence,
     })
 end
 
-local function executeGesture(button)
-    if type(status) ~= "table" or status.ready ~= true then
-        pendingGesture = button
-        return
-    end
-
-    local action = gestureAction(button)
-    local target = panelTarget(action)
-    if target ~= "" and actionAvailable(action) then
-        noctalia.togglePanel(target)
-    elseif action ~= "no_action" then
-        sendAction(action)
-    end
-end
-
-noctalia.state.watch(STATUS_KEY, function(nextStatus)
-    status = nextStatus
+noctalia.state.watch(STATE_KEY, function(nextState)
+    state = nextState
     render()
-    if type(status) == "table" and status.ready == true and pendingGesture ~= nil then
-        local button = pendingGesture
-        pendingGesture = nil
-        executeGesture(button)
+end)
+noctalia.state.watch(READY_KEY, function(ready)
+    if ready == true and pending ~= nil then
+        local verb = pending
+        pending = nil
+        send(verb)
     end
 end)
-status = noctalia.state.get(STATUS_KEY)
+
+state = noctalia.state.get(STATE_KEY)
 render()
 
 function onClick()
-    executeGesture("left")
+    send(if running() then "next" else "launch")
 end
 
 function onRightClick()
-    executeGesture("right")
+    send(if running() then "random" else "launch")
 end

@@ -10,7 +10,6 @@ Run one automated suite from the repository root:
 ```bash
 nix build -L path:.#vm-test
 nix build -L path:.#vm-test-nocvox
-nix build -L path:.#vm-test-wall-in-one
 ```
 
 Use the explicit `path:.` source while developing: Git-backed flake evaluation
@@ -21,13 +20,12 @@ inside the guest. Once every file is committed, `.#...` is equivalent.
 | --- | --- |
 | `vm-test` | Hydra rendering, actions, hot reload, settings, and native searchable glyph picker |
 | `vm-test-nocvox` | NocVox singleton listener, state/control matrix, diagnostics, validation, privacy, and teardown |
-| `vm-test-wall-in-one` | Six-service startup, unified external-backend bridge, graphical playlist-entry rebinding, month-aware schedules, adaptive palette and provider-thumbnail rendering, direct renderer ownership and crash backoff, 36-result MotionBGS plus Wallhaven-navigation panel-budget coverage, schema-3→5/runtime-6 migration, and teardown persistence |
 
 Each suite also exposes an interactive driver by adding `-driver` to its
 package name. For example:
 
 ```bash
-nix build -L path:.#vm-test-wall-in-one-driver
+nix build -L path:.#vm-test-nocvox-driver
 ./result/bin/nixos-test-driver
 ```
 
@@ -66,164 +64,6 @@ fixed recording commands with no per-recording flags; attached-panel rendering;
 missing glyph detection; and disable cleanup without stopping the externally
 owned daemon sentinel. Static coverage separately rejects every NocVox desktop
 notification call.
-
-## Wall-in-One
-
-The complete schema-5/runtime-6, unified-backend, palette, Wallhaven,
-MotionBGS, and playlist VM is the authoritative integration gate. Run `nix build -L
-path:.#vm-test-wall-in-one` after any plugin or harness change; an older result
-is not evidence for a changed staging tree.
-
-The Wall-in-One suite imports all six production services (`coordinator`, the
-generic `backend` bridge, `renderer`, the thin `motionbgs` bridge, `palettes`,
-and `wallhaven`) beside controlled command/provider fixtures. Wall-in-One does
-not call or coordinate another wallpaper extension; the guest exercises its
-directly owned `linux-wallpaperengine` and mpvpaper paths and preserves an
-unrelated renderer sentinel. The exhaustive Wallhaven API/CDN download and
-palette inventory negative cases remain deterministic offline-contract coverage
-rather than claims about a live network. Adaptive wallpaper palette preview is
-deterministic in the guest: the fixture pins the exact `noctalia theme <image>
---scheme m3-rainbow --both -o <private-json>` argument order and verifies the
-published dark/light surface and accent roles without changing the active
-theme.
-
-Before opening the floating hub, the suite compiles the exact materialized
-`panel.luau` with the pinned Luau compiler. It then requires a real panel-open
-log, a changed compositor screenshot, a provider probe initiated by `onOpen`,
-and successful panel IPC. Luau load failures, `onOpen` failures, and local-route
-callback failures stop the guest. The panel probe also opens a fresh Workshop
-card's synthesized-default editor, opens a persisted playlist occurrence,
-selects a real indexed video card through the production picker, drives the
-bounded Wallhaven navigation path, and renders 36 MotionBGS results while
-sustaining frame ticks. Frame callbacks may advance only bounded drag,
-still-choice, Workshop-index, and palette-index reconciliation; they may not
-build a complete panel tree. A nil namespace
-lookup, callback CPU-budget overrun, or `goober/wall-in-one:hub`
-timeout-disable record fails the guest.
-
-Wallhaven and MotionBGS thumbnail presentation is also exercised without the
-internet. The shipped thumbnail helper first runs its own boundary self-test;
-the guest then substitutes an exact-protocol helper that installs two distinct
-local PNG fixtures. The real provider panes must render those colors through
-`ui.image`, write a bounded manifest with valid local files, reuse both entries
-when the fixture rejects every cache miss, and leave no staging or manifest
-temporary behind.
-
-The renderer fixture records NUL-delimited argv and keeps each fake child alive
-long enough to test replacement, pause/resume/toggle, stop, output ownership,
-and teardown. The VM pins the configured `--layer background` path while the
-offline contract validates both accepted `background`/`bottom` values,
-mpvpaper's configured `--auto-pause --auto-mode <FULL|MAX|ACTIVE>`, private mpv
-audio IPC, Wallpaper Engine signal controls, exact-PID signals, private `0600`
-FIFOs, and cleanup on reload/disable. Different outputs can own different
-dynamic renderers concurrently; a same-output switch stops the exact old child
-before the replacement starts. An unrelated renderer sentinel must remain
-unchanged. A child that exits after the startup probe is
-subject to bounded exponential restart backoff, and a stable replacement must
-clear that crash streak before normal playlist recovery resumes. The offline
-Python contract additionally drives the production supervisor directly, so
-these invariants do not rely on a real live-wallpaper renderer or compositor
-behavior.
-
-Capture fixtures cover public Noctalia backing export, configured-video frame
-extraction, exact-owner `linux-wallpaperengine --screenshot` capture, safe
-Workshop preview/source fallback, validated
-private-staging promotion, durable per-output pairs, active internal Workshop
-state, the dynamic pair registry, optional color sync, animated-GIF-to-PNG
-manual pairing across reload, safe name-scoped startup staging cleanup, and
-atomic temporary-file cleanup. The configured palette output remains the one
-global leader; an explicit lock-screen image remains an external override. The
-offline helper gate additionally rejects structurally invalid WebP and
-header-only AVIF when no decoder is available.
-
-A migrated config-schema-5 named playlist mixes static, video, and Workshop
-occurrences linked to reusable item profiles. The explicit schema-3 fixture
-proves migration creates those links, defaults an omitted month filter to all
-twelve months, removes numeric priority, and retains the original schema-3
-document as the migration backup. The guest exercises pairing save,
-linked-occurrence synchronization, add, and stable-ID placement. Its
-`playlist_replace_entry` fixture exercises the command used by the graphical
-editor to rebind an occurrence to a Workshop medium. It verifies that the
-occurrence ID and insertion timestamp survive, the selected medium's shared
-profile is synchronized, and the old profile remains intact; the offline
-contract separately pins same-index replacement. Source removal is an inventory
-observation rather than a public item-profile deletion command. The suite also
-pins per-output shuffle/interval overrides and clean inheritance back to playlist
-defaults. The guest drives start/stop/pause/resume/next/previous/random, checks
-runtime-schema-6 stable entry IDs, cursor/history/shuffle-bag and absolute
-next-due state, and reloads to prove the playlist and runtime survive while the
-default start-on-load policy remains disarmed. The output-specific one-entry
-Quick Choice path is expected to park instead of becoming a timer. Static
-generation and renderer-event nonce assertions guard against a late
-acknowledgement reviving an entry after stop or replacement. Distinct persisted
-still images for the video and Workshop entries are asserted as the actual
-backing selected before each renderer starts. Two enabled overnight schedule
-rows target a month other than the current guest month; a deterministic probe
-verifies the lower matching row wins and an adjacent month does not match,
-without letting the fixture alter the live test sequence.
-Library discovery is dynamically refreshed with six candidates through the
-real `wall-in-one-backend` Python executable. The fake wrapper records one
-nonce-bound `library.scan`; the generic bridge incrementally validates fixed
-12-item page files and publishes the completed video and Workshop inventory.
-The same schema-1 backend advertises `palettes.inventory`, `preview.sync`, and
-the four `wallhaven.*` actions. Its deterministic Python unit/contract fixtures
-cover those network, cache, parsing, and no-replace boundaries; the VM exercises
-their Luau service/panel integration without relying on public internet state.
-Paused next/previous/random requests are rejected without changing the entry
-ID, history, or owned renderer state.
-
-Image/video roots are exercised as separate and shared locations. The suite
-distinguishes user-owned files from marked managed children, requires sidecars
-before exposing deletion, installs automatic pairs beneath
-`Wall-in-One/Automatic Stills`, and verifies that deleting a managed MotionBGS
-video removes only its managed automatic still. Native Wallhaven downloads are
-managed only when their exact `.wallhaven.json` sidecar validates; files written
-by the separate official plugin remain user-owned and non-deletable here.
-
-MotionBGS is tested without internet access and without putting provider work
-back into Luau. The guest exposes a separately installed one-shot
-`wall-in-one-backend` fixture, exercises its `motionbgs-*` compatibility
-commands and the bridge's exact
-`WIO-MBGS-PROBE1`/`WIO-MBGS-RPC1` schema-1 interface, and bounds JSON requests
-to 8 KiB and responses to 128 KiB. It verifies the advanced absolute
-`backend_binary_path` and configured-binary probe path. Fixed-name PATH
-discovery plus
-missing, malformed, and incompatible binaries are pinned by the offline
-contract; they are not simulated by this VM. Cache state stays under
-`motionbgs-bridge-v1/cache`, its RPC files use the `cache/rpc` child, and every
-one-shot process and transport file terminates cleanly.
-
-The external-program fixture returns pinned normalized search/detail JSON and
-installs a tiny local MP4. It exercises bridge request validation, bounded
-results, HD/4K fields, pageable latest/genre/4K state, cache hits without
-another simulated transport, first-page-only HD, serialized starts, normalized
-failure propagation, atomic no-replace MP4 installation, provenance sidecar
-creation, schema-1 cache replacement on clear, and complete download
-response/result mirroring. Provider previews use the generic backend's
-`preview.sync` operation with real image pixels and the stable
-`provider-previews/v1` cache. Provider HTML parsing, redirects, effective-URL
-checks, and MIME/signature validation belong to the standalone backend's Python
-unit suite. The VM runs both bundled launchers and the real standalone program's
-network-free self-tests, then probes the configured fake before exercising its
-normalized protocol responses.
-
-The guest currently seeds a config-schema-3 playlist/schedule fixture and a
-runtime-schema-1 pair fixture, confirms migration to config schema 5 and runtime
-schema 6, then checks linked pairing snapshots, migration backups,
-corrupt-state fail-closed behavior, and cleanup of `.tmp`, `.part`, staging,
-FIFO, socket, and owned-child artifacts. The offline contract covers the wider
-supported config-schema-1–4 and runtime-schema-1–5 migration matrix, coordinated
-transaction recovery, the 8 MiB read/write ceiling, bounded nested
-maps/arrays/paths, deterministic pair pruning, stable playlist entry IDs, and
-active-capture staging cleanup. Extending the VM itself across every legacy
-schema and interruption stage remains an unchecked gate.
-
-Disable is also a persistence boundary. The suite observes the palette
-service's bounded terminal state from inside its owning plugin runtime, proves
-all owned renderer children are gone, and requires Noctalia's wallpaper, theme
-mode, and color-scheme values to remain exactly unchanged. This deliberately
-leaves the last pairing's static backing and colors ready for the next desktop
-start while the dynamic layer is absent.
 
 All suites treat Luau runtime errors, undeclared settings, failed hot reloads,
 and missing glyph warnings as failures. Run the relevant target after any

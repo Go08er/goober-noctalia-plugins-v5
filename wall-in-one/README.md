@@ -1,455 +1,121 @@
 # Wall-in-One
 
-Wall-in-One `0.8.0` is a Noctalia v5 wallpaper library for still images, local
-videos, and installed Wallpaper Engine Workshop projects. Every dynamic source
-is paired with a real still and a Noctalia theme policy. Named playlists can be
-shared across displays while retaining independent playback, engine settings,
-and schedules.
-
-The pinned test source is Noctalia tag `v5.0.0-beta.7` (project/runtime version
-`5.0.0`), using plugin API `17`.
-
-## Usage
-
-Open Wall-in-One from its bar widget, Control Center shortcut, or routed panel:
-
-```bash
-noctalia msg panel-toggle goober/wall-in-one:hub
-```
-
-Noctalia plugins cannot create standalone application windows. Wall-in-One
-uses one normal full-size floating panel and local route state instead. Only the
-selected route is rendered:
-
-- **Home** shows setup and readiness, with each detected display nested beneath
-  it. Selecting a display opens one combined page with a visual playlist
-  library, one ordered default-plus-schedule priority list, playback policy,
-  and engine settings.
-- **Library** → **Images**, **Videos**, **Wallpaper Engine**.
-- **Shops** → **Wallhaven**, **MotionBGS**, **Steam Workshop**.
-- **Playlists** → each named playlist.
-- **Diagnostics** contains detailed service and error state.
-
-This hierarchy keeps shops, libraries, display controls, and playlist editors
-out of one dense scrolling page. Inset routes are ordinary in-panel navigation,
-not extra processes or panels.
-
-Start on the matching **Library** page. Images, Videos, and Wallpaper Engine
-each show their own selected root, derived managed locations, private caches,
-and relevant defaults. The image and video roots are independent; each must be
-explicitly selected in Noctalia's generated plugin settings and already exist.
-Wall-in-One does not fall back to Noctalia's wallpaper directory, create either
-selected root, or borrow one root for the other. Home remains setup-first while
-either root is missing, and a capability performs no scan, directory creation,
-download, export, network refresh, or cache initialization before its matching
-root is ready.
-
-The main workflows are:
-
-1. Browse image, video, and installed Workshop libraries. Cards use stills like
-   Noctalia's wallpaper browser: a static selects itself, while video and
-   Workshop entries use a validated preview or automatic still. Every item is
-   immediately usable with an implicit adaptive wallpaper palette; no separate
-   pairing-creation step is required. Customize only the items that need a
-   different still or palette.
-2. When the separately installed backend is available, search Wallhaven's
-   official API or MotionBGS's bounded public pages under **Shops**. Download and
-   quality controls live on each result card. Cards distinguish available,
-   queued, downloading, and already-installed media, while MotionBGS keeps a
-   compact persistent queue summary. Steam links remain available for acquiring
-   and managing Workshop content.
-3. Select a display beneath **Home**. Its one page combines renderer controls,
-   rotate/shuffle and interval policy, a pinned default playlist, ordered
-   calendar overrides, and its owned mpvpaper and `linux-wallpaperengine`
-   settings. Editing one display does not rewrite another.
-4. Add or drag cards from the playlist's visual pairing library into its
-   ordered list, then drag existing rows to reorder them. **Edit** on an
-   occurrence opens a six-card, paged image/video/Workshop picker instead of a
-   raw source-path form. Choosing a different indexed item rebinds only that
-   playlist position and preserves its stable ID, position, and insertion time.
-   Its representative still and palette remain the selected media item's shared
-   defaults everywhere that item is used. Duplicate or remove the source itself
-   to add or remove library identities.
-5. On a display page, drag a playlist onto row 1 to make it the unscheduled
-   default, or between later rows to configure a scheduled override. Month,
-   weekday, and local-time rules are evaluated in visible order, with the
-   lowest matching override taking priority.
-
-Direct **Apply** creates or replaces that display's one-entry **Quick Choice**
-playlist, so manual and scheduled changes share the same executor and safety
-checks. Disable Noctalia's separate native slideshow on displays governed by a
-Wall-in-One schedule; Noctalia v5 has no public command for coordinating those
-two timers.
-
-Provider previews are synchronized by the external backend through a strict
-thumbnail launcher and shown to `ui.image` only as local files. The private
-`pluginDataDir()/provider-previews/v1` cache is
-capped at 64 entries, 64 MiB total, and 2 MiB per file. A failed preview leaves
-metadata, the provider-site action, and download controls usable. Search
-responses are locally paged in fixed 12-card views; preview validation is
-memoized per result generation, and one bounded backend synchronization is
-advanced from the normal update path. Complete panel trees are never rebuilt
-from a frame callback. Large still, Workshop, palette, and shared-profile
-indexes are reconciled in fixed batches and atomically swapped; editing one
-playlist occurrence hides the unrelated add drawer and other playlist rows.
-
-The panel requests a roomy 1160 × 780 floating surface. Fixed dimensions keep
-the hub usable if an older saved Noctalia placement override survives an
-upgrade, without triggering the panel manager's fill-sizing warning.
-
-## Renderer ownership and per-display engines
-
-Wall-in-One directly starts `mpvpaper` for video and
-`linux-wallpaperengine` for Workshop projects. It does not hand playback to a
-separate wallpaper extension. One API-17 renderer service owns a cancellable
-Bash supervisor and exact foreground child PIDs. Reload, disable, output
-removal, and exit drain that process group without `pgrep`, `pkill`, detached
-systemd scopes, or unrelated PID files.
-
-Exactly one dynamic child is owned per display. Switching engines is
-break-before-make; distinct displays may run different engines concurrently.
-A failed replacement does not silently restart the old source. Unexpected
-post-startup exits use a per-display 10, 20, 40, 80, 160, then 300-second
-playlist recovery delay, reset after 60 seconds of stable playback.
-
-Each display stores:
-
-- shared `bottom` or `background` layer;
-- video enable, initial mute, hardware decode, auto-pause, `FULL`/`MAX`/`ACTIVE`
-  auto-pause mode, and bounded mpv options; and
-- Workshop enable, FPS, volume, silent mode, scaling, clamp mode, and validated
-  render flags.
-
-The defaults are `bottom`; video enabled, muted, hardware decode and auto-pause
-enabled with `FULL`; and Workshop enabled at 30 FPS, volume 0, silent, `fill`,
-and `border`. See [ADAPTERS.md](ADAPTERS.md) for exact ranges and flags.
-
-mpvpaper supports stop and signal fallback for pause/resume/toggle. A compatible
-private socket client also enables mute and volume controls. Wallpaper Engine
-supports stop and signal-based pause/resume/toggle; unsupported runtime audio
-controls remain disabled.
-
-## Static pairs and generated stills
-
-Every live apply resolves a real still before starting its renderer:
-
-- video uses FFmpeg at the configured timestamp;
-- Wallpaper Engine first attempts an owned
-  `linux-wallpaperengine --screenshot` capture, then a validated source-video or
-  Workshop-preview fallback; and
-- an explicitly selected durable still always overrides automatic generation.
-
-Automatic stills live in `<image root>/Wall-in-One/Automatic Stills` with
-adjacent ownership sidecars. Manual exports go directly into the image root and
-remain user-owned. Capture stages a unique private PNG, verifies stable output
-and its image signature, optionally decodes it with FFmpeg, then installs it
-atomically. Cancelled or superseded work cannot promote a still or start delayed
-playback.
-
-Opening a video or Workshop item's customization—either from its Library card
-or a playlist occurrence—eagerly requests its automatic representative through
-the coordinator's bounded capture queue. The editor shows pending, preparing,
-and ready states, and the generated still is cached by the medium/source identity
-before the wallpaper-derived palette preview runs. Choosing a specific
-representative uses a paged picker over indexed user-owned and Wallhaven stills;
-a collapsed manual absolute-path field remains an explicit escape hatch.
-Preparing a still does not apply a wallpaper, palette, or renderer.
-
-The representative remains Noctalia's real wallpaper for lock-screen fallback,
-wallpaper hooks, overview/backdrop consumers, and wallpaper-derived colors while
-the dynamic layer renders above it.
-
-## Per-item Noctalia themes
-
-Each item resolves dark/light/auto mode plus a built-in, wallpaper-generator,
-community, custom, or explicit keep-current policy. The implicit default is
-adaptive wallpaper colors. The installation-wide default toggle starts enabled
-and may instead make new items keep the current theme; saving an optional
-customization gives that item a durable override. Application order is still,
-theme mode, palette, then owned renderer.
-
-Adaptive previews use Noctalia's non-applying theme command against the selected
-or generated still. The palette service keeps a bounded SHA-256-aware adaptive
-preview cache; the backend maintains a six-hour last-known-good community
-catalog. Declarative NixOS/Home Manager custom palettes may be read through
-symlinks into the Nix store; this exception is read-only and does not apply to
-plugin caches, transport files, downloads, or media-library paths. Noctalia has one shell palette,
-so an optional leader display is the sole writer; otherwise deterministic
-transition order makes the latest successful apply authoritative.
-
-## External backend installation
-
-Noctalia budgets every Luau callback and disables extensions that repeatedly
-overrun it. Wall-in-One therefore keeps UI construction, Noctalia host calls,
-IPC dispatch, and exact-PID renderer ownership in Luau, while bounded bulk work
-crosses a process boundary. Release 0.8 moves filesystem library scanning,
-external palette inventory, provider-preview cache maintenance, Wallhaven
-transport/response shaping/downloads, and the already-extracted MotionBGS
-provider work into one executable. Schedule resolution, configuration
-normalization, managed-delete transactions, and host API calls stay in Luau.
-The graphical entry editor's state callback performs only a fixed scalar
-projection; full normalization and persistence are serialized on later service
-updates through a bounded queue.
-
-The one-shot Python 3.11+ executable installs into any user-owned directory,
-and Wall-in-One then discovers it. Resolution has three explicit tiers: the
-advanced **Wall-in-One backend program** setting wins, followed by the
-regular-file pointer at `pluginDataDir()/backend-path`, followed by the fixed
-`wall-in-one-backend` name on Noctalia's `PATH`. The pointer contains one
-absolute executable path and is a regular file rather than a symlink. Nothing
-is downloaded, updated, or made executable until you ask for it.
-
-While the backend is missing, **Home** shows a setup card. Type the directory
-the backend should live in -- it defaults to `~/.local/bin` -- and press
-**Install in terminal**. Wall-in-One writes the pointer for that directory,
-then opens the commands in your configured terminal; the download is what you
-watch, and nothing else needs configuring afterwards. A pointer aimed at a file
-that does not exist yet is simply unresolved, so writing it first is safe.
-
-If no terminal is configured, or the backend belongs somewhere the panel does
-not know about, **Copy commands** puts the same block on the clipboard. Run it
-from the directory the backend should remain in; it writes the pointer from
-`$PWD` itself, so a pasted run needs nothing from the panel. The card always
-shows its exact `pluginDataDir()` destination, which matters when Noctalia runs
-under a custom state root.
-
-```bash
-get='curl --disable --fail --silent --show-error --location --max-redirs 0 --proto =https --proto-redir =https --tlsv1.2 --max-filesize 1048576'
-$get -o wall-in-one-backend 'https://raw.githubusercontent.com/Go08er/goober-noctalia-plugins-v5/4b226a8b2fa8ad41aae1245dcc8e6bfa2bf1c391/wall-in-one-backend/wall-in-one-backend'
-printf '%s  wall-in-one-backend\n' '49a5f9ef0248779492849ca6378853dbc0fba3350d4fd360ee9425fb1101703a' | sha256sum -c - \
-  && chmod 0755 wall-in-one-backend \
-  && mkdir -p ~/.local/state/noctalia/plugins/data/goober/wall-in-one \
-  && printf '%s\n' "$PWD/wall-in-one-backend" > ~/.local/state/noctalia/plugins/data/goober/wall-in-one/backend-path \
-  && ./wall-in-one-backend self-test
-```
-
-The download lands as non-executable data. The digest is the one pinned in the
-plugin, not a sibling file fetched alongside the program: a host that could
-serve a swapped binary could serve a matching checksum next to it. The steps
-are `&&`-chained, so a failed digest cannot fall through to `chmod`, to the
-pointer, or to running the result -- pasting the whole block at once is the
-intended use. Both the pinned program and this documented digest come from the
-same GitHub account, so the checksum detects corruption or unexpected content
-but is not an independent proof of provenance. Verify the account and full
-commit through a separately trusted GitHub view when that distinction matters.
-While the backend is unresolved, the bridges automatically discover a newly
-valid pointer without a Noctalia restart; a ready backend is not process-probed
-forever for optional manual pointer changes. An explicit configured path
-remains the intentional override; PATH is the final fallback.
-
-The schema-1 executable advertises `library.scan`, `palettes.inventory`,
-`preview.sync`, and all four `wallhaven.*` actions; each thin bridge checks the
-capabilities it consumes. MotionBGS uses compatibility
-subcommands on the same executable and requires search/details/download/clear.
-If the backend is absent, unreadable, or incompatible, local-library refresh,
-external palette inventory, provider preview refresh, and both integrated
-provider shops degrade. The last complete in-memory library and palette
-inventories are not replaced by partial results. Host-coupled wallpaper and
-palette application, adaptive palette previews, configured playlists, renderer
-control, and provider-site links remain available. The relevant pages explain
-the detected state and retain a **Get backend** or direct-site route.
-
-## MotionBGS process boundary and fallback
-
-MotionBGS has no versioned public API, so its integration remains optional and
-process-isolated. Wall-in-One ships a thin `motionbgs` Luau bridge and a bounded
-launcher, but not an in-process HTTP client or HTML parser. The bridge invokes
-the same `wall-in-one-backend` executable through its `motionbgs-probe` and
-`motionbgs-rpc` compatibility subcommands.
-
-The bridge publishes the active download's slug and quality plus a bounded view
-of queued downloads. The panel combines that state with the managed video
-library, disables exact duplicates, and labels completed qualities as already
-on disk. The helper protocol does not stream byte-level progress, so the UI
-reports honest queued/active/completed phases rather than inventing a percent.
-
-Each operation is a new backend process. The bridge writes one schema-1 JSON
-request of at most 8 KiB and accepts one schema-1 JSON response of at most
-128 KiB. Request/response transport lives under
-`pluginDataDir()/motionbgs-bridge-v1/cache/rpc`; the external program owns its
-bounded metadata cache in the parent
-`pluginDataDir()/motionbgs-bridge-v1/cache`. The bridge has no `update()`
-callback and performs no provider HTTP, HTML parsing, cache maintenance, or
-media download work inside Noctalia's Luau runtime.
-
-The backend uses only public unauthenticated pages, serializes network
-starts at least one second apart, and accepts only the MotionBGS HTTPS origin.
-Ambient curl configuration is disabled. Redirects are followed explicitly,
-remain same-origin, and require each curl effective URL to equal the requested
-URL. HTML and MP4 size limits have an OS file-size backstop; declared MIME is
-cross-checked against content signatures; downloads use atomic no-replace
-installation plus provenance sidecars. It does not log in, bypass challenges,
-execute page scripts, or crawl in bulk.
-
-Text search is unpaged. Latest, genre/tag, and 4K catalogs use validated
-previous/next routes; HD is first-page-only while later HD pages redirect to an
-unfiltered catalog. MotionBGS may canonicalize `/search?q=X` to
-`/tag:<slug>/`; the helper accepts only a same-origin tag exactly equal to the
-normalized query. Mismatched catalogs, unsafe paths, changed markup, and
-cross-origin destinations fail closed. **Open MotionBGS** remains available if
-the helper is missing or the site changes.
-
-## Local libraries
-
-The roots are scanned non-recursively. PNG, JPEG, WebP, and AVIF are images;
-MP4, MKV, WebM, MOV, AVI, M4V, and GIF are video. If both settings point to the
-same directory, GIF appears only in video. Direct-root files remain user-owned
-and cannot be deleted from Wall-in-One.
-
-Managed locations are derived and shown with their private cache locations on
-the corresponding **Library** medium page:
-
-| Location | Contents |
-| --- | --- |
-| `<image root>/Wall-in-One/Wallhaven` | validated Wallhaven image plus `.wallhaven.json` |
-| `<image root>/Wall-in-One/Automatic Stills` | generated representative plus `.wall-in-one.json` |
-| `<video root>/Wall-in-One/MotionBGS` | validated MP4 plus `.motionbgs.json` |
-
-A file is deletable only as a direct child of its marked managed directory with
-a matching sidecar. Explicitly deleting a managed MotionBGS video may also
-remove only its managed automatic still. Missing files, root changes, and Steam
-unsubscribe events never authorize deletion.
-
-Wallhaven requests use its documented API and image hosts. Searches support its
-query, category/purity, sort/order, top-list, resolution, ratio, color, and page
-filters. Responses accept at most 24 items/512 KiB, starts are at least two
-seconds apart, and downloads are capped at 64 MiB. An optional API key is sent
-only as an `X-API-Key` header.
-
-Workshop projects are discovered from standard Steam, Flatpak Steam, and Snap
-Steam `content/431960` locations plus an optional explicit cache path. Bounded
-`project.json` paths remain contained inside the numeric Workshop directory.
+Bar controls, a Control Center shortcut, and a palette template for the
+[Wall-in-One](https://github.com/Go08er/wall-in-one) wallpaper manager. All of
+the wallpaper logic lives in that standalone GTK4 application; this plugin is a
+thin client that drives it over its control socket, so nothing here downloads,
+decodes, or renders anything.
 
 ## Plugin
 
-Manifest ID: `goober/wall-in-one`.
+Plugin id `goober/wall-in-one`, with four entries:
 
-| Entry | ID |
-| --- | --- |
-| Services | `coordinator`, `backend`, `renderer`, `motionbgs`, `palettes`, `wallhaven` |
-| Widget | `wall-in-one` |
-| Panel | `hub` |
-| Control Center shortcut | `wall-in-one-shortcut` |
+- `control` — the singleton service. It is the only thing that talks to the
+  app, starting the plain `wall-in-one` command when requested, running
+  `wall-in-one ctl <verb>`, and republishing the answer on a shared state
+  channel that every other entry reads.
+- `wall-in-one` — the bar widget. Presentation only.
+- `controls` — the panel behind the widget's right click. Open it from
+  anywhere with `noctalia msg panel-toggle goober/wall-in-one:controls`.
+- `wallpaper` — the Control Center shortcut, so a keybind can change the
+  wallpaper without the bar.
+
+### How it talks to the app
+
+The app owns a Unix socket at `$XDG_RUNTIME_DIR/wall-in-one.sock` and speaks
+one JSON object per line in each direction — a request is `{"verb": ...,
+"argument": ...}` and a reply is `{"ok": ..., "message": ...}`. The plugin does
+not implement that protocol. `wall-in-one ctl` is the app's own client for it,
+and every plugin control is one asynchronous invocation of a `ctl` verb.
+
+The app being closed is an ordinary state rather than an error. `ctl` exits 3
+immediately when nothing is listening, so a poll against a dead socket costs
+one failed `connect(2)`. The panel and Control Center shortcut can start or
+present the application, and a bar gesture made while it is closed starts it
+and retries that one gesture once. The long-lived application uses Noctalia's
+detached subprocess call; captured `ctl` invocations remain serialized and
+carry an 8-second host callback timeout. Startup readiness polling runs at
+250 ms for at most 10 seconds and never becomes the resting poll rate.
 
 ## Requirements
 
-Manifest dependencies are `bash`, `curl`, and `sha256sum`; capabilities still
-fail soft at runtime. Optional commands are:
+- `wall-in-one` — the application itself, on `PATH`. If it is installed
+  somewhere else, set the executable path in the plugin settings.
 
-- Python 3.11+ and the separately installed `wall-in-one-backend` program for
-  local-library indexing, external palette inventory, provider preview cache,
-  Wallhaven integration, and MotionBGS search/details/cache/download work;
-- `ffmpeg` for still extraction and validation;
-- `mpvpaper` for video playback;
-- `linux-wallpaperengine` for Workshop playback and rendered capture;
-- `socat`, or compatible Unix-socket `nc`, for mpvpaper audio IPC;
-- `steam` or `xdg-open` for Steam/Workshop links; and
-- `xdg-open` for direct provider-site fallbacks.
+Noctalia 5 with plugin API 17 or newer.
 
-Network failures affect only their backend-backed capability. A missing backend
-also prevents a fresh local-library index, external palette inventory, and
-provider preview refresh, but does not erase the last complete inventories or
-disable configured playlists, direct links, Noctalia wallpaper/palette calls,
-adaptive palette previews, or renderer controls. Python 3.11+ is not an
-enable-time manifest dependency; it is required for those external capabilities
-and the two integrated provider shops.
+## Usage
+
+Place the **Wall-in-One** widget on a bar. It shows what is on screen now, or
+`Not running` when the app is closed. Use **Open Wall-in-One** in the panel or
+the Control Center shortcut to launch it. A wallpaper gesture from the stopped
+widget also launches the application and replays that one action after its
+socket becomes ready.
+
+| gesture | action |
+|---|---|
+| left click | next wallpaper |
+| middle click | random wallpaper |
+| right click | open the controls panel |
+| back button | previous wallpaper |
+| forward button | pause or resume video wallpapers |
+| wheel up / down | previous / next wallpaper |
+
+Every one of those is a Noctalia action default and can be remapped per
+placement in the widget editor.
+
+The controls panel can open/present the application and holds the settings that
+persist: shuffle order, automatic cycling, the cycle interval in seconds, the
+dynamics pause, and a palette reload. State-changing controls remain disabled
+until the application's socket is ready.
+
+The Control Center shortcut opens the application when it is stopped. Once it
+is running, a left click advances the wallpaper and a right click picks a
+random one, which is what a compositor keybind ends up driving.
+
+### Colour sync
+
+The plugin ships `palette.json.tmpl`, the Noctalia user template that renders
+the live 72-token palette for the app. Shipping it is all the plugin can do —
+the Luau host API can read configuration but not write it, so registering the
+template is the app's job:
+
+```
+wall-in-one --install-theme-template
+noctalia msg templates-apply
+```
+
+That writes a `[theme.templates.user.wall-in-one]` block into Noctalia's
+`settings.toml` and points it at a copy of this template. Noctalia then
+re-renders the palette on every change and runs the block's `post_hook`, which
+tells the running app to reload its colours. Palette sync is push-based: no
+polling and no drift.
+
+To check or undo it:
+
+```
+wall-in-one --theme-status
+wall-in-one --uninstall-theme-template
+```
+
+The copy in this directory is the same file the app installs; it is here so the
+template is readable without the app checked out, and so a materialized plugin
+directory is self-describing.
 
 ## Settings
 
-Installation-wide settings are intentionally limited to provider policy,
-explicit image/video roots, capture/item defaults, palette authority, and
-new-playlist defaults. Each Library page groups its medium's root,
-derived/private locations, and defaults. Engine playback settings live on the
-combined page for each display nested beneath **Home**, not on one global
-settings wall.
+Plugin settings, owned by the singleton service:
 
-Set **Wall-in-One backend program** to an absolute executable path to override
-automatic discovery. When it is empty, Wall-in-One checks the regular-file
-`pluginDataDir()/backend-path` pointer and then the fixed `wall-in-one-backend`
-name on `PATH`. Wall-in-One does not accept an arbitrary shell command in this
-setting. The retired `motionbgs_binary_path` key remains invisible so old
-Noctalia configuration does not produce an unknown-setting warning. It is a
-MotionBGS-only compatibility fallback after the explicit setting and automatic
-pointer but before `PATH`, allowing the pre-0.8 standalone helper to keep
-working; it never selects the generic backend used by library, palette,
-preview, or Wallhaven operations.
+- **Refresh seconds** — how often the service asks the app for its state.
+  Default 15, range 5–300. This is the only polling the plugin does.
+- **Executable** (advanced) — full path to `wall-in-one`. Empty means use
+  `PATH`.
 
-MotionBGS defaults are HD, 48 results, 30-minute metadata TTL, and 256 MiB
-maximum download; bounds are 1–48 results, 5–1,440 minutes, and 16–512 MiB.
-The MIT license covers plugin code, not downloaded artwork. Provider sidecars
-record provenance and deletion authority, not redistribution permission.
+Widget settings, per bar placement:
 
-## Architecture
+- **Wallpaper name** — always, on hover, or never.
+- **Running / paused / not-running glyph** — the icon for each state.
+- **Running / paused / not-running color** — the colour for each state.
 
-Noctalia loads each manifest entry into an isolated `ScriptRuntime`; the pinned
-Luau surface has no supported shared-module loader. The coordinator and panel
-therefore remain self-contained, while services communicate through bounded,
-versioned state. Thin process/file clients in `backend.luau`, `palettes.luau`,
-`wallhaven.luau`, and the panel invoke `library.scan`, `palettes.inventory`,
-`wallhaven.*`, and `preview.sync` through exact bounded RPC. Library and palette
-results use fixed-size pages that their Luau bridges validate incrementally
-before publishing one complete inventory. The separate `motionbgs.luau` bridge
-uses compatibility subcommands on that same program and contains no HTTP or
-HTML parser.
-
-Host calls and process state stay where they are reliable: wallpaper/palette
-application, adaptive `noctalia theme` preview generation and source hashing,
-notifications, IPC routing, renderer-child lifecycle, and exact PID ownership
-remain in Luau or the existing renderer supervisor. Schedule resolution is a
-small time-sensitive computation, while configuration normalization and managed
-deletion are coupled to coordinated persistence/commit checks; spawning a
-one-shot process there would add serialization or race cost without removing a
-measured callback hotspot. Those boundaries therefore stay in Luau in 0.8.
-A later reduction would have to move the complete configuration mutation
-transaction—revision check, normalization, persistence plan, and commit result—
-as one asynchronous protocol. Extracting individual validators while retaining
-their synchronous callers would only duplicate logic or reorder failures.
-
-## Stored state and upgrades
-
-`config.json` schema 5 stores item profiles, playlist snapshots, per-display
-engine settings, fallback assignments, and ordered schedules. Its internal
-`pairings` map is plumbing rather than a required user-created catalog: the
-authoritative library index supplies one implicit identity for each media file
-or Workshop scene, while a saved override records `customized = true`.
-Reset rewrites that stable profile with the item's derived defaults,
-`customized = false`, and synchronizes linked playlist snapshots. A playlist
-add after defaults change reuses the same medium/source profile, refreshes all
-linked snapshots, and does not allocate a second same-source profile. An
-unindexed source no longer appears as a fake Library card; an existing playlist
-occurrence retains its stable ID and last validated snapshot so it can be
-removed deliberately or become usable again if the source returns.
-
-`runtime.json` schema 6 stores capture provenance, independent run state,
-palette diagnostics, and exact owned Workshop state. Older action values are
-normalized to owned equivalents. Schema 1–4 outputs receive the documented
-schema-5 engine defaults and can then be tailored per display. Noctalia has no
-plugin-side API for deleting old plugin-setting overrides, so the manifest
-retains four invisible, inert compatibility declarations for the retired
-pre-0.7 global engine keys. Runtime code never reads them; their sole purpose is
-to keep existing user configurations valid while per-display controls remain
-authoritative.
-
-Documents are bounded to 8 MiB, fully validated, journaled, and backed up before
-a coordinated migration. Unknown/corrupt schemas fail closed and remain visible
-in Diagnostics.
-
-## Current testing boundary
-
-Offline and VM gates cover schema migration, root gating, provider bounds,
-generic backend probe/RPC isolation, paged library and palette inventory,
-provider-preview synchronization, Wallhaven and MotionBGS RPC, external parser
-and route validation, exact renderer ownership, capture, item profiles,
-playlist snapshots, and schedules.
-A real disposable Wayland session is still required to judge compositor layer
-ordering, GPU rendering, audio, and visual theme propagation; mpvpaper is not
-installed on the current host, so live internal video playback is not claimed.
-
-```bash
-noctalia plugins lint wall-in-one
-python3 wall-in-one/tests/test_contract.py
-nix build -L path:.#vm-test-wall-in-one
-```
-
-See [ADAPTERS.md](ADAPTERS.md), [TESTING.md](TESTING.md), and
-[`tests/manual/wall-in-one.md`](../tests/manual/wall-in-one.md).
+The paused state is what you see when video wallpapers are paused and their
+paired stills are showing instead.

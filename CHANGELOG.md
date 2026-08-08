@@ -13,6 +13,42 @@ All notable staging changes will be recorded here.
   Usage, Requirements, and Settings sections, and document why Wall-in-One's
   isolated Luau entries cannot be split into ordinary imported modules yet.
 
+## Wall-in-One 1.0.0 - Thin client for the standalone application
+
+- Replace the in-plugin wallpaper implementation with a client for the
+  standalone Wall-in-One GTK4 application. The plugin now owns a bar widget, a
+  controls panel, a Control Center shortcut, and the `palette.json.tmpl`
+  Noctalia user template, and nothing else.
+- Drive the running app only through `wall-in-one ctl <verb>`, the app's own
+  client for its control socket at `$XDG_RUNTIME_DIR/wall-in-one.sock`. The
+  singleton `control` service is the only entry that spawns a process; the
+  widget, panel, and shortcut communicate through a shared state channel.
+  Captured control invocations carry an 8-second host callback timeout, at most
+  one runs at a time, the status poll coalesces across placements, and repeated
+  failures are logged once rather than every tick.
+- Start or present the GTK application through the detached, no-callback
+  `wall-in-one` invocation when the user asks. The panel and stopped shortcut
+  expose that action directly; a stopped bar gesture keeps one bounded replay,
+  polls readiness every 250 ms for at most 10 seconds, then restores the normal
+  5–300 second status interval.
+- Add a focused offline thin-client gate covering the manifest, translations,
+  Luau compilation, detached launch, startup deadline, bounded command queue,
+  status parsing, and one-shot control replay.
+- Treat a missing socket as the resting state rather than a fault: `ctl` exits
+  3 immediately when nothing is listening, so the widget reads `Not running`,
+  the panel disables its controls, and nothing spins or notifies.
+- Exercise `next`, `prev`, `random`, and `dynamics` from widget gestures,
+  `shuffle`, `cycle`, `cycle-interval`, `dynamics`, `reload-palette`, and
+  `status` from the panel, and `next`/`random` from the shortcut. `quit` is
+  deliberately not exposed.
+- Remove `backend.luau`, `renderer.luau`, `motionbgs.luau`, `palettes.luau`,
+  `wallhaven.luau`, the six provider scripts, the 295 KB offline contract
+  suite, `ADAPTERS.md`, `TESTING.md`, and the separately staged
+  `wall-in-one-backend/` Python program and its test suite. All of that work
+  now lives in the application.
+- Retire the 4,967-line `vm-test-wall-in-one` NixOS gate along with the
+  implementation it tested. The thin client has no replacement VM gate yet.
+
 ## Hydra Update Examiner 0.4.0 - Native v5 settings scopes
 
 - Keep the shared channel, poll interval, and readiness threshold in the plugin
