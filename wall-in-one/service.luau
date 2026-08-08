@@ -4,7 +4,7 @@
 -- The app owns a Unix socket at $XDG_RUNTIME_DIR/wall-in-one.sock speaking one
 -- JSON object per line in each direction. `wall-in-one ctl <verb>` is the
 -- app's own client for it, so no socket code lives here. The sole exception is
--- a detached plain-binary launch that starts or presents the GTK application.
+-- a detached `--service` launch that starts the windowless application.
 --
 -- The app is absent most of the time. `ctl` fails its connect immediately and
 -- exits 3 in that case, so a poll against a dead socket is cheap and cannot
@@ -177,10 +177,10 @@ local function beginLaunch(replay)
         return
     end
 
-    -- The no-callback runAsync overload is intentionally detached. The plain
-    -- command starts (or presents) the long-lived GTK application; ctl calls
+    -- The no-callback runAsync overload is intentionally detached. The service
+    -- owns rotation and schedules without presenting a GTK window; ctl calls
     -- below remain short-lived, captured subprocesses.
-    if not noctalia.runAsync(shellQuote(command)) then
+    if not noctalia.runAsync(shellQuote(command) .. " --service") then
         table.clear(queue)
         publishStopped(noctalia.tr("state.failed"))
         return

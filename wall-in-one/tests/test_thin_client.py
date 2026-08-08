@@ -158,7 +158,8 @@ class ThinClientContract(unittest.TestCase):
             line.strip() for line in begin.splitlines() if "noctalia.runAsync(" in line
         ]
         self.assertEqual(
-            launch_lines, ["if not noctalia.runAsync(shellQuote(command)) then"]
+            launch_lines,
+            ['if not noctalia.runAsync(shellQuote(command) .. " --service") then'],
         )
         self.assertNotRegex(launch_lines[0], r"\bctl\b|function\s*\(|[,;&|]")
 
