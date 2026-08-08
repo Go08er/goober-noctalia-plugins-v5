@@ -39,10 +39,22 @@ carry an 8-second host callback timeout. Startup readiness polling runs at
 
 ## Requirements
 
-- `wall-in-one` — the application itself, on `PATH`. If it is installed
-  somewhere else, set the executable path in the plugin settings.
+- `wall-in-one` — the application itself
+  ([Go08er/wall-in-one](https://github.com/Go08er/wall-in-one)), on `PATH`.
+  This plugin does nothing without it: every entry here is a client of that
+  app's control socket.
+- Noctalia 5 with plugin API 17 or newer.
 
-Noctalia 5 with plugin API 17 or newer.
+Install the app first. It is a Nix flake:
+
+```console
+$ nix profile install github:Go08er/wall-in-one
+```
+
+Its own README covers `nix run`, using it as a flake input, and what the
+package brings with it (mpvpaper and ffmpeg). If the binary ends up somewhere
+that is not on `PATH` — a checkout's `result/bin/wall-in-one`, say — set the
+**Executable** path in this plugin's settings instead of putting it on `PATH`.
 
 ## Usage
 
