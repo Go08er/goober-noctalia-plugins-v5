@@ -152,10 +152,24 @@ class ThinClientContract(unittest.TestCase):
                 "local function beginLaunch"
             )
         ]
-        self.assertIn(
-            'if not noctalia.runAsync(shellQuote(command) .. " --service") then',
-            direct,
-        )
+        # Without a user unit, the standalone Rust runtime is what should idle
+        # all session: `wall-in-one --service` is the Python application run
+        # windowless and costs about 71 MB to own a timer, against under 3 MB
+        # for `wall-in-one-service`. Both answer the same runtime socket.
+        runtime = source[
+            source.index("local function runtimeBinary") : source.index(
+                "launchDirect = function"
+            )
+        ]
+        self.assertIn('"wall-in-one-service"', runtime)
+        self.assertIn("noctalia.fileExists(sibling)", runtime)
+        self.assertIn('noctalia.commandExists("wall-in-one-service")', runtime)
+
+        # And the application's own flag stays as the fallback, so an install
+        # predating the Rust runtime still starts rather than refusing.
+        self.assertIn("local runtime = runtimeBinary(command)", direct)
+        self.assertIn('shellQuote(command) .. " --service"', direct)
+        self.assertIn("if not noctalia.runAsync(invocation) then", direct)
         self.assertIn('local SYSTEMD_START = "systemctl --user start wall-in-one.service"', source)
         self.assertIn('configuredOverride() == "" and noctalia.commandExists("systemctl")', begin)
         self.assertIn(

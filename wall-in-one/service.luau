@@ -260,8 +260,36 @@ local function stopLaunch(message)
     publishStopped(message)
 end
 
+-- The standalone runtime, which is what should be started when there is no
+-- user unit to own the lifetime. It is a separate binary rather than a flag:
+-- `wall-in-one --service` runs the Python application windowless, which costs
+-- about 71 MB because it loads GTK to own a timer, while `wall-in-one-service`
+-- is the Rust runtime and costs under 3 MB. Both answer the same runtime
+-- socket, so this is a choice about which process idles all session, not about
+-- what the bar can do.
+local function runtimeBinary(command)
+    -- An override names the application; the runtime sits beside it in the
+    -- same bin directory, so derive rather than search a PATH the override
+    -- was chosen precisely to bypass.
+    local sibling = string.gsub(command, "wall%-in%-one$", "wall-in-one-service")
+    if sibling ~= command and noctalia.fileExists(sibling) then
+        return sibling
+    end
+    if noctalia.commandExists("wall-in-one-service") then
+        return "wall-in-one-service"
+    end
+    return nil
+end
+
 launchDirect = function(command)
-    if not noctalia.runAsync(shellQuote(command) .. " --service") then
+    -- Falling back to the application's own `--service` keeps a working system
+    -- on an installation that predates the Rust runtime, rather than refusing
+    -- to start at all.
+    local runtime = runtimeBinary(command)
+    local invocation = if runtime ~= nil
+        then shellQuote(runtime)
+        else shellQuote(command) .. " --service"
+    if not noctalia.runAsync(invocation) then
         stopLaunch(noctalia.tr("state.failed"))
         return
     end
