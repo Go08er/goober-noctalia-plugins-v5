@@ -84,8 +84,8 @@ goober/wall-in-one
 2. Choose **Git**, use `goober-v5` as the source name, and enter the repository
    URL above.
 3. Enable whichever plugins you want after the source finishes loading.
-4. Add their widgets from the bar picker. Wall-in-One also exposes an
-   optional Control Center shortcut.
+4. Add their widgets from the bar picker. Wall-in-One's widget opens its
+   compact runtime-controls panel.
 
 The source name is only a local handle. `goober-v5` is used throughout this
 README so the CLI and configuration examples agree.
@@ -102,8 +102,8 @@ noctalia msg plugins list
 
 The available bar entries are `goober/hydra-update-examiner:hydra`,
 `goober/nocvox:nocvox`, and
-`goober/wall-in-one:wall-in-one`. The Wall-in-One Control Center entry is
-`goober/wall-in-one:wallpaper`. The source is cloned and managed by Noctalia; a
+`goober/wall-in-one:wall-in-one`. Its attached panel entry is
+`goober/wall-in-one:controls`. The source is cloned and managed by Noctalia; a
 separate manual checkout is not required for the plugins. Wall-in-One is a
 client for the standalone [Wall-in-One](https://github.com/Go08er/wall-in-one)
 application and does nothing on its own; install that app separately and see
@@ -143,9 +143,8 @@ refresh_interval_minutes = 60
 ```
 
 Add the desired widget keys to a bar section using the rest of your normal bar
-configuration. Place the Wall-in-One shortcut through Noctalia's Control Center
-editor. When declaring `[[plugins.source]]` entries yourself, retain any other
-plugin sources you still want configured.
+configuration. When declaring `[[plugins.source]]` entries yourself, retain any
+other plugin sources you still want configured.
 
 ## Updating or removing the source
 
@@ -209,17 +208,17 @@ Wall-in-One `0.1.0` is a thin client. Every wallpaper capability — library
 scanning, still/video pairing, playlists, providers, palette generation, and
 the video renderer — belongs to the standalone
 [Wall-in-One](https://github.com/Go08er/wall-in-one) GTK4 application. The
-plugin owns a bar widget, a controls panel, a Control Center shortcut, and the
+plugin owns a bar widget, a controls panel, a singleton runtime client, and the
 `palette.json.tmpl` Noctalia user template.
 
-It starts the app with the plain `wall-in-one` command and otherwise reaches it
-only through `wall-in-one ctl <verb>`, the app's own client for its control
-socket at `$XDG_RUNTIME_DIR/wall-in-one.sock`. The singleton `control` service
-is the only entry that spawns processes; the widget, panel, and shortcut read
-and write a shared state channel. Control calls are serialized and bounded by a
-host callback timeout. A missing socket is the ordinary resting state rather
-than an error, so the widget simply reads `Not running` until the user launches
-the application from the plugin.
+It starts the packaged `wall-in-one.service` user unit, or the standalone
+`wall-in-one-service --wait-for-config` Rust runtime when no unit is available.
+The plugin reaches both processes through `wall-in-one ctl <verb>`: runtime
+verbs and one atomic inventory snapshot use
+`$XDG_RUNTIME_DIR/wall-in-one-runtime.sock`, while opening an authoring page
+uses the GTK app's `$XDG_RUNTIME_DIR/wall-in-one.sock`. The singleton `control`
+entry is the only process client; the widget and panel use shared state. Calls
+are serialized and bounded by a host callback timeout.
 
 Open the controls panel with
 `noctalia msg panel-toggle goober/wall-in-one:controls`. See

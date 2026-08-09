@@ -121,8 +121,16 @@ class ThinClientContract(unittest.TestCase):
         # see them.
         referenced.update(
             {
+                "panel.playback.pause",
+                "panel.playback.paused",
+                "panel.playback.play",
+                "panel.playback.playing",
+                "panel.playback.shuffle_off",
+                "panel.playback.shuffle_on",
                 "panel.playlists.empty",
                 "panel.playlists.unavailable",
+                "panel.schedule.following",
+                "panel.schedule.manual",
             }
         )
         missing = referenced - translations.keys()
@@ -153,9 +161,9 @@ class ThinClientContract(unittest.TestCase):
             )
         ]
         # Without a user unit, the standalone Rust runtime is what should idle
-        # all session: `wall-in-one --service` is the Python application run
-        # windowless and costs about 71 MB to own a timer, against under 3 MB
-        # for `wall-in-one-service`. Both answer the same runtime socket.
+        # all session. Its wait mode is quiet before the first app-written
+        # configuration appears; the old Python service is not a fallback
+        # because it cannot publish the required atomic inventory.
         runtime = source[
             source.index("local function runtimeBinary") : source.index(
                 "launchDirect = function"
@@ -165,10 +173,10 @@ class ThinClientContract(unittest.TestCase):
         self.assertIn("noctalia.fileExists(sibling)", runtime)
         self.assertIn('noctalia.commandExists("wall-in-one-service")', runtime)
 
-        # And the application's own flag stays as the fallback, so an install
-        # predating the Rust runtime still starts rather than refusing.
         self.assertIn("local runtime = runtimeBinary(command)", direct)
-        self.assertIn('shellQuote(command) .. " --service"', direct)
+        self.assertIn('shellQuote(runtime) .. " --wait-for-config"', direct)
+        self.assertIn('noctalia.tr("state.missing_runtime")', direct)
+        self.assertNotIn('shellQuote(command) .. " --service"', direct)
         self.assertIn("if not noctalia.runAsync(invocation) then", direct)
         self.assertIn('local SYSTEMD_START = "systemctl --user start wall-in-one.service"', source)
         self.assertIn('configuredOverride() == "" and noctalia.commandExists("systemctl")', begin)
@@ -182,7 +190,8 @@ class ThinClientContract(unittest.TestCase):
         ]
         for fragment in (
             'if job.verb == "open-app" then',
-            "noctalia.runAsync(shellQuote(command))",
+            'table.insert(parts, "open")',
+            "noctalia.runAsync(table.concat(parts, \" \"))",
             'local parts = { shellQuote(command), "ctl", job.verb }',
             "table.insert(parts, shellQuote(job.argument))",
             'noctalia.runAsync(table.concat(parts, " "), function(result)',
@@ -230,21 +239,45 @@ class ThinClientContract(unittest.TestCase):
 
         panel = read("panel.luau")
         for verb in (
-            "playlists",
             "playlist-use",
-            "display-assign",
-            "display-clear",
+            "schedule-follow",
+            "previous",
+            "toggle",
+            "next",
+            "random",
+            "shuffle",
             "open-app",
         ):
             self.assertIn(f'"{verb}"', panel)
-        for removed in (
-            'send("next"',
-            'send("random"',
+        for authoring_verb in (
+            'send("playlists"',
+            'send("schedule"',
+            'send("displays"',
+            'send("display-assign"',
+            'send("display-clear"',
             'send("cycle"',
             'send("dynamics"',
             'send("reload-palette"',
         ):
-            self.assertNotIn(removed, panel)
+            self.assertNotIn(authoring_verb, panel)
+        self.assertIn('send("open-app", "schedules")', panel)
+        self.assertIn('send("open-app", "displays")', panel)
+
+        # Inventory comes only from the same decoded status snapshot as the
+        # playback state. Runtime listing and display-mutation verbs do not
+        # exist and must never be sent while the GUI is closed.
+        self.assertIn("noctalia.json.decode(line)", source)
+        for obsolete in (
+            "publishPlaylists",
+            "publishSchedule",
+            "publishDisplays",
+            'playlists = true',
+            'schedule = true',
+            'displays = true',
+            '["display-assign"] = true',
+            '["display-clear"] = true',
+        ):
+            self.assertNotIn(obsolete, source)
 
     def test_luau_entries_compile_when_compiler_is_available(self) -> None:
         compiler = discover_tool("luau-compile")
@@ -275,8 +308,59 @@ class ThinClientContract(unittest.TestCase):
             local states = {}
             local watchers = {}
             local now = 100
-            local configuredBinary = "/tmp/wall in ' one"
+            local configuredBinary = "/tmp/wall in ' one/wall-in-one"
+            local configuredRuntime = "/tmp/wall in ' one/wall-in-one-service"
             local systemctlAvailable = false
+            local fixtureStatus = {
+                playlist_id = "day",
+                playlist = "Day set",
+                source = "schedule",
+                entry_id = "morning",
+                kind = "still",
+                still = "/tmp/morning.png",
+                motion_active = false,
+                paused = false,
+                shuffle = true,
+                cycle_enabled = true,
+                last_error = "",
+                playlists = {
+                    { id = "day", name = "Day set", entries = 4, active = true },
+                    { id = "night", name = "Night", entries = 2, active = false },
+                },
+                schedule = {
+                    following = true,
+                    playlist_id = "day",
+                    playlist = "Day set",
+                    rule_id = "r1",
+                },
+                schedules = {
+                    {
+                        id = "r1",
+                        playlist_id = "day",
+                        playlist = "Day set",
+                        months = {},
+                        weekdays = {},
+                        start = "06:00",
+                        ["end"] = "22:00",
+                        enabled = true,
+                        selected = true,
+                        in_force = true,
+                    },
+                },
+                displays = {
+                    {
+                        connector = "eDP-1",
+                        assigned_playlist_id = "day",
+                        assigned_playlist = "Day set",
+                        playlist_id = "day",
+                        playlist = "Day set",
+                        entry_id = "morning",
+                        kind = "still",
+                        still = "/tmp/morning.png",
+                        motion_active = false,
+                    },
+                },
+            }
             local os = { time = function() return now end }
             local noctalia = {
                 getConfig = function(key)
@@ -290,12 +374,21 @@ class ThinClientContract(unittest.TestCase):
                     end,
                 },
                 expandPath = function(path) return path end,
-                fileExists = function(path) return path == configuredBinary end,
+                fileExists = function(path)
+                    return path == configuredBinary or path == configuredRuntime
+                end,
                 commandExists = function(name)
                     if name == "systemctl" then return systemctlAvailable end
                     if name == "wall-in-one" then return configuredBinary == "" end
+                    if name == "wall-in-one-service" then return configuredBinary == "" end
                     return false
                 end,
+                json = {
+                    decode = function(raw)
+                        if raw == "RUNTIME_STATUS" then return fixtureStatus end
+                        return nil, "fixture rejected malformed JSON"
+                    end,
+                },
                 setUpdateInterval = function(value) table.insert(intervals, value) end,
                 runAsync = function(command, callback, timeout)
                     table.insert(calls, { command = command, callback = callback, timeout = timeout })
@@ -314,7 +407,8 @@ class ThinClientContract(unittest.TestCase):
             }
         """
         checks = r"""
-            local quotedBinary = "'/tmp/wall in '\"'\"' one'"
+            local quotedBinary = "'/tmp/wall in '\"'\"' one/wall-in-one'"
+            local quotedRuntime = "'/tmp/wall in '\"'\"' one/wall-in-one-service'"
             local function complete(index, result)
                 assert(type(calls[index].callback) == "function", "call has no completion callback")
                 calls[index].callback(result)
@@ -326,7 +420,7 @@ class ThinClientContract(unittest.TestCase):
             assert(calls[1].timeout == 8000)
             complete(1, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
             assert(#calls == 3, "absent service did not launch and start readiness polling")
-            assert(calls[2].command == quotedBinary .. " --service", calls[2].command)
+            assert(calls[2].command == quotedRuntime .. " --wait-for-config", calls[2].command)
             assert(calls[2].callback == nil and calls[2].timeout == nil)
             assert(calls[3].command == quotedBinary .. " ctl status", calls[3].command)
             assert(calls[3].timeout == 1500 and type(calls[3].callback) == "function")
@@ -335,49 +429,31 @@ class ThinClientContract(unittest.TestCase):
             complete(3, {
                 timedOut = false,
                 exitCode = 0,
-                stdout = "set fixture.jpg; 1 of 1 playable; shuffle=off cycle=off cycle-interval=900 dynamics=on",
+                stdout = "RUNTIME_STATUS",
                 stderr = "",
             })
             assert(states[STATE_KEY].running == true and states[STATE_KEY].launching == false)
+            assert(states[STATE_KEY].playlist == "Day set" and states[STATE_KEY].entryId == "morning")
+            assert(states[STATE_KEY].shuffle == true and states[STATE_KEY].cycleEnabled == true)
             assert(intervals[#intervals] == 15000, "successful startup did not restore resting polling")
 
-            -- One playlists request refreshes the whole compact menu in a
-            -- serialized playlists -> schedule -> displays chain.
-            onIpc("playlists", nil)
-            assert(#calls == 4 and calls[4].command == quotedBinary .. " ctl playlists")
-            complete(4, {
-                timedOut = false,
-                exitCode = 0,
-                stdout = "# playlists: 2\n# fields: name, entries, active\nDay set\t4\tyes\nNight\t2\tno",
-                stderr = "",
-            })
-            assert(#calls == 5 and calls[5].command == quotedBinary .. " ctl schedule")
-            complete(5, {
-                timedOut = false,
-                exitCode = 0,
-                stdout = "# schedule: 1 rules, default Day set\n# fields: rule, playlist, when, enabled, in-force\nr1\tNight\tweekdays at 22:00-06:00\tyes\tyes",
-                stderr = "",
-            })
-            assert(#calls == 6 and calls[6].command == quotedBinary .. " ctl displays")
-            complete(6, {
-                timedOut = false,
-                exitCode = 0,
-                stdout = "# fields: connector, playlist\neDP-1 (BOE, 2560x1600)\tDay set",
-                stderr = "",
-            })
+            -- That one status reply also publishes the complete menu. No
+            -- authoring process or listing round trip exists in this test.
             local menu = states[MENU_KEY]
             assert(#menu.playlists == 2 and menu.playlists[1].name == "Day set")
             assert(menu.playlists[1].active == true and menu.playlists[1].entries == 4)
-            assert(menu.schedule.default == "Day set" and menu.schedule.rule == "Night")
+            assert(menu.schedule.following == true and menu.schedule.playlist == "Day set")
+            assert(menu.schedules[1].id == "r1" and menu.schedules[1].in_force == true)
             assert(menu.displays[1].connector == "eDP-1" and menu.displays[1].playlist == "Day set")
+            assert(#calls == 3, "status inventory unexpectedly triggered another control call")
 
             -- Arguments and a configured path containing spaces and quotes are
             -- independently shell-quoted; the graphical app is detached.
             onIpc("playlist-use", { argument = "Night's set" })
-            assert(calls[7].command == quotedBinary .. " ctl playlist-use 'Night'\"'\"'s set'", calls[7].command)
-            assert(calls[7].timeout == 8000 and type(calls[7].callback) == "function")
-            complete(7, { timedOut = false, exitCode = 0, stdout = "playing Night's set", stderr = "" })
-            assert(calls[8].command == quotedBinary .. " ctl status")
+            assert(calls[4].command == quotedBinary .. " ctl playlist-use 'Night'\"'\"'s set'", calls[4].command)
+            assert(calls[4].timeout == 8000 and type(calls[4].callback) == "function")
+            complete(4, { timedOut = false, exitCode = 0, stdout = "playing Night's set", stderr = "" })
+            assert(calls[5].command == quotedBinary .. " ctl status")
 
             -- Clear the post-change refresh chain before checking presentation.
             table.clear(queue)
@@ -386,9 +462,12 @@ class ThinClientContract(unittest.TestCase):
             onIpc("open-app", nil)
             assert(#calls == 1 and calls[1].command == quotedBinary)
             assert(calls[1].callback == nil and calls[1].timeout == nil)
+            calls = {}
+            onIpc("open-app", { argument = "schedules" })
+            assert(#calls == 1 and calls[1].command == quotedBinary .. " ctl open 'schedules'")
 
             -- With no explicit override, systemd is tried once. A missing or
-            -- broken unit falls back to the app's own headless mode.
+            -- broken unit falls back to the quiet standalone Rust runtime.
             calls = {}
             table.clear(queue)
             busy = false
@@ -400,7 +479,7 @@ class ThinClientContract(unittest.TestCase):
             assert(calls[1].timeout == 3000 and type(calls[1].callback) == "function")
             complete(1, { timedOut = false, exitCode = 5, stdout = "", stderr = "unit missing" })
             assert(#calls == 3, "systemd failure did not use the direct fallback")
-            assert(calls[2].command == "'wall-in-one' --service" and calls[2].callback == nil)
+            assert(calls[2].command == "'wall-in-one-service' --wait-for-config" and calls[2].callback == nil)
             assert(calls[3].command == "'wall-in-one' ctl status" and calls[3].timeout == 1500)
         """
 

@@ -15,23 +15,37 @@ All notable staging changes will be recorded here.
 
 ## Wall-in-One 0.1.0 - Thin client for the standalone application
 
+- Decode the Rust runtime's atomic JSON `status` snapshot and build playlist,
+  schedule, and read-only display-assignment views from it. The bar no longer
+  depends on authoring-only `playlists`, `schedule`, or `displays` verbs, so its
+  complete menu works while the GTK app is closed.
+- Add direct previous, play/pause, next, random, shuffle, manual-playlist, and
+  return-to-schedule controls. Open schedule and display configuration on their
+  exact GTK pages; display assignment remains configuration rather than a
+  runtime socket mutation.
+- Prefer the packaged Rust user service and directly fall back to
+  `wall-in-one-service --wait-for-config`. Stop starting the 71 MB Python
+  compatibility service, which cannot provide the atomic runtime inventory.
 - Make the plugin deliberately minimal: both widget clicks open one compact
   playlist menu; remove hidden playback gestures, the next/random shortcut,
   and the duplicated cycle, dynamics, interval, and palette controls.
 - Add playlist switching, return-to-schedule, current calendar context, and
-  per-display playlist assignment to the bar menu. Editing pairings,
-  playlists, and schedule rules remains in the full application.
+  read-only per-display assignment to the bar menu. Editing pairings,
+  playlists, display assignments, and schedule rules remains in the full
+  application.
 - Start wallpaper automation when the plugin loads. Prefer the packaged
   `wall-in-one.service` systemd user unit and fall back to a detached
-  `wall-in-one --service`; opening the GUI no longer owns automation lifetime.
+  `wall-in-one-service --wait-for-config`; opening the GUI no longer owns
+  automation lifetime.
 - Replace the in-plugin wallpaper implementation with a client for the
   standalone Wall-in-One GTK4 application. The plugin now owns a bar widget, a
   playlist panel, a singleton control service, and the `palette.json.tmpl`
   Noctalia user template, and nothing else.
-- Drive the running app only through `wall-in-one ctl <verb>`, the app's own
-  client for its control socket at `$XDG_RUNTIME_DIR/wall-in-one.sock`. The
-  singleton `control` service is the only entry that spawns a process; the
-  widget and panel communicate through shared state channels.
+- Drive the running processes only through `wall-in-one ctl <verb>`, which
+  routes runtime commands to `$XDG_RUNTIME_DIR/wall-in-one-runtime.sock` and
+  authoring-page requests to `$XDG_RUNTIME_DIR/wall-in-one.sock`. The singleton
+  `control` service is the only entry that spawns a process; the widget and
+  panel communicate through shared state channels.
   Captured control invocations carry an 8-second host callback timeout, at most
   one runs at a time, the status poll coalesces across placements, and repeated
   failures are logged once rather than every tick.
@@ -43,10 +57,9 @@ All notable staging changes will be recorded here.
 - Treat a missing socket as the resting state rather than a fault: `ctl` exits
   3 immediately when nothing is listening, so the widget reads `Not running`,
   the panel disables its controls, and nothing spins or notifies.
-- Exercise only `playlists`, `playlist-use`, `schedule`, `displays`,
-  `display-assign`, `display-clear`, and `status`. Destructive playlist and
-  schedule editing, direct wallpaper navigation, and `quit` are deliberately
-  not exposed by the bar.
+- Exercise only runtime `status`, playback, shuffle, playlist-override, and
+  schedule-follow verbs. Playlist, schedule, and display mutation remain in
+  the app; `quit` is deliberately not exposed by the bar.
 - Remove `backend.luau`, `renderer.luau`, `motionbgs.luau`, `palettes.luau`,
   `wallhaven.luau`, the six provider scripts, the 295 KB offline contract
   suite, `ADAPTERS.md`, `TESTING.md`, and the separately staged

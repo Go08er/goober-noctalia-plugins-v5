@@ -18,9 +18,9 @@ Plugin id `goober/wall-in-one`, with three entries:
 
 - `control` — the singleton service. It is the only thing that talks to the
   app, preferring the packaged `wall-in-one.service` systemd user unit and
-  falling back to `wall-in-one --service`, running
-  `wall-in-one ctl <verb>`, and republishing the answer on a shared state
-  channel that every other entry reads.
+  falling back to `wall-in-one-service --wait-for-config`, running
+  `wall-in-one ctl <verb>`, and republishing each atomic runtime snapshot on a
+  shared state channel that every other entry reads.
 - `wall-in-one` — the bar widget. Presentation only; clicks open its menu.
 - `controls` — the playlist, schedule, and display menu. Open it from
   anywhere with `noctalia msg panel-toggle goober/wall-in-one:controls`.
@@ -30,23 +30,37 @@ configurable.” It does not hide playback commands behind middle-click, wheel,
 or mouse-button gestures, and it does not duplicate the application's cycle,
 pairing, or schedule editors. The bar menu keeps only the common decisions
 that make sense there: choose the active playlist, resume calendar control,
-inspect display assignments, change a display's playlist, or open the full
-application.
+play/pause or move through the playlist, toggle shuffle, inspect display
+assignments, or open the full application. Display assignment and schedule-rule
+editing remain configuration work in the app.
+
+Widget click actions are intentionally fixed in this minimal design. A later
+configurability pass may expose those two menu-opening gestures, but it should
+not reintroduce hidden wallpaper-changing clicks or wheel actions.
 
 ### How it talks to the app
 
-The app owns a Unix socket at `$XDG_RUNTIME_DIR/wall-in-one.sock` and speaks
-one JSON object per line in each direction — a request is `{"verb": ...,
-"argument": ...}` and a reply is `{"ok": ..., "message": ...}`. The plugin does
-not implement that protocol. `wall-in-one ctl` is the app's own client for it,
-and every plugin control is one asynchronous invocation of a `ctl` verb.
+There are deliberately two sockets. The always-on Rust service owns
+`$XDG_RUNTIME_DIR/wall-in-one-runtime.sock`; runtime commands and its atomic
+JSON `status` snapshot live there. The GTK authoring app owns
+`$XDG_RUNTIME_DIR/wall-in-one.sock` while its window process is running. The
+plugin does not implement either line protocol: `wall-in-one ctl` routes each
+verb to its owner, and every plugin action is one asynchronous `ctl` invocation.
+
+One runtime `status` reply carries playback state plus the complete playlist,
+schedule, and display-assignment inventory. The menu never calls nonexistent
+runtime `playlists`, `schedule`, or `displays` listing verbs and does not need
+the GTK app to be running. Display assignments are read-only in the bar because
+they are configuration, not runtime state.
 
 The plugin starts the service when its singleton entry loads. If the packaged
 systemd user unit is available, `systemctl --user start wall-in-one.service`
-owns its lifetime; otherwise the plugin starts `wall-in-one --service`
-directly. The window is only configuration: launching the plain `wall-in-one`
-command later attaches to the existing process, and closing it leaves rotation
-and schedules running.
+owns its lifetime; otherwise the plugin starts
+`wall-in-one-service --wait-for-config` directly. The older Python
+`wall-in-one --service` compatibility process cannot provide the atomic
+inventory and is no longer launched by this plugin. The window is only
+configuration: launching plain `wall-in-one` later attaches to the existing
+application instance, and closing it leaves the Rust service running.
 
 `ctl` exits 3 immediately when nothing is listening, so a readiness probe
 against a dead socket costs one failed `connect(2)`. Captured calls remain
@@ -57,13 +71,14 @@ runs at 250 ms for at most 10 seconds and never becomes the resting poll rate.
 
 - `wall-in-one` — the application itself
   ([Go08er/wall-in-one](https://github.com/Go08er/wall-in-one)), on `PATH`.
-  This plugin does nothing without it: every entry here is a client of that
-  app's control socket.
+  Its package must include both `wall-in-one` and `wall-in-one-service`; this
+  plugin needs the GTK command for configuration and the Rust command for
+  runtime control.
 - Noctalia 5 with plugin API 17 or newer.
 
 When `systemctl` is available, the plugin uses it to prefer the app's packaged
 user unit. It is optional: a failed or unavailable unit falls back to a
-detached `wall-in-one --service`.
+detached `wall-in-one-service --wait-for-config`.
 
 Install the app first. It is a Nix flake:
 
@@ -72,8 +87,9 @@ $ nix profile install github:Go08er/wall-in-one
 ```
 
 Its own README covers `nix run`, using it as a flake input, and what the
-package brings with it (mpvpaper and ffmpeg). If the binary ends up somewhere
-that is not on `PATH` — a checkout's `result/bin/wall-in-one`, say — set the
+package brings with it (mpvpaper, ffmpeg, and linux-wallpaperengine). If the
+binary ends up somewhere that is not on `PATH` — a checkout's
+`result/bin/wall-in-one`, say — set the
 **Executable** path in this plugin's settings instead of putting it on `PATH`.
 
 ## Usage
@@ -87,18 +103,17 @@ the same compact menu; no other gesture changes wallpaper state.
 | left click | open the playlist menu |
 | right click | open the playlist menu |
 
-The menu lists named playlists with their entry counts and marks the active
-one. Choosing another invokes `playlist-use <name>`; **Follow schedule** invokes
-`playlist-use none`. It also shows the calendar rule currently in force and
-the app's default, and lists displays with their current assignment. Open a
-display row to assign a playlist or return it to the default. **Edit schedules**
-opens the application, where schedule rules can be changed safely on the full
-Display schedules page.
+The menu lists named playlists with their entry counts and marks every playlist
+currently active on a display. Choosing another sends `playlist-use <name>`;
+**Follow schedule** sends `schedule-follow`. Playback controls send
+`previous`, `toggle`, `next`, `random`, and `shuffle on|off` directly to the
+Rust runtime. The schedule section shows the calendar target and rule currently
+selected, including while a manual override is active.
 
-The app does not currently expose a control-socket or command-line deep link
-for selecting that page, so the plugin can present the window but cannot force
-its active tab. That small app-side API is the remaining piece needed for a
-true “open directly on Display schedules” action.
+Displays show both their configured assignment and, when an override is in
+force, the playlist actually playing. Assignment is read-only here; **Edit
+display assignments** opens the app's Displays page. **Edit schedules** runs
+`wall-in-one ctl open schedules`, landing directly on the full schedule editor.
 
 ### Colour sync
 

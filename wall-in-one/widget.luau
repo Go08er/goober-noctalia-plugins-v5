@@ -58,13 +58,21 @@ local function tooltip()
     end
 
     local showing = tostring(state.showing or "")
-    return table.concat({
+    local lines = {
         noctalia.tr("widget.title"),
         if showing ~= "" then showing else noctalia.tr("widget.nothing_applied"),
-        noctalia.tr("widget.playable", { playable = tostring(state.playable), total = tostring(state.library) }),
+        if state.paused == true then noctalia.tr("widget.paused") else noctalia.tr("widget.playing"),
+        if tostring(state.source or "") == "manual"
+            then noctalia.tr("widget.manual")
+            else noctalia.tr("widget.scheduled"),
         "",
         noctalia.tr("widget.gestures"),
-    }, "\n")
+    }
+    local runtimeError = tostring(state.runtimeError or "")
+    if runtimeError ~= "" then
+        table.insert(lines, 5, runtimeError)
+    end
+    return table.concat(lines, "\n")
 end
 
 local function render()

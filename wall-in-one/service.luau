@@ -9,7 +9,7 @@ local STATE_KEY = "wall_in_one_state"
 local MENU_KEY = "wall_in_one_menu"
 local COMMAND_KEY = "wall_in_one_command"
 local READY_KEY = "wall_in_one_ready"
-local PROTOCOL = 2
+local PROTOCOL = 3
 -- wall_in_one.control.client.EXIT_NOT_RUNNING
 local EXIT_NOT_RUNNING = 3
 local CALL_TIMEOUT_MS = 8000
@@ -23,12 +23,15 @@ local VERBS = {
     launch = true,
     ["open-app"] = true,
     status = true,
-    playlists = true,
     ["playlist-use"] = true,
-    schedule = true,
-    displays = true,
-    ["display-assign"] = true,
-    ["display-clear"] = true,
+    ["schedule-follow"] = true,
+    play = true,
+    pause = true,
+    toggle = true,
+    shuffle = true,
+    next = true,
+    previous = true,
+    random = true,
 }
 
 local queue = {}
@@ -39,9 +42,6 @@ local lastLogged = ""
 local launching = false
 local startupDeadline = 0
 local pendingAfterLaunch = nil
-local playlistRows = {}
-local scheduleState = { count = 0, default = "", rule = "", when = "" }
-local displayRows = {}
 local invoke, pump, applyInterval, launchDirect
 
 -- A widget can load before this service does. Clear the handshake so early
@@ -77,50 +77,36 @@ local function publish(state)
         running = state.running == true,
         launching = state.launching == true,
         showing = tostring(state.showing or ""),
-        playable = tonumber(state.playable) or 0,
-        library = tonumber(state.library) or 0,
+        playlist = tostring(state.playlist or ""),
+        source = tostring(state.source or ""),
+        entryId = tostring(state.entryId or ""),
+        kind = tostring(state.kind or ""),
+        still = tostring(state.still or ""),
+        paused = state.paused == true,
+        shuffle = state.shuffle == true,
+        cycleEnabled = state.cycleEnabled == true,
+        motionActive = state.motionActive == true,
+        runtimeError = tostring(state.runtimeError or ""),
         error = tostring(state.error or ""),
     })
 end
 
-local function publishMenu(errorMessage)
+local function publishMenu(snapshot, errorMessage)
     menuSequence += 1
-    local copiedPlaylists = {}
-    for _, row in ipairs(playlistRows) do
-        table.insert(copiedPlaylists, {
-            name = row.name,
-            entries = row.entries,
-            active = row.active,
-        })
-    end
-    local copiedDisplays = {}
-    for _, row in ipairs(displayRows) do
-        table.insert(copiedDisplays, {
-            connector = row.connector,
-            label = row.label,
-            playlist = row.playlist,
-        })
-    end
+    local source = if type(snapshot) == "table" then snapshot else {}
     noctalia.state.set(MENU_KEY, {
         protocol = PROTOCOL,
         sequence = menuSequence,
-        playlists = copiedPlaylists,
-        schedule = {
-            count = scheduleState.count,
-            default = scheduleState.default,
-            rule = scheduleState.rule,
-            when = scheduleState.when,
-        },
-        displays = copiedDisplays,
+        playlists = if type(source.playlists) == "table" then source.playlists else {},
+        schedule = if type(source.schedule) == "table" then source.schedule else {},
+        schedules = if type(source.schedules) == "table" then source.schedules else {},
+        displays = if type(source.displays) == "table" then source.displays else {},
         error = tostring(errorMessage or ""),
     })
 end
 
 local function clearMenu()
-    playlistRows = {}
-    scheduleState = { count = 0, default = "", rule = "", when = "" }
-    displayRows = {}
-    publishMenu("")
+    publishMenu(nil, "")
 end
 
 -- Not-running is the expected resting state, not a fault, so it is published
@@ -136,81 +122,39 @@ local function publishStopped(message)
     publish({ error = detail })
 end
 
--- `status` answers with one line from Session.describe().
+-- Rust returns one fully self-consistent JSON snapshot. Publishing its
+-- inventory as part of this same operation means the panel never combines a
+-- playlist list, schedule, and display state observed at different instants.
 local function publishStatus(line)
-    local playable, library = line:match("(%d+) of (%d+) playable")
+    local snapshot, decodeError = noctalia.json.decode(line)
+    if type(snapshot) ~= "table" then
+        local detail = noctalia.tr("state.invalid_status", {
+            error = tostring(decodeError or "unknown JSON error"),
+        })
+        publishStopped(detail)
+        publishMenu(nil, detail)
+        return
+    end
+
+    local playlist = tostring(snapshot.playlist or "")
     lastLogged = ""
     publish({
         running = true,
         launching = false,
-        showing = noctalia.string.trim(line:match("^(.-); %d+ of %d+ playable") or line),
-        playable = tonumber(playable) or 0,
-        library = tonumber(library) or 0,
+        showing = playlist,
+        playlist = playlist,
+        source = tostring(snapshot.source or ""),
+        entryId = tostring(snapshot.entry_id or ""),
+        kind = tostring(snapshot.kind or ""),
+        still = tostring(snapshot.still or ""),
+        paused = snapshot.paused == true,
+        shuffle = snapshot.shuffle == true,
+        cycleEnabled = snapshot.cycle_enabled == true,
+        motionActive = snapshot.motion_active == true,
+        runtimeError = tostring(snapshot.last_error or ""),
         error = "",
     })
-end
-
-local function eachLine(text, callback)
-    for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
-        callback(line)
-    end
-end
-
-local function publishPlaylists(text)
-    local rows = {}
-    eachLine(text, function(line)
-        if line:sub(1, 1) ~= "#" and line ~= "" then
-            local name, entries, active = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
-            if name ~= nil and name ~= "" then
-                table.insert(rows, {
-                    name = name,
-                    entries = tonumber(entries) or 0,
-                    active = active == "yes",
-                })
-            end
-        end
-    end)
-    playlistRows = rows
-    publishMenu("")
-end
-
-local function publishSchedule(text)
-    local nextState = { count = 0, default = "", rule = "", when = "" }
-    eachLine(text, function(line)
-        local count, defaultName = line:match("^# schedule: (%d+) rules, default (.*)$")
-        if count ~= nil then
-            nextState.count = tonumber(count) or 0
-            nextState.default = tostring(defaultName or "")
-        elseif line:sub(1, 1) ~= "#" and line ~= "" then
-            local _id, playlist, when, _enabled, inForce =
-                line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-            if inForce == "yes" then
-                nextState.rule = tostring(playlist or "")
-                nextState.when = tostring(when or "")
-            end
-        end
-    end)
-    scheduleState = nextState
-    publishMenu("")
-end
-
-local function publishDisplays(text)
-    local rows = {}
-    eachLine(text, function(line)
-        if line:sub(1, 1) ~= "#" and line ~= "" then
-            local label, assigned = line:match("^([^\t]*)\t([^\t]*)")
-            local connector = if label ~= nil then label:match("^([^%s%(]+)") else nil
-            if connector ~= nil and connector ~= "" then
-                table.insert(rows, {
-                    connector = connector,
-                    label = label,
-                    playlist = tostring(assigned or ""),
-                })
-            end
-        end
-    end)
-    displayRows = rows
-    publishMenu("")
+    publishMenu(snapshot, "")
 end
 
 local function enqueue(verb, argument, allowLaunch)
@@ -218,7 +162,7 @@ local function enqueue(verb, argument, allowLaunch)
         noctalia.log("wall-in-one: unknown control verb '" .. tostring(verb) .. "'")
         return
     end
-    if verb == "status" or verb == "playlists" or verb == "schedule" or verb == "displays" then
+    if verb == "status" then
         for _, job in ipairs(queue) do
             if job.verb == verb then
                 return
@@ -260,13 +204,9 @@ local function stopLaunch(message)
     publishStopped(message)
 end
 
--- The standalone runtime, which is what should be started when there is no
--- user unit to own the lifetime. It is a separate binary rather than a flag:
--- `wall-in-one --service` runs the Python application windowless, which costs
--- about 71 MB because it loads GTK to own a timer, while `wall-in-one-service`
--- is the Rust runtime and costs under 3 MB. Both answer the same runtime
--- socket, so this is a choice about which process idles all session, not about
--- what the bar can do.
+-- The standalone Rust runtime is what should be started when there is no user
+-- unit to own the lifetime. The Python compatibility service cannot provide
+-- the atomic inventory this panel requires, so this plugin does not start it.
 local function runtimeBinary(command)
     -- An override names the application; the runtime sits beside it in the
     -- same bin directory, so derive rather than search a PATH the override
@@ -282,13 +222,12 @@ local function runtimeBinary(command)
 end
 
 launchDirect = function(command)
-    -- Falling back to the application's own `--service` keeps a working system
-    -- on an installation that predates the Rust runtime, rather than refusing
-    -- to start at all.
     local runtime = runtimeBinary(command)
-    local invocation = if runtime ~= nil
-        then shellQuote(runtime)
-        else shellQuote(command) .. " --service"
+    if runtime == nil then
+        stopLaunch(noctalia.tr("state.missing_runtime"))
+        return
+    end
+    local invocation = shellQuote(runtime) .. " --wait-for-config"
     if not noctalia.runAsync(invocation) then
         stopLaunch(noctalia.tr("state.failed"))
         return
@@ -368,7 +307,7 @@ local function finish(job, result)
             stopLaunch(detail)
         else
             publishStopped(detail)
-            publishMenu(detail)
+            publishMenu(nil, detail)
         end
     elseif job.verb == "status" then
         local replay = pendingAfterLaunch
@@ -377,21 +316,8 @@ local function finish(job, result)
         if replay ~= nil then
             enqueue(replay.verb, replay.argument, false)
         end
-    elseif job.verb == "playlists" then
-        publishPlaylists(result.stdout)
-        enqueue("schedule", nil, false)
-    elseif job.verb == "schedule" then
-        publishSchedule(result.stdout)
-        enqueue("displays", nil, false)
-    elseif job.verb == "displays" then
-        publishDisplays(result.stdout)
     else
         enqueue("status", nil, false)
-        if job.verb == "playlist-use" then
-            enqueue("playlists", nil, false)
-        elseif job.verb == "display-assign" or job.verb == "display-clear" then
-            enqueue("displays", nil, false)
-        end
     end
 end
 
@@ -409,7 +335,13 @@ invoke = function(job)
     end
 
     if job.verb == "open-app" then
-        if not noctalia.runAsync(shellQuote(command)) then
+        local parts = { shellQuote(command) }
+        if job.argument ~= nil and job.argument ~= "" then
+            table.insert(parts, "ctl")
+            table.insert(parts, "open")
+            table.insert(parts, shellQuote(job.argument))
+        end
+        if not noctalia.runAsync(table.concat(parts, " ")) then
             publishStopped(noctalia.tr("state.failed"))
         end
         return
@@ -471,6 +403,6 @@ publishStopped("")
 clearMenu()
 noctalia.state.set(READY_KEY, true)
 -- First ask the existing socket. Only a genuinely absent service is started;
--- the packaged systemd unit is preferred, with a detached `--service`
+-- the packaged systemd unit is preferred, with a detached Rust runtime
 -- fallback for non-systemd installs.
 enqueue("status", nil, true)

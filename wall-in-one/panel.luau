@@ -1,6 +1,6 @@
 --!nonstrict
--- A small playlist switcher. Editing stays in the standalone GTK app; this
--- panel covers only the decisions that are useful from a bar.
+-- Compact runtime controls. Authoring stays in the standalone GTK app; this
+-- panel reads one atomic Rust status snapshot and sends runtime-only verbs.
 
 local STATE_KEY = "wall_in_one_state"
 local MENU_KEY = "wall_in_one_menu"
@@ -9,8 +9,6 @@ local COMMAND_KEY = "wall_in_one_command"
 local state = nil
 local menu = nil
 local commandSequence = 0
-local page = "main"
-local selectedDisplay = ""
 
 local function running()
     return type(state) == "table" and state.running == true
@@ -28,10 +26,12 @@ local function displays()
     return if type(menu) == "table" and type(menu.displays) == "table" then menu.displays else {}
 end
 
+local function schedules()
+    return if type(menu) == "table" and type(menu.schedules) == "table" then menu.schedules else {}
+end
+
 local function schedule()
-    return if type(menu) == "table" and type(menu.schedule) == "table"
-        then menu.schedule
-        else { count = 0, default = "", rule = "", when = "" }
+    return if type(menu) == "table" and type(menu.schedule) == "table" then menu.schedule else {}
 end
 
 local function send(verb, argument)
@@ -46,14 +46,12 @@ local function send(verb, argument)
     })
 end
 
-local function header(title, subtitle, showBack)
+local function header(title, subtitle)
     return ui.row({ gap = 8, align = "center", padding = 12 }, {
-        if showBack
-            then ui.button({ glyph = "arrow-left", variant = "ghost", onClick = "onBack" })
-            else ui.glyph({
-                name = if running() then "library-photo" else "photo-off",
-                color = if running() then "primary" else "on_surface_variant",
-            }),
+        ui.glyph({
+            name = if running() then "library-photo" else "photo-off",
+            color = if running() then "primary" else "on_surface_variant",
+        }),
         ui.column({ gap = 1, flexGrow = 1 }, {
             ui.label({ text = title, fontSize = 15, fontWeight = "bold" }),
             ui.label({ text = subtitle, color = "on_surface_variant", fontSize = 11, maxLines = 2 }),
@@ -62,91 +60,54 @@ local function header(title, subtitle, showBack)
     })
 end
 
-local function activePlaylistName()
-    for _, row in ipairs(playlists()) do
-        if row.active == true then
-            return tostring(row.name or "")
+local function activeRule()
+    local wanted = tostring(schedule().rule_id or "")
+    if wanted == "" then
+        return nil
+    end
+    for _, rule in ipairs(schedules()) do
+        if tostring(rule.id or "") == wanted then
+            return rule
         end
     end
-    return ""
+    return nil
 end
 
-local function renderDisplay()
-    local wanted = nil
-    for _, row in ipairs(displays()) do
-        if tostring(row.connector or "") == selectedDisplay then
-            wanted = row
-            break
-        end
+local function ruleWindow(rule)
+    if type(rule) ~= "table" then
+        return noctalia.tr("panel.schedule.all_day")
     end
-    if wanted == nil then
-        page = "main"
-        render()
-        return
+    local startTime = tostring(rule.start or "")
+    local endTime = tostring(rule["end"] or "")
+    if startTime == "" and endTime == "" then
+        return noctalia.tr("panel.schedule.all_day")
     end
+    return startTime .. "–" .. endTime
+end
 
-    local body = {
-        header(
-            tostring(wanted.label or wanted.connector),
-            noctalia.tr("panel.displays.current", { playlist = tostring(wanted.playlist or "") }),
-            true
-        ),
-        ui.separator(),
-        ui.label({
-            text = noctalia.tr("panel.displays.choose"),
-            fontSize = 12,
-            fontWeight = "bold",
-        }),
-        ui.button({
-            text = noctalia.tr("panel.displays.follow_default"),
-            glyph = "calendar-clock",
-            variant = if tostring(wanted.playlist or "") == "(default)" then "primary" else "ghost",
-            enabled = running() and tostring(wanted.playlist or "") ~= "(default)",
-            onClick = function()
-                send("display-clear", selectedDisplay)
-                onBack()
-            end,
-        }),
-    }
-    for _, row in ipairs(playlists()) do
-        local playlistName = tostring(row.name or "")
-        table.insert(body, ui.button({
-            text = playlistName,
-            glyph = "playlist",
-            variant = if tostring(wanted.playlist or "") == playlistName then "primary" else "ghost",
-            enabled = running() and tostring(wanted.playlist or "") ~= playlistName,
-            onClick = function()
-                send("display-assign", selectedDisplay .. " " .. playlistName)
-                onBack()
-            end,
-        }))
+local function runtimeSummary()
+    if starting() then
+        return noctalia.tr("panel.starting")
     end
-    panel.render(ui.column({ flexGrow = 1, gap = 8 }, {
-        body[1],
-        ui.scroll({ flexGrow = 1, gap = 8, padding = 12 }, { table.unpack(body, 2) }),
-    }))
+    if not running() then
+        return noctalia.tr("panel.not_running")
+    end
+    local playlist = tostring(state.playlist or "")
+    if playlist == "" then
+        playlist = noctalia.tr("panel.nothing_applied")
+    end
+    return noctalia.tr("panel.summary", {
+        playlist = playlist,
+        playback = noctalia.tr(if state.paused == true then "panel.playback.paused" else "panel.playback.playing"),
+        source = noctalia.tr(if tostring(state.source or "") == "manual"
+            then "panel.schedule.manual"
+            else "panel.schedule.following"),
+    })
 end
 
 function render()
-    if page == "display" then
-        renderDisplay()
-        return
-    end
-
-    local summary = if running()
-        then noctalia.tr("panel.summary", {
-            showing = if tostring(state.showing or "") ~= ""
-                then tostring(state.showing)
-                else noctalia.tr("panel.nothing_applied"),
-            playable = tostring(state.playable),
-            total = tostring(state.library),
-        })
-        elseif starting()
-        then noctalia.tr("panel.starting")
-        else noctalia.tr("panel.not_running")
-
     local body = {
-        header(noctalia.tr("panel.title"), summary, false),
+        header(noctalia.tr("panel.title"), runtimeSummary()),
         ui.separator(),
         ui.row({ gap = 8 }, {
             ui.button({
@@ -156,38 +117,80 @@ function render()
                 flexGrow = 1,
                 onClick = "onOpenApp",
             }),
+            ui.button({ glyph = "refresh", variant = "ghost", onClick = "onRefresh" }),
+        }),
+        ui.label({ text = noctalia.tr("panel.playback.title"), fontSize = 12, fontWeight = "bold" }),
+        ui.row({ gap = 6 }, {
             ui.button({
-                glyph = "refresh",
-                variant = "ghost",
+                text = noctalia.tr("panel.playback.previous"),
+                glyph = "player-skip-back",
                 enabled = running(),
-                onClick = "onRefresh",
+                flexGrow = 1,
+                onClick = "onPrevious",
+            }),
+            ui.button({
+                text = noctalia.tr(if type(state) == "table" and state.paused == true
+                    then "panel.playback.play"
+                    else "panel.playback.pause"),
+                glyph = if type(state) == "table" and state.paused == true then "player-play" else "player-pause",
+                enabled = running(),
+                flexGrow = 1,
+                onClick = "onToggle",
+            }),
+            ui.button({
+                text = noctalia.tr("panel.playback.next"),
+                glyph = "player-skip-forward",
+                enabled = running(),
+                flexGrow = 1,
+                onClick = "onNext",
             }),
         }),
+        ui.row({ gap = 6 }, {
+            ui.button({
+                text = noctalia.tr("panel.playback.random"),
+                glyph = "arrows-shuffle",
+                enabled = running(),
+                flexGrow = 1,
+                onClick = "onRandom",
+            }),
+            ui.button({
+                text = noctalia.tr(if type(state) == "table" and state.shuffle == true
+                    then "panel.playback.shuffle_on"
+                    else "panel.playback.shuffle_off"),
+                glyph = "playlist",
+                variant = if type(state) == "table" and state.shuffle == true then "primary" else "ghost",
+                enabled = running(),
+                flexGrow = 1,
+                onClick = "onShuffle",
+            }),
+        }),
+        ui.separator(),
         ui.label({ text = noctalia.tr("panel.schedule.title"), fontSize = 12, fontWeight = "bold" }),
     }
 
     local scheduleInfo = schedule()
-    local active = activePlaylistName()
+    local scheduledPlaylist = tostring(scheduleInfo.playlist or "")
     table.insert(body, ui.label({
-        text = if active ~= ""
-            then noctalia.tr("panel.schedule.active", { playlist = active })
-            else noctalia.tr("panel.schedule.no_playlist"),
+        text = if scheduleInfo.following == true
+            then noctalia.tr("panel.schedule.active", { playlist = scheduledPlaylist })
+            else noctalia.tr("panel.schedule.override", { playlist = tostring(state and state.playlist or "") }),
         color = "on_surface_variant",
         maxLines = 2,
     }))
-    if tostring(scheduleInfo.rule or "") ~= "" then
+    local rule = activeRule()
+    if rule ~= nil then
         table.insert(body, ui.label({
             text = noctalia.tr("panel.schedule.rule", {
-                playlist = tostring(scheduleInfo.rule),
-                when = tostring(scheduleInfo.when),
+                playlist = scheduledPlaylist,
+                when = ruleWindow(rule),
             }),
             color = "on_surface_variant",
             fontSize = 11,
-            maxLines = 3,
+            maxLines = 2,
         }))
-    elseif tostring(scheduleInfo.default or "") ~= "" then
+    elseif scheduledPlaylist ~= "" then
         table.insert(body, ui.label({
-            text = noctalia.tr("panel.schedule.default", { playlist = tostring(scheduleInfo.default) }),
+            text = noctalia.tr("panel.schedule.default", { playlist = scheduledPlaylist }),
             color = "on_surface_variant",
             fontSize = 11,
             maxLines = 2,
@@ -197,7 +200,7 @@ function render()
         ui.button({
             text = noctalia.tr("panel.schedule.resume"),
             glyph = "calendar-clock",
-            enabled = running(),
+            enabled = running() and scheduleInfo.following ~= true,
             flexGrow = 1,
             onClick = "onResumeSchedule",
         }),
@@ -205,7 +208,7 @@ function render()
             text = noctalia.tr("panel.schedule.edit"),
             glyph = "edit",
             flexGrow = 1,
-            onClick = "onOpenApp",
+            onClick = "onOpenSchedules",
         }),
     }))
 
@@ -238,26 +241,39 @@ function render()
         table.insert(body, ui.separator())
         table.insert(body, ui.label({ text = noctalia.tr("panel.displays.title"), fontSize = 12, fontWeight = "bold" }))
         for _, row in ipairs(displays()) do
-            local connector = tostring(row.connector or "")
-            table.insert(body, ui.button({
-                text = noctalia.tr("panel.displays.row", {
-                    display = tostring(row.label or connector),
-                    playlist = tostring(row.playlist or ""),
+            local assigned = tostring(row.assigned_playlist or "")
+            local effective = tostring(row.playlist or "")
+            table.insert(body, ui.row({ gap = 8, align = "center" }, {
+                ui.glyph({ name = "device-desktop", color = "on_surface_variant" }),
+                ui.label({
+                    text = if assigned == effective
+                        then noctalia.tr("panel.displays.row", {
+                            display = tostring(row.connector or ""),
+                            playlist = assigned,
+                        })
+                        else noctalia.tr("panel.displays.overridden", {
+                            display = tostring(row.connector or ""),
+                            assigned = assigned,
+                            effective = effective,
+                        }),
+                    flexGrow = 1,
+                    maxLines = 2,
                 }),
-                glyph = "device-desktop",
-                variant = "ghost",
-                enabled = running(),
-                onClick = function()
-                    selectedDisplay = connector
-                    page = "display"
-                    render()
-                end,
             }))
         end
+        table.insert(body, ui.button({
+            text = noctalia.tr("panel.displays.edit"),
+            glyph = "external-link",
+            variant = "ghost",
+            onClick = "onOpenDisplays",
+        }))
     end
 
+    local runtimeError = if type(state) == "table" then tostring(state.runtimeError or "") else ""
     local menuError = if type(menu) == "table" then tostring(menu.error or "") else ""
-    if menuError ~= "" then
+    if runtimeError ~= "" then
+        table.insert(body, ui.label({ text = runtimeError, color = "error", maxLines = 3 }))
+    elseif menuError ~= "" then
         table.insert(body, ui.label({ text = menuError, color = "error", maxLines = 3 }))
     end
     table.insert(body, ui.separator())
@@ -278,14 +294,18 @@ function onClosePanel()
     panel.close()
 end
 
-function onBack()
-    page = "main"
-    selectedDisplay = ""
-    render()
-end
-
 function onOpenApp()
     send("open-app", nil)
+    panel.close()
+end
+
+function onOpenSchedules()
+    send("open-app", "schedules")
+    panel.close()
+end
+
+function onOpenDisplays()
+    send("open-app", "displays")
     panel.close()
 end
 
@@ -295,33 +315,48 @@ function onOpenSettings()
 end
 
 function onRefresh()
-    send("playlists", nil)
+    send("status", nil)
 end
 
 function onResumeSchedule()
-    send("playlist-use", "none")
+    send("schedule-follow", nil)
+end
+
+function onPrevious()
+    send("previous", nil)
+end
+
+function onToggle()
+    send("toggle", nil)
+end
+
+function onNext()
+    send("next", nil)
+end
+
+function onRandom()
+    send("random", nil)
+end
+
+function onShuffle()
+    send("shuffle", if type(state) == "table" and state.shuffle == true then "off" else "on")
 end
 
 function onOpen(_context)
-    page = "main"
-    selectedDisplay = ""
     state = noctalia.state.get(STATE_KEY)
     menu = noctalia.state.get(MENU_KEY)
-    if running() then
-        send("playlists", nil)
-    else
-        send("launch", nil)
-    end
+    send(if running() then "status" else "launch", nil)
     render()
 end
 
 noctalia.state.watch(STATE_KEY, function(nextState)
-    local wasRunning = running()
     state = nextState
-    if running() and not wasRunning then
-        send("playlists", nil)
+    -- Every successful runtime status publishes MENU_KEY immediately after
+    -- STATE_KEY. Let that second watcher render the complete atomic snapshot
+    -- once instead of rebuilding the full playlist list twice.
+    if not running() then
+        render()
     end
-    render()
 end)
 noctalia.state.watch(MENU_KEY, function(nextMenu)
     menu = nextMenu

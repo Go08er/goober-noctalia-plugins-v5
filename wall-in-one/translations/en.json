@@ -6,15 +6,26 @@
   },
   "panel": {
     "displays": {
-      "choose": "Playlist for this display",
-      "current": "Currently: {playlist}",
-      "follow_default": "Follow the default",
+      "edit": "Edit display assignments",
+      "overridden": "{display} — assigned {assigned}, playing {effective}",
       "row": "{display} — {playlist}",
       "title": "Displays"
     },
     "not_running": "Starting the Wall-in-One service…",
     "nothing_applied": "No wallpaper applied",
     "open_app": "Open Wall-in-One",
+    "playback": {
+      "next": "Next",
+      "pause": "Pause",
+      "paused": "Paused",
+      "play": "Play",
+      "playing": "Playing",
+      "previous": "Previous",
+      "random": "Random",
+      "shuffle_off": "Shuffle off",
+      "shuffle_on": "Shuffle on",
+      "title": "Playback"
+    },
     "playlists": {
       "empty": "Create a playlist in the app first.",
       "row": "{name} · {count} entries",
@@ -23,16 +34,20 @@
     },
     "schedule": {
       "active": "Active playlist: {playlist}",
+      "all_day": "all day",
       "default": "Calendar fallback: {playlist}",
       "edit": "Edit schedules",
+      "following": "following schedule",
+      "manual": "manual override",
       "no_playlist": "No active playlist",
+      "override": "Manual override: {playlist}",
       "resume": "Follow schedule",
       "rule": "Scheduled now: {playlist} · {when}",
       "title": "Schedule"
     },
     "settings": "Plugin settings",
     "starting": "Starting Wall-in-One…",
-    "summary": "{showing} — {playable} of {total} playable",
+    "summary": "{playlist} · {playback} · {source}",
     "title": "Wall-in-One"
   },
   "settings": {
@@ -60,14 +75,19 @@
   },
   "state": {
     "failed": "The wall-in-one control command failed.",
+    "invalid_status": "Wall-in-One returned invalid runtime status: {error}",
     "launch_failed": "Wall-in-One did not become ready after it was started.",
     "missing_binary": "wall-in-one was not found. Install it, or set the executable path in the plugin settings.",
+    "missing_runtime": "wall-in-one-service was not found. Update the Wall-in-One app package.",
     "timed_out": "Wall-in-One did not answer its control socket in time."
   },
   "widget": {
     "gestures": "Click to choose a playlist or open the app.",
+    "manual": "Manual playlist override",
     "nothing_applied": "No wallpaper applied",
-    "playable": "{playable} of {total} playable",
+    "paused": "Paused",
+    "playing": "Playing",
+    "scheduled": "Following schedule",
     "starting": "Starting…",
     "stopped": "Not running",
     "stopped_hint": "The plugin will start the Wall-in-One service.",
