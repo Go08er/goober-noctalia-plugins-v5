@@ -21,10 +21,25 @@
       "play": "Play",
       "playing": "Playing",
       "previous": "Previous",
-      "random": "Random",
-      "shuffle_off": "Shuffle off",
-      "shuffle_on": "Shuffle on",
+      "random": "Random jump",
+      "resume": "Resume motion",
+      "stop": "Stop motion",
+      "stop_hint": "Pause freezes motion in memory. Stop releases the renderer and leaves its still visible.",
+      "stopped": "Motion stopped",
       "title": "Playback"
+    },
+    "modes": {
+      "app_default": "Following the app default",
+      "cycle_state": "Cycle: {state}",
+      "manual": "Manual session override",
+      "off": "Off",
+      "on": "On",
+      "shuffle_hint": "Controls the order used while cycling",
+      "shuffle_state": "Shuffle: {state}",
+      "title": "Rotation modes",
+      "turn_off": "Turn off",
+      "turn_on": "Turn on",
+      "use_default": "Use app cycle default"
     },
     "playlists": {
       "empty": "Create a playlist in the app first.",
@@ -84,6 +99,7 @@
   "widget": {
     "gestures": "Click to choose a playlist or open the app.",
     "manual": "Manual playlist override",
+    "motion_stopped": "Motion stopped; paired still remains",
     "nothing_applied": "No wallpaper applied",
     "paused": "Paused",
     "playing": "Playing",

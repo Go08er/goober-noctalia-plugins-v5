@@ -61,7 +61,11 @@ local function tooltip()
     local lines = {
         noctalia.tr("widget.title"),
         if showing ~= "" then showing else noctalia.tr("widget.nothing_applied"),
-        if state.paused == true then noctalia.tr("widget.paused") else noctalia.tr("widget.playing"),
+        if state.playbackState == "stopped"
+            then noctalia.tr("widget.motion_stopped")
+            elseif state.playbackState == "paused" or state.paused == true
+            then noctalia.tr("widget.paused")
+            else noctalia.tr("widget.playing"),
         if tostring(state.source or "") == "manual"
             then noctalia.tr("widget.manual")
             else noctalia.tr("widget.scheduled"),

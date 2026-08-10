@@ -34,6 +34,33 @@ local function schedule()
     return if type(menu) == "table" and type(menu.schedule) == "table" then menu.schedule else {}
 end
 
+local function playbackState()
+    if type(state) ~= "table" then
+        return ""
+    end
+    local reported = tostring(state.playbackState or "")
+    if reported == "playing" or reported == "paused" or reported == "stopped" then
+        return reported
+    end
+    if state.stopped == true then
+        return "stopped"
+    end
+    return if state.paused == true then "paused" else "playing"
+end
+
+local function modeState(enabled)
+    return noctalia.tr(if enabled then "panel.modes.on" else "panel.modes.off")
+end
+
+local function playbackLabel()
+    local current = playbackState()
+    return noctalia.tr(if current == "stopped"
+        then "panel.playback.stopped"
+        elseif current == "paused"
+        then "panel.playback.paused"
+        else "panel.playback.playing")
+end
+
 local function send(verb, argument)
     local previous = noctalia.state.get(COMMAND_KEY)
     local previousSequence = if type(previous) == "table" then tonumber(previous.sequence) or 0 else 0
@@ -98,7 +125,7 @@ local function runtimeSummary()
     end
     return noctalia.tr("panel.summary", {
         playlist = playlist,
-        playback = noctalia.tr(if state.paused == true then "panel.playback.paused" else "panel.playback.playing"),
+        playback = playbackLabel(),
         source = noctalia.tr(if tostring(state.source or "") == "manual"
             then "panel.schedule.manual"
             else "panel.schedule.following"),
@@ -129,10 +156,12 @@ function render()
                 onClick = "onPrevious",
             }),
             ui.button({
-                text = noctalia.tr(if type(state) == "table" and state.paused == true
-                    then "panel.playback.play"
-                    else "panel.playback.pause"),
-                glyph = if type(state) == "table" and state.paused == true then "player-play" else "player-pause",
+                text = noctalia.tr(if playbackState() == "playing"
+                    then "panel.playback.pause"
+                    elseif playbackState() == "stopped"
+                    then "panel.playback.resume"
+                    else "panel.playback.play"),
+                glyph = if playbackState() == "playing" then "player-pause" else "player-play",
                 enabled = running(),
                 flexGrow = 1,
                 onClick = "onToggle",
@@ -148,19 +177,82 @@ function render()
         ui.row({ gap = 6 }, {
             ui.button({
                 text = noctalia.tr("panel.playback.random"),
-                glyph = "arrows-shuffle",
+                glyph = "dice",
                 enabled = running(),
                 flexGrow = 1,
                 onClick = "onRandom",
             }),
             ui.button({
+                text = noctalia.tr("panel.playback.stop"),
+                glyph = "player-stop",
+                variant = "ghost",
+                enabled = running() and playbackState() ~= "stopped",
+                flexGrow = 1,
+                onClick = "onStop",
+            }),
+        }),
+        ui.label({
+            text = noctalia.tr("panel.playback.stop_hint"),
+            color = "on_surface_variant",
+            fontSize = 10,
+            maxLines = 2,
+        }),
+        ui.separator(),
+        ui.label({ text = noctalia.tr("panel.modes.title"), fontSize = 12, fontWeight = "bold" }),
+        ui.row({ gap = 8, align = "center" }, {
+            ui.column({ gap = 1, flexGrow = 1 }, {
+                ui.label({
+                    text = noctalia.tr("panel.modes.cycle_state", {
+                        state = modeState(type(state) == "table" and state.cycleEnabled == true),
+                    }),
+                    fontWeight = "bold",
+                }),
+                ui.label({
+                    text = noctalia.tr(if type(state) == "table" and state.cycleSource == "manual"
+                        then "panel.modes.manual"
+                        else "panel.modes.app_default"),
+                    color = "on_surface_variant",
+                    fontSize = 10,
+                }),
+            }),
+            ui.button({
+                text = noctalia.tr(if type(state) == "table" and state.cycleEnabled == true
+                    then "panel.modes.turn_off"
+                    else "panel.modes.turn_on"),
+                glyph = "repeat",
+                variant = if type(state) == "table" and state.cycleEnabled == true then "primary" else "ghost",
+                enabled = running(),
+                onClick = "onCycle",
+            }),
+        }),
+        ui.button({
+            text = noctalia.tr("panel.modes.use_default"),
+            glyph = "restore",
+            variant = "ghost",
+            enabled = running() and type(state) == "table" and state.cycleSource == "manual",
+            onClick = "onCycleDefault",
+        }),
+        ui.row({ gap = 8, align = "center" }, {
+            ui.column({ gap = 1, flexGrow = 1 }, {
+                ui.label({
+                    text = noctalia.tr("panel.modes.shuffle_state", {
+                        state = modeState(type(state) == "table" and state.shuffle == true),
+                    }),
+                    fontWeight = "bold",
+                }),
+                ui.label({
+                    text = noctalia.tr("panel.modes.shuffle_hint"),
+                    color = "on_surface_variant",
+                    fontSize = 10,
+                }),
+            }),
+            ui.button({
                 text = noctalia.tr(if type(state) == "table" and state.shuffle == true
-                    then "panel.playback.shuffle_on"
-                    else "panel.playback.shuffle_off"),
-                glyph = "playlist",
+                    then "panel.modes.turn_off"
+                    else "panel.modes.turn_on"),
+                glyph = "arrows-shuffle",
                 variant = if type(state) == "table" and state.shuffle == true then "primary" else "ghost",
                 enabled = running(),
-                flexGrow = 1,
                 onClick = "onShuffle",
             }),
         }),
@@ -336,6 +428,18 @@ end
 
 function onRandom()
     send("random", nil)
+end
+
+function onStop()
+    send("stop", nil)
+end
+
+function onCycle()
+    send("cycle", if type(state) == "table" and state.cycleEnabled == true then "off" else "on")
+end
+
+function onCycleDefault()
+    send("cycle", "default")
 end
 
 function onShuffle()

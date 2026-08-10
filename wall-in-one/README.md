@@ -30,7 +30,7 @@ configurable.” It does not hide playback commands behind middle-click, wheel,
 or mouse-button gestures, and it does not duplicate the application's cycle,
 pairing, or schedule editors. The bar menu keeps only the common decisions
 that make sense there: choose the active playlist, resume calendar control,
-play/pause or move through the playlist, toggle shuffle, inspect display
+play/pause/stop or move through the playlist, control cycle and shuffle modes, inspect display
 assignments, or open the full application. Display assignment and schedule-rule
 editing remain configuration work in the app.
 
@@ -106,8 +106,12 @@ the same compact menu; no other gesture changes wallpaper state.
 The menu lists named playlists with their entry counts and marks every playlist
 currently active on a display. Choosing another sends `playlist-use <name>`;
 **Follow schedule** sends `schedule-follow`. Playback controls send
-`previous`, `toggle`, `next`, `random`, and `shuffle on|off` directly to the
-Rust runtime. The schedule section shows the calendar target and rule currently
+`previous`, `toggle`, `next`, `random`, `stop`, `cycle on|off|default`, and
+`shuffle on|off` directly to the Rust runtime. Random is a one-shot jump;
+shuffle changes the order used by future cycling. Cycle off holds the current
+wallpaper without stopping its motion. Pause freezes the resident renderer,
+while Stop releases it and leaves the paired still visible until Play resumes
+motion. The schedule section shows the calendar target and rule currently
 selected, including while a manual override is active.
 
 Displays show both their configured assignment and, when an override is in

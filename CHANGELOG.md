@@ -15,6 +15,12 @@ All notable staging changes will be recorded here.
 
 ## Wall-in-One 0.1.0 - Thin client for the standalone application
 
+- Separate one-shot Random from persistent Cycle and Shuffle modes in the bar
+  menu. Use a dice glyph for Random, action-labelled mode buttons, and expose
+  the cycle session override with a return-to-app-default action.
+- Add the Rust runtime's true Stop control and three-state playback display.
+  Pause keeps the renderer resident; Stop releases it while the paired still
+  remains visible.
 - Decode the Rust runtime's atomic JSON `status` snapshot and build playlist,
   schedule, and read-only display-assignment views from it. The bar no longer
   depends on authoring-only `playlists`, `schedule`, or `displays` verbs, so its

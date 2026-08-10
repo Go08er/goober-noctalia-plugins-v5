@@ -125,8 +125,13 @@ class ThinClientContract(unittest.TestCase):
                 "panel.playback.paused",
                 "panel.playback.play",
                 "panel.playback.playing",
-                "panel.playback.shuffle_off",
-                "panel.playback.shuffle_on",
+                "panel.playback.stopped",
+                "panel.modes.app_default",
+                "panel.modes.manual",
+                "panel.modes.off",
+                "panel.modes.on",
+                "panel.modes.turn_off",
+                "panel.modes.turn_on",
                 "panel.playlists.empty",
                 "panel.playlists.unavailable",
                 "panel.schedule.following",
@@ -245,7 +250,9 @@ class ThinClientContract(unittest.TestCase):
             "toggle",
             "next",
             "random",
+            "stop",
             "shuffle",
+            "cycle",
             "open-app",
         ):
             self.assertIn(f'"{verb}"', panel)
@@ -255,13 +262,17 @@ class ThinClientContract(unittest.TestCase):
             'send("displays"',
             'send("display-assign"',
             'send("display-clear"',
-            'send("cycle"',
             'send("dynamics"',
             'send("reload-palette"',
         ):
             self.assertNotIn(authoring_verb, panel)
         self.assertIn('send("open-app", "schedules")', panel)
         self.assertIn('send("open-app", "displays")', panel)
+        self.assertIn('glyph = "dice"', panel)
+        self.assertIn('send("stop", nil)', panel)
+        self.assertIn('send("cycle", "default")', panel)
+        self.assertNotIn("panel.playback.shuffle_on", panel)
+        self.assertNotIn("panel.playback.shuffle_off", panel)
 
         # Inventory comes only from the same decoded status snapshot as the
         # playback state. Runtime listing and display-mutation verbs do not
@@ -319,9 +330,13 @@ class ThinClientContract(unittest.TestCase):
                 kind = "still",
                 still = "/tmp/morning.png",
                 motion_active = false,
+                playback_state = "playing",
                 paused = false,
+                stopped = false,
                 shuffle = true,
                 cycle_enabled = true,
+                cycle_default = false,
+                cycle_source = "manual",
                 last_error = "",
                 playlists = {
                     { id = "day", name = "Day set", entries = 4, active = true },
@@ -435,6 +450,8 @@ class ThinClientContract(unittest.TestCase):
             assert(states[STATE_KEY].running == true and states[STATE_KEY].launching == false)
             assert(states[STATE_KEY].playlist == "Day set" and states[STATE_KEY].entryId == "morning")
             assert(states[STATE_KEY].shuffle == true and states[STATE_KEY].cycleEnabled == true)
+            assert(states[STATE_KEY].playbackState == "playing" and states[STATE_KEY].stopped == false)
+            assert(states[STATE_KEY].cycleDefault == false and states[STATE_KEY].cycleSource == "manual")
             assert(intervals[#intervals] == 15000, "successful startup did not restore resting polling")
 
             -- That one status reply also publishes the complete menu. No
