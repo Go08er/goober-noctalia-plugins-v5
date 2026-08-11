@@ -6,11 +6,12 @@
 > requires the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which
 > is itself pre-alpha — this plugin is only ever as ready as that is.
 
-An intentionally small bar menu and a palette template for the
+An intentionally small bar menu for the
 [Wall-in-One](https://github.com/Go08er/wall-in-one) wallpaper manager. All of
 the wallpaper logic lives in that standalone GTK4 application; this plugin is a
-thin client that drives it over its control socket, so nothing here downloads,
-decodes, or renders anything.
+thin client that drives it through `wall-in-one ctl`, which routes commands to
+the app's two local sockets. Nothing here downloads, decodes, or renders
+anything.
 
 ## Plugin
 
@@ -22,7 +23,7 @@ Plugin id `goober/wall-in-one`, with three entries:
   `wall-in-one ctl <verb>`, and republishing each atomic runtime snapshot on a
   shared state channel that every other entry reads.
 - `wall-in-one` — the bar widget. Presentation only; clicks open its menu.
-- `controls` — the playlist, schedule, and display menu. Open it from
+- `controls` — the runtime control, playlist, schedule, and display menu. Open it from
   anywhere with `noctalia msg panel-toggle goober/wall-in-one:controls`.
 
 The plugin deliberately chooses the **minimal** side of “minimal or fully
@@ -30,9 +31,9 @@ configurable.” It does not hide playback commands behind middle-click, wheel,
 or mouse-button gestures, and it does not duplicate the application's cycle,
 pairing, or schedule editors. The bar menu keeps only the common decisions
 that make sense there: choose the active playlist, resume calendar control,
-play/pause/stop or move through the playlist, control cycle and shuffle modes, inspect display
-assignments, or open the full application. Display assignment and schedule-rule
-editing remain configuration work in the app.
+play/pause/stop or move through the playlist, control cycle and shuffle modes,
+inspect display assignments, or open the full application. Display assignment
+and schedule-rule editing remain configuration work in the app.
 
 Widget click actions are intentionally fixed in this minimal design. A later
 configurability pass may expose those two menu-opening gestures, but it should
@@ -121,10 +122,9 @@ display assignments** opens the app's Displays page. **Edit schedules** runs
 
 ### Colour sync
 
-The plugin ships `palette.json.tmpl`, the Noctalia user template that renders
-the live 72-token palette for the app. Shipping it is all the plugin can do —
-the Luau host API can read configuration but not write it, so registering the
-template is the app's job:
+The app installs the Noctalia user template that renders its live 72-token
+palette. The Luau host API can read configuration but not write it, so the
+template and its registration both belong to the app:
 
 ```
 wall-in-one --install-theme-template
@@ -132,7 +132,7 @@ noctalia msg templates-apply
 ```
 
 That writes a `[theme.templates.user.wall-in-one]` block into Noctalia's
-`settings.toml` and points it at a copy of this template. Noctalia then
+`settings.toml` and points it at the app's installed template. Noctalia then
 re-renders the palette on every change and runs the block's `post_hook`, which
 tells the running app to reload its colours. Palette sync is push-based: no
 polling and no drift.
@@ -143,10 +143,6 @@ To check or undo it:
 wall-in-one --theme-status
 wall-in-one --uninstall-theme-template
 ```
-
-The copy in this directory is the same file the app installs; it is here so the
-template is readable without the app checked out, and so a materialized plugin
-directory is self-describing.
 
 ## Settings
 
