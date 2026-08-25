@@ -10,9 +10,13 @@ local MENU_KEY = "wall_in_one_menu"
 local COMMAND_KEY = "wall_in_one_command"
 local READY_KEY = "wall_in_one_ready"
 local PROTOCOL = 3
+local STATUS_VERSION = 2
 -- wall_in_one.control.client.EXIT_NOT_RUNNING
 local EXIT_NOT_RUNNING = 3
-local CALL_TIMEOUT_MS = 8000
+-- Runtime actions reply only after all bounded desktop helpers and renderer
+-- handovers finish. Three-display operations can legitimately exceed 8s;
+-- Noctalia clamps callback timeouts at 60s and the app's ctl client uses 45s.
+local CALL_TIMEOUT_MS = 55000
 local STARTUP_CALL_TIMEOUT_MS = 1500
 local SYSTEMD_CALL_TIMEOUT_MS = 3000
 local STARTUP_POLL_MS = 250
@@ -34,6 +38,7 @@ local VERBS = {
     next = true,
     previous = true,
     random = true,
+    ["health-sync"] = true,
 }
 
 local queue = {}
@@ -44,7 +49,7 @@ local lastLogged = ""
 local launching = false
 local startupDeadline = 0
 local pendingAfterLaunch = nil
-local invoke, pump, applyInterval, launchDirect
+local invoke, pump, applyInterval, launchDirect, enqueue
 
 -- A widget can load before this service does. Clear the handshake so early
 -- clicks queue instead of vanishing.
@@ -139,7 +144,15 @@ local function publishStatus(line)
         })
         publishStopped(detail)
         publishMenu(nil, detail)
-        return
+        return false
+    end
+    if snapshot.status_version ~= STATUS_VERSION then
+        local detail = noctalia.tr("state.invalid_status", {
+            error = "unsupported status version " .. tostring(snapshot.status_version),
+        })
+        publishStopped(detail)
+        publishMenu(nil, detail)
+        return false
     end
 
     local playlist = tostring(snapshot.playlist or "")
@@ -165,14 +178,27 @@ local function publishStatus(line)
         error = "",
     })
     publishMenu(snapshot, "")
+
+    -- The packaged systemd timer owns this hand-off normally. Direct runtime
+    -- fallback installations have no timer, so consume only visible
+    -- session-only findings here. Durable entries must not trigger a loop.
+    if type(snapshot.taboo_entries) == "table" then
+        for _, report in ipairs(snapshot.taboo_entries) do
+            if type(report) == "table" and report.durable ~= true then
+                enqueue("health-sync", nil, false)
+                break
+            end
+        end
+    end
+    return true
 end
 
-local function enqueue(verb, argument, allowLaunch)
+enqueue = function(verb, argument, allowLaunch)
     if VERBS[verb] ~= true then
         noctalia.log("wall-in-one: unknown control verb '" .. tostring(verb) .. "'")
         return
     end
-    if verb == "status" then
+    if verb == "status" or verb == "health-sync" then
         for _, job in ipairs(queue) do
             if job.verb == verb then
                 return
@@ -322,8 +348,8 @@ local function finish(job, result)
     elseif job.verb == "status" then
         local replay = pendingAfterLaunch
         clearLaunch()
-        publishStatus(noctalia.string.trim(tostring(result.stdout or "")))
-        if replay ~= nil then
+        local accepted = publishStatus(noctalia.string.trim(tostring(result.stdout or "")))
+        if accepted and replay ~= nil then
             enqueue(replay.verb, replay.argument, false)
         end
     else
@@ -357,9 +383,15 @@ invoke = function(job)
         return
     end
 
-    local parts = { shellQuote(command), "ctl", job.verb }
-    if job.argument ~= nil and job.argument ~= "" then
-        table.insert(parts, shellQuote(job.argument))
+    local parts = { shellQuote(command) }
+    if job.verb == "health-sync" then
+        table.insert(parts, "--sync-runtime-health")
+    else
+        table.insert(parts, "ctl")
+        table.insert(parts, job.verb)
+        if job.argument ~= nil and job.argument ~= "" then
+            table.insert(parts, shellQuote(job.argument))
+        end
     end
 
     busy = true

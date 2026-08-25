@@ -75,7 +75,7 @@ class ThinClientContract(unittest.TestCase):
         manifest = tomllib.loads(manifest_source)
         self.assertEqual(manifest["id"], "goober/wall-in-one")
         self.assertEqual(manifest["name"], "Wall-in-One")
-        self.assertEqual(manifest["version"], "0.1.0")
+        self.assertEqual(manifest["version"], "0.1.1")
         self.assertEqual(manifest["plugin_api"], 17)
         self.assertEqual(manifest["dependencies"], ["wall-in-one"])
 
@@ -197,7 +197,9 @@ class ThinClientContract(unittest.TestCase):
             'if job.verb == "open-app" then',
             'table.insert(parts, "open")',
             "noctalia.runAsync(table.concat(parts, \" \"))",
-            'local parts = { shellQuote(command), "ctl", job.verb }',
+            'local parts = { shellQuote(command) }',
+            'if job.verb == "health-sync" then',
+            'table.insert(parts, "--sync-runtime-health")',
             "table.insert(parts, shellQuote(job.argument))",
             'noctalia.runAsync(table.concat(parts, " "), function(result)',
             'if launching and job.verb == "status" then STARTUP_CALL_TIMEOUT_MS else CALL_TIMEOUT_MS',
@@ -215,7 +217,7 @@ class ThinClientContract(unittest.TestCase):
         self.assertEqual(
             constants,
             {
-                "CALL_TIMEOUT_MS": 8000,
+                "CALL_TIMEOUT_MS": 55000,
                 "STARTUP_CALL_TIMEOUT_MS": 1500,
                 "SYSTEMD_CALL_TIMEOUT_MS": 3000,
                 "STARTUP_POLL_MS": 250,
@@ -323,6 +325,7 @@ class ThinClientContract(unittest.TestCase):
             local configuredRuntime = "/tmp/wall in ' one/wall-in-one-service"
             local systemctlAvailable = false
             local fixtureStatus = {
+                status_version = 2,
                 playlist_id = "day",
                 playlist = "Day set",
                 source = "schedule",
@@ -338,6 +341,7 @@ class ThinClientContract(unittest.TestCase):
                 cycle_default = false,
                 cycle_source = "manual",
                 last_error = "",
+                taboo_entries = {},
                 playlists = {
                     { id = "day", name = "Day set", entries = 4, active = true },
                     { id = "night", name = "Night", entries = 2, active = false },
@@ -432,7 +436,7 @@ class ThinClientContract(unittest.TestCase):
             -- The plugin probes first and starts nothing when an existing
             -- service answers. Exit 3 is the only path that launches one.
             assert(#calls == 1 and calls[1].command == quotedBinary .. " ctl status")
-            assert(calls[1].timeout == 8000)
+            assert(calls[1].timeout == 55000)
             complete(1, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
             assert(#calls == 3, "absent service did not launch and start readiness polling")
             assert(calls[2].command == quotedRuntime .. " --wait-for-config", calls[2].command)
@@ -464,13 +468,47 @@ class ThinClientContract(unittest.TestCase):
             assert(menu.displays[1].connector == "eDP-1" and menu.displays[1].playlist == "Day set")
             assert(#calls == 3, "status inventory unexpectedly triggered another control call")
 
+            -- A session-only health record schedules one serialized durable
+            -- hand-off. A durable record does not recursively reschedule it.
+            fixtureStatus.taboo_entries = { { durable = false } }
+            publishStatus("RUNTIME_STATUS")
+            assert(calls[4].command == quotedBinary .. " --sync-runtime-health")
+            assert(calls[4].timeout == 55000)
+            fixtureStatus.taboo_entries = { { durable = true } }
+            complete(4, { timedOut = false, exitCode = 0, stdout = "saved", stderr = "" })
+            assert(calls[5].command == quotedBinary .. " ctl status")
+            complete(5, { timedOut = false, exitCode = 0, stdout = "RUNTIME_STATUS", stderr = "" })
+            assert(#calls == 5, "durable health recursively scheduled another sync")
+
+            fixtureStatus.status_version = 99
+            publishStatus("RUNTIME_STATUS")
+            assert(states[STATE_KEY].running == false)
+            assert(string.find(states[STATE_KEY].error, "invalid_status", 1, true) ~= nil)
+            fixtureStatus.status_version = 2
+            fixtureStatus.taboo_entries = {}
+            publishStatus("RUNTIME_STATUS")
+
             -- Arguments and a configured path containing spaces and quotes are
             -- independently shell-quoted; the graphical app is detached.
             onIpc("playlist-use", { argument = "Night's set" })
-            assert(calls[4].command == quotedBinary .. " ctl playlist-use 'Night'\"'\"'s set'", calls[4].command)
-            assert(calls[4].timeout == 8000 and type(calls[4].callback) == "function")
-            complete(4, { timedOut = false, exitCode = 0, stdout = "playing Night's set", stderr = "" })
-            assert(calls[5].command == quotedBinary .. " ctl status")
+            assert(calls[6].command == quotedBinary .. " ctl playlist-use 'Night'\"'\"'s set'", calls[6].command)
+            assert(calls[6].timeout == 55000 and type(calls[6].callback) == "function")
+            complete(6, { timedOut = false, exitCode = 0, stdout = "playing Night's set", stderr = "" })
+            assert(calls[7].command == quotedBinary .. " ctl status")
+
+            -- Startup actions are replayed only after an accepted status-v2
+            -- handshake. A newer schema is presentation-incompatible and
+            -- must fail closed instead of sending the captured mutation.
+            table.clear(queue)
+            busy = false
+            calls = {}
+            fixtureStatus.status_version = 99
+            beginLaunch({ verb = "next", argument = nil })
+            assert(#calls == 2 and calls[2].command == quotedBinary .. " ctl status")
+            complete(2, { timedOut = false, exitCode = 0, stdout = "RUNTIME_STATUS", stderr = "" })
+            assert(#calls == 2, "incompatible status replayed a captured action")
+            assert(states[STATE_KEY].running == false)
+            fixtureStatus.status_version = 2
 
             -- Clear the post-change refresh chain before checking presentation.
             table.clear(queue)

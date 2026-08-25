@@ -12,6 +12,19 @@ All notable staging changes will be recorded here.
 - Restructure the NocVox and Wall-in-One READMEs around the published Plugin,
   Usage, Requirements, and Settings sections, and document why Wall-in-One's
   isolated Luau entries cannot be split into ordinary imported modules yet.
+- Point the Hydra parity fixture at the reachable rewritten commit `9be750a`.
+  Its tree and helper blob exactly match the orphaned `8fc866d` baseline, so
+  this repairs full-clone CI without changing the compatibility oracle.
+
+## Wall-in-One 0.1.1 - Current runtime contract
+
+- Require status schema version 2 and fail closed without replaying a captured
+  control action when a newer or malformed snapshot cannot be interpreted.
+- Raise serialized control callbacks from 8 to 55 seconds, above the app's
+  bounded 45-second multi-display handover and below Noctalia's 60-second cap.
+- Persist visible session-only crash/quarantine findings through one
+  deduplicated `--sync-runtime-health` hand-off for direct-runtime installs;
+  durable findings do not create a refresh loop.
 
 ## Wall-in-One 0.1.0 - Thin client for the standalone application
 

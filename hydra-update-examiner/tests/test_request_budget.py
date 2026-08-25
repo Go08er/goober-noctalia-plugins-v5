@@ -3,7 +3,7 @@
 
 The suite never contacts Hydra.  A curl fixture serves a coherent evaluation
 and records each logical HTTP request.  The pre-refactor helper is materialized
-from git revision 8fc866d so presentation parity is checked against the actual
+from git revision 9be750a so presentation parity is checked against the actual
 old implementation instead of a hand-written expectation.
 """
 
@@ -24,7 +24,7 @@ from pathlib import Path
 PLUGIN = Path(__file__).resolve().parents[1]
 REPOSITORY = PLUGIN.parent
 HELPER = PLUGIN / "scripts" / "hydra-channel-progress"
-BASELINE_REVISION = "8fc866d"
+BASELINE_REVISION = "9be750a4838acee107e7c2c3631497be01a15662"
 BASELINE_PATH = "hydra-update-examiner/scripts/hydra-channel-progress"
 START_TIME = 1_700_000_000
 EVAL_ID = "424242"

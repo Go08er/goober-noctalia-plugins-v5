@@ -65,8 +65,16 @@ application instance, and closing it leaves the Rust service running.
 
 `ctl` exits 3 immediately when nothing is listening, so a readiness probe
 against a dead socket costs one failed `connect(2)`. Captured calls remain
-serialized and carry an 8-second callback timeout. Startup readiness polling
-runs at 250 ms for at most 10 seconds and never becomes the resting poll rate.
+serialized and carry a 55-second callback timeout. This covers the app's
+45-second synchronous runtime-action bound (including a three-display helper
+handover) while staying below Noctalia's 60-second callback clamp. Startup
+readiness polling runs at 250 ms for at most 10 seconds and never becomes the
+resting poll rate.
+
+Status snapshots must use the app's status schema version 2. A visible
+session-only crash/quarantine report triggers one serialized
+`--sync-runtime-health` hand-off. This is redundant but safe with the packaged
+systemd timer, and provides durable quarantine for the direct-runtime fallback.
 
 ## Requirements
 

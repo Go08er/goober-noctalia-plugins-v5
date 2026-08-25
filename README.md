@@ -16,7 +16,7 @@ catalogs; add it as a custom Git source using one of the methods below.
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
 | `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
-| `goober/wall-in-one` | `0.1.0` | **Pre-alpha, in testing.** v5.0.0/API 17 launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
+| `goober/wall-in-one` | `0.1.1` | **Pre-alpha, in testing.** v5.0.0/API 17 launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
 
 ## Repository layout
 
@@ -46,8 +46,6 @@ wall-in-one/
   service.luau
   panel.luau
   widget.luau
-  shortcut.luau
-  palette.json.tmpl
   translations/en.json
 tools/validate.py
 flake.nix
@@ -204,12 +202,13 @@ boundary.
 
 ### Wall-in-One boundary
 
-Wall-in-One `0.1.0` is a thin client. Every wallpaper capability — library
+Wall-in-One `0.1.1` is a thin client. Every wallpaper capability — library
 scanning, still/video pairing, playlists, providers, palette generation, and
 the video renderer — belongs to the standalone
 [Wall-in-One](https://github.com/Go08er/wall-in-one) GTK4 application. The
 plugin owns a bar widget, a controls panel, a singleton runtime client, and the
-`palette.json.tmpl` Noctalia user template.
+shared state it publishes. The application owns and installs the Noctalia user
+palette template; this plugin does not ship a second copy.
 
 It starts the packaged `wall-in-one.service` user unit, or the standalone
 `wall-in-one-service --wait-for-config` Rust runtime when no unit is available.
@@ -230,7 +229,9 @@ The 0.8 tree — a 25k-line in-plugin implementation plus a separately staged
 over that work. Its offline contract suite, provider scripts, and NixOS VM gate
 went with it. The replacement has a focused offline manifest, translation,
 Luau-compile, detached-launch, queue-bound, and control-replay gate; it does not
-yet have a replacement VM gate.
+carry a replacement VM in this repository. The application release gate loads
+the exact flake-locked companion in a disposable Noctalia desktop VM and
+exercises the cross-repository integration.
 
 ### Hydra Update Examiner customization
 
@@ -275,8 +276,9 @@ deterministic command fixtures without touching the host Noctalia session or
 configuration. The original `vm-test` retains Hydra's render and glyph-picker
 coverage; `vm-test-nocvox` exercises the companion service, its failure
 boundaries, and its process-ownership rules. See `tests/vm/README.md` for
-details. Wall-in-One has no VM gate since the 0.8 harness was retired with the
-implementation it tested.
+details. Wall-in-One has no VM derivation in this companion repository since
+the 0.8 harness was retired with the implementation it tested; the application
+repository's release VM instead loads and exercises the exact pinned plugin.
 
 ## Editor setup
 
@@ -290,11 +292,12 @@ not vendored here while these beta plugin implementations are changing quickly.
 
 This repository is a directly importable custom Git source for native v5
 testing. Hydra Update Examiner and NocVox are ready for direct testing here.
-Wall-in-One `0.1.0` is newly rewritten as a client for the standalone
-application and has not yet been exercised against a live shell; it has no VM
-gate, so treat it as a beta test target rather than unattended daily-driver
-software. None of the
-plugins has been submitted to, accepted into, or registered with Noctalia's
+Wall-in-One `0.1.1` is newly rewritten as a client for the standalone
+application. It is loaded and exercised in the application's disposable
+Noctalia desktop VM, but has no physical-desktop or long-use validation here;
+treat it as a beta test target rather than unattended daily-driver software.
+None of the plugins has been submitted to, accepted into, or registered with
+Noctalia's
 built-in official or community catalogs. See each plugin README for its
 supported behavior, requirements, and remaining test boundaries.
 
