@@ -1,6 +1,7 @@
 # Hydra Update Examiner tests
 
-Run the deterministic request-budget and compatibility suite with:
+Run the deterministic request-budget, compatibility, and Luau presentation
+suite with:
 
 ```bash
 python3 hydra-update-examiner/tests/test_request_budget.py
@@ -12,9 +13,14 @@ parity is tied to the implementation that preceded the cache refactor.
 
 The suite asserts the request budget per scenario, that two concurrent cold
 callers share one fetch rather than duplicating it, and that the presentation
-projection is unchanged for a fresh active evaluation. A cold published
+projection is unchanged for a fresh active evaluation. When the standalone
+Luau runtime is available, mock Noctalia hosts also execute the production
+widget and panel render paths and require stale/error text to agree with their
+error chrome while live stalled percentages remain visible. A cold published
 short-circuit cannot show fresh gate figures without making the requests it is
 required to skip, so that scenario compares state rather than gate detail.
+CI installs the checksum-pinned Luau 0.732 runtime and requires these checks;
+local runs skip only the two presentation cases when Luau is unavailable.
 
 An opt-in live comparison is available when network access is appropriate:
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic request-budget and compatibility tests for Hydra Examiner.
+"""Deterministic request-budget, compatibility, and presentation tests.
 
 The suite never contacts Hydra.  A curl fixture serves a coherent evaluation
 and records each logical HTTP request.  The pre-refactor helper is materialized
@@ -30,6 +30,27 @@ START_TIME = 1_700_000_000
 EVAL_ID = "424242"
 EVAL_REVISION = "abcdef1234567890abcdef1234567890abcdef12"
 OTHER_REVISION = "1111111111111111111111111111111111111111"
+
+
+def discover_luau() -> Path | None:
+    """Find the standalone Luau runtime without requiring it on PATH."""
+    candidates: list[Path] = []
+    configured = os.environ.get("LUAU")
+    if configured:
+        candidates.append(Path(configured))
+    found = shutil.which("luau")
+    if found:
+        candidates.append(Path(found))
+    compiler = shutil.which("luau-compile")
+    if compiler:
+        candidates.append(Path(compiler).with_name("luau"))
+    store = Path("/nix/store")
+    if store.is_dir():
+        candidates.extend(sorted(store.glob("*-luau-*/bin/luau"), reverse=True))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 FAKE_CURL = r"""#!/usr/bin/env bash
@@ -636,6 +657,30 @@ class RequestBudgetTests(unittest.TestCase):
         self.assertNotIn(f"https://hydra.nixos.org/eval/{EVAL_ID}/job/tested", urls)
         self.assertNotIn("https://hydra.nixos.org/build/9191/constituents", urls)
 
+    def test_published_cache_outage_exposes_stale_launched_provenance(self) -> None:
+        """Pin the startup input that once rendered Launched with error chrome."""
+        self.fixture.set_published(True)
+        known, _ = self.fixture.run()
+        self.assertEqual(known["presentationState"], "launched")
+        self.assertEqual(known["text"], "Launched")
+
+        self.fixture.clear_requests()
+        age = self.ttl("PAUSED_IDENTITY_TTL_SECONDS") + 1
+        self.fixture.set_now(START_TIME + age)
+        stale, _ = self.fixture.run(
+            env=self.fixture.environment(
+                HYDRA_FAKE_FAIL_PATTERN="/jobset/nixos/unstable/evals"
+            )
+        )
+
+        self.assertEqual(stale["state"], "stale")
+        self.assertEqual(stale["presentationState"], "launched")
+        self.assertEqual(stale["text"], "Launched")
+        self.assertIs(stale["stale"], True)
+        self.assertIn("Could not find the latest", str(stale["error"]))
+        self.assertEqual(stale["url"], known["url"])
+        self.assertIn("last known", str(stale["tooltip"]).lower())
+
     def test_terminal_gate_is_not_polled_again_for_same_eval(self) -> None:
         self.fixture.set_gate(finished=True)
         self.fixture.run()
@@ -795,6 +840,179 @@ class RequestBudgetTests(unittest.TestCase):
         second_payload = json.loads(second_stdout.strip().splitlines()[-1])
         self.assertEqual(first_payload, second_payload)
         self.assertEqual(len(self.fixture.requests()), 5, self.fixture.requests())
+
+
+class LuauPresentationTests(unittest.TestCase):
+    """Exercise the production widget and panel render paths in a mock host."""
+
+    def run_entry(self, entry: str, prefix: str, checks: str) -> None:
+        runtime = discover_luau()
+        if runtime is None:
+            if os.environ.get("CI"):
+                self.fail("standalone luau runtime is required in CI")
+            self.skipTest("standalone luau runtime is not discoverable")
+        source = (PLUGIN / entry).read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="hydra-presentation-") as temporary:
+            harness = Path(temporary) / f"{Path(entry).stem}_harness.luau"
+            harness.write_text(
+                textwrap.dedent(prefix)
+                + "\n"
+                + source
+                + "\n"
+                + textwrap.dedent(checks),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [str(runtime), str(harness)],
+                cwd=PLUGIN,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=15,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+
+    def test_widget_render_keeps_text_and_error_chrome_consistent(self) -> None:
+        prefix = r"""
+            local stateValues = { hydra_service_ready = true }
+            local stateWatchers = {}
+            local rendered = {}
+            local config = {
+                display_mode = "always",
+                launched_glyph = "rocket",
+                launched_color = "primary",
+                close_glyph = "server-spark",
+                close_color = "tertiary",
+                stalled_glyph = "server-off",
+                stalled_color = "error",
+                running_glyph = "server-bolt",
+                running_color = "secondary",
+            }
+            local noctalia = {
+                getConfig = function(key) return config[key] end,
+                tr = function(key, _arguments) return key end,
+                log = function(_message) end,
+                setUpdateInterval = function(_interval) end,
+                state = {
+                    get = function(key) return stateValues[key] end,
+                    set = function(key, value)
+                        stateValues[key] = value
+                        if stateWatchers[key] ~= nil then stateWatchers[key](value) end
+                    end,
+                    watch = function(key, callback) stateWatchers[key] = callback end,
+                },
+            }
+            local barWidget = {
+                setGlyph = function(value) rendered.glyph = value end,
+                setText = function(value) rendered.text = value end,
+                setTooltip = function(value) rendered.tooltip = value end,
+                setGlyphColor = function(value) rendered.glyphColor = value end,
+                setColor = function(value) rendered.textColor = value end,
+            }
+        """
+        checks = r"""
+            local sequence = 0
+            local function assertWidget(state, text, expectedText, expectedGlyph, expectedColor)
+                sequence += 1
+                rendered = {}
+                local tooltip = state .. " tooltip"
+                noctalia.state.set(STATUS_KEY, {
+                    state = state,
+                    text = text,
+                    tooltip = tooltip,
+                    loading = false,
+                    config_key = "fixture",
+                    protocol = 1,
+                    sequence = sequence,
+                })
+                assert(rendered.text == expectedText, state .. " text: " .. tostring(rendered.text))
+                assert(rendered.glyph == expectedGlyph, state .. " glyph: " .. tostring(rendered.glyph))
+                assert(rendered.glyphColor == expectedColor, state .. " glyph color")
+                assert(rendered.textColor == expectedColor, state .. " text color")
+                assert(rendered.tooltip == tooltip, state .. " tooltip was not retained")
+            end
+
+            assertWidget("stale", "Launched", "ERR", "server-off", "error")
+            assertWidget("error", "Launched", "ERR", "server-off", "error")
+            assertWidget("launched", "Launched", "Launched", "rocket", "primary")
+            assertWidget("stalled", "73%", "73%", "server-off", "error")
+        """
+        self.run_entry("widget.luau", prefix, checks)
+
+    def test_panel_render_keeps_text_and_error_chrome_consistent(self) -> None:
+        prefix = r"""
+            local stateValues = {}
+            local stateWatchers = {}
+            local labels = {}
+            local glyphs = {}
+            local renderedTree = nil
+
+            local function node(kind, properties, children)
+                return { kind = kind, properties = properties or {}, children = children or {} }
+            end
+            local ui = {
+                column = function(properties, children) return node("column", properties, children) end,
+                row = function(properties, children) return node("row", properties, children) end,
+                label = function(properties)
+                    table.insert(labels, properties)
+                    return node("label", properties)
+                end,
+                glyph = function(properties)
+                    table.insert(glyphs, properties)
+                    return node("glyph", properties)
+                end,
+                button = function(properties) return node("button", properties) end,
+                separator = function() return node("separator") end,
+            }
+            local panel = {
+                render = function(tree) renderedTree = tree end,
+                close = function() end,
+            }
+            local noctalia = {
+                tr = function(key, _arguments) return key end,
+                log = function(_message) end,
+                openSettings = function() end,
+                commandExists = function(_command) return true end,
+                runAsync = function(_command, _callback, _timeout) return true end,
+                notifyError = function(_title, _message) end,
+                state = {
+                    get = function(key) return stateValues[key] end,
+                    set = function(key, value)
+                        stateValues[key] = value
+                        if stateWatchers[key] ~= nil then stateWatchers[key](value) end
+                    end,
+                    watch = function(key, callback) stateWatchers[key] = callback end,
+                },
+            }
+        """
+        checks = r"""
+            local function assertPanel(state, text, expectedText, expectedGlyph, expectedColor)
+                labels = {}
+                glyphs = {}
+                renderedTree = nil
+                noctalia.state.set(STATUS_KEY, {
+                    state = state,
+                    text = text,
+                    loading = false,
+                })
+                assert(renderedTree ~= nil, state .. " panel did not render")
+                assert(#labels == 2, state .. " unexpected label count: " .. tostring(#labels))
+                assert(#glyphs == 1, state .. " unexpected glyph count: " .. tostring(#glyphs))
+                local statusLabel = labels[2]
+                local statusGlyph = glyphs[1]
+                assert(statusLabel.text == expectedText, state .. " text: " .. tostring(statusLabel.text))
+                assert(statusGlyph.name == expectedGlyph, state .. " glyph: " .. tostring(statusGlyph.name))
+                assert(statusLabel.color == expectedColor, state .. " label color")
+                assert(statusGlyph.color == expectedColor, state .. " glyph color")
+            end
+
+            assertPanel("stale", "Launched", "ERR", "server-off", "error")
+            assertPanel("error", "Launched", "ERR", "server-off", "error")
+            assertPanel("launched", "Launched", "Launched", "rocket", "primary")
+            assertPanel("stalled", "73%", "73%", "server-off", "error")
+        """
+        self.run_entry("panel.luau", prefix, checks)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,18 @@ local function presentationFor(state)
     return "server-bolt", "secondary"
 end
 
+local function presentationText(state, text)
+    -- A stale payload may retain last-good text in shared state (and the
+    -- widget's tooltip), but this panel has no tooltip; stale/error labels must
+    -- agree with error chrome. `stalled` shares that chrome but is a live
+    -- blocked-gate observation, so keep its real readiness percentage. `ERR`
+    -- is the fixed, untranslated token used by the helper/service protocol.
+    if state == "stale" or state == "error" then
+        return "ERR"
+    end
+    return tostring(text or "HYD")
+end
+
 local function render()
     local current = if type(status) == "table"
         then status
@@ -41,7 +53,8 @@ local function render()
             state = "idle",
             text = "HYD",
         }
-    local glyph, color = presentationFor(tostring(current.state or "idle"))
+    local state = tostring(current.state or "idle")
+    local glyph, color = presentationFor(state)
     if current.loading then
         glyph = "refresh"
     end
@@ -52,7 +65,7 @@ local function render()
             ui.column({ gap = 1, flexGrow = 1 }, {
                 ui.label({ text = noctalia.tr("actions.title"), fontSize = 15, fontWeight = "bold" }),
                 ui.label({
-                    text = tostring(current.text or "HYD"),
+                    text = presentationText(state, current.text),
                     color = tostring(color or "on_surface_variant"),
                     fontSize = 12,
                 }),

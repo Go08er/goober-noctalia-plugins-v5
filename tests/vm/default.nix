@@ -451,10 +451,18 @@ pkgs.testers.runNixOSTest (
           "5265010082eb59d96c46a39f7791beb0766a84a49e52fffe2392a3060e590c03"
       )
       machine.succeed(
-          "printf '\\nonHover(true)\\n' >> "
+          "printf '%s\\n' 'onHover(true)' "
+          "'noctalia.log(\"HUE VM widget stale text: \" .. presentationText(\"stale\", \"Launched\"))' "
+          "'noctalia.log(\"HUE VM widget error text: \" .. presentationText(\"error\", \"Launched\"))' "
+          "'noctalia.log(\"HUE VM widget launched text: \" .. presentationText(\"launched\", \"Launched\"))' "
+          "'noctalia.log(\"HUE VM widget stalled text: \" .. presentationText(\"stalled\", \"73%\"))' >> "
           "${materializedPluginRoot}/widget.luau"
       )
       wait_log("hot reload: reloaded 'widget.luau'")
+      wait_log("HUE VM widget stale text: ERR")
+      wait_log("HUE VM widget error text: ERR")
+      wait_log("HUE VM widget launched text: Launched")
+      wait_log("HUE VM widget stalled text: 73%")
       machine.sleep(1)
       hover_visible = "/tmp/noctalia-hydra-hover-visible.png"
       machine.succeed(
@@ -495,10 +503,18 @@ pkgs.testers.runNixOSTest (
       )
       wait_log("hot reload: reloaded service '${serviceId}'")
       machine.succeed(
-          "printf '\\n-- VM panel hot-reload probe\\n' >> "
+          "printf '%s\\n' '-- VM panel hot-reload probe' "
+          "'noctalia.log(\"HUE VM panel stale text: \" .. presentationText(\"stale\", \"Launched\"))' "
+          "'noctalia.log(\"HUE VM panel error text: \" .. presentationText(\"error\", \"Launched\"))' "
+          "'noctalia.log(\"HUE VM panel launched text: \" .. presentationText(\"launched\", \"Launched\"))' "
+          "'noctalia.log(\"HUE VM panel stalled text: \" .. presentationText(\"stalled\", \"73%\"))' >> "
           "${materializedPluginRoot}/panel.luau"
       )
       wait_log("hot reload: reloaded 'panel.luau'")
+      wait_log("HUE VM panel stale text: ERR")
+      wait_log("HUE VM panel error text: ERR")
+      wait_log("HUE VM panel launched text: Launched")
+      wait_log("HUE VM panel stalled text: 73%")
 
       assert noctalia_msg(
           "plugin ${widgetId} all force-refresh"

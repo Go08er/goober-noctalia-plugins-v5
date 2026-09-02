@@ -59,6 +59,18 @@ local function presentationFor(state)
     return glyphCfg("running_glyph", "server-bolt"), widgetCfg("running_color")
 end
 
+local function presentationText(state, text)
+    -- A stale payload may retain last-good text in shared state and this
+    -- widget's tooltip; stale/error labels must still agree with error chrome.
+    -- `stalled` shares that chrome but is a live blocked-gate observation, so
+    -- keep its real readiness percentage. `ERR` is the deliberately fixed,
+    -- untranslated compact token used by the helper and service protocol.
+    if state == "stale" or state == "error" then
+        return "ERR"
+    end
+    return tostring(text or "HYD")
+end
+
 local function displayMode()
     return tostring(widgetCfg("display_mode") or "always")
 end
@@ -80,12 +92,13 @@ local function render(nextStatus, force)
             loading = false,
         }
 
-    local glyph, color = presentationFor(tostring(current.state or "idle"))
+    local state = tostring(current.state or "idle")
+    local glyph, color = presentationFor(state)
     if current.loading then
         glyph = "refresh"
     end
 
-    local text = tostring(current.text or "HYD")
+    local text = presentationText(state, current.text)
     local mode = displayMode()
     if mode == "icon_only" or (mode == "on_hover" and not hovered) then
         text = ""

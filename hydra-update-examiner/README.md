@@ -45,8 +45,10 @@ when a channel will advance.
 - `scripts/hydra-channel-progress` is the request-budgeted shell backend.
 
 One service feeds every widget placement, avoiding duplicate requests when the
-widget appears on multiple bars or monitors. Failed refreshes keep the last
-successful result visible and mark it stale.
+widget appears on multiple bars or monitors. Failed refreshes retain the last
+successful result and Hydra link in shared state, expose last-known details in
+the widget tooltip, mark the current result stale, and render `ERR` with the
+configured blocked/error presentation.
 
 ## Usage
 

@@ -30,6 +30,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install pinned Luau runtime
+        env:
+          LUAU_VERSION: "0.732"
+          LUAU_UBUNTU_SHA256: "05d0e67bedbe012cbb1faf8be4cc93099fa0968a621ee0c1f27ad9088d999555"
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/luau-lang/luau/releases/download/${LUAU_VERSION}/luau-ubuntu.zip" \
+            --output "${RUNNER_TEMP}/luau-ubuntu.zip"
+          echo "${LUAU_UBUNTU_SHA256}  ${RUNNER_TEMP}/luau-ubuntu.zip" | sha256sum --check -
+          mkdir -p "${RUNNER_TEMP}/luau"
+          unzip -q "${RUNNER_TEMP}/luau-ubuntu.zip" -d "${RUNNER_TEMP}/luau"
+          echo "${RUNNER_TEMP}/luau" >> "${GITHUB_PATH}"
+
       - name: Install ShellCheck
         run: |
           sudo apt-get update
