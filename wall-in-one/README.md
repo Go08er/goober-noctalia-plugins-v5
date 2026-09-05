@@ -1,8 +1,8 @@
 # Wall-in-One
 
 > [!WARNING]
-> **Pre-alpha — in testing.** The plugin loads and its entries work, but it has
-> had almost no real use. Expect bugs and expect settings to move. It also
+> **Pre-alpha — in testing.** Automated checks cover the control contract,
+> but desktop compatibility and settings may still change. It also
 > requires the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which
 > is itself pre-alpha — this plugin is only ever as ready as that is.
 
@@ -19,7 +19,7 @@ Plugin id `goober/wall-in-one`, with three entries:
 
 - `control` — the singleton service. It is the only thing that talks to the
   app, preferring the packaged `wall-in-one.service` systemd user unit and
-  falling back to `wall-in-one-service --wait-for-config`, running
+  preparing and validating a direct runtime when the unit is absent, running
   `wall-in-one ctl <verb>`, and republishing each atomic runtime snapshot on a
   shared state channel that every other entry reads.
 - `wall-in-one` — the bar widget. Presentation only; clicks open its menu.
@@ -35,9 +35,8 @@ play/pause/stop or move through the playlist, control cycle and shuffle modes,
 inspect display assignments, or open the full application. Display assignment
 and schedule-rule editing remain configuration work in the app.
 
-Widget click actions are intentionally fixed in this minimal design. A later
-configurability pass may expose those two menu-opening gestures, but it should
-not reintroduce hidden wallpaper-changing clicks or wheel actions.
+The default left and right click actions open the menu. Use the menu's labelled
+controls to change playback, playlists, or rotation modes.
 
 ### How it talks to the app
 
@@ -56,8 +55,11 @@ they are configuration, not runtime state.
 
 The plugin starts the service when its singleton entry loads. If the packaged
 systemd user unit is available, `systemctl --user start wall-in-one.service`
-owns its lifetime; otherwise the plugin starts
-`wall-in-one-service --wait-for-config` directly. The older Python
+owns its lifetime. When the unit is absent, the plugin runs
+`wall-in-one --service-startup-prepare` and `wall-in-one-service --check-config`
+before starting `wall-in-one-service --wait-for-config` directly. A failed,
+masked, or still-starting unit is reported; it does not trigger a competing
+detached process. The older Python
 `wall-in-one --service` compatibility process cannot provide the atomic
 inventory and is no longer launched by this plugin. The window is only
 configuration: launching plain `wall-in-one` later attaches to the existing
@@ -68,7 +70,7 @@ against a dead socket costs one failed `connect(2)`. Captured calls remain
 serialized and carry a 55-second callback timeout. This covers the app's
 45-second synchronous runtime-action bound (including a three-display helper
 handover) while staying below Noctalia's 60-second callback clamp. Startup
-readiness polling runs at 250 ms for at most 10 seconds and never becomes the
+readiness polling runs at 250 ms for at most 60 seconds and never becomes the
 resting poll rate.
 
 Status snapshots must use the app's status schema version 2. A visible
@@ -83,11 +85,30 @@ systemd timer, and provides durable quarantine for the direct-runtime fallback.
   Its package must include both `wall-in-one` and `wall-in-one-service`; this
   plugin needs the GTK command for configuration and the Rust command for
   runtime control.
+  It requires status schema 2, the `--service-startup-prepare` and
+  `--sync-runtime-health` commands, and matching executables from the same
+  package. Earlier status-schema-1 app builds are incompatible; follow the app's
+  [migration guide](https://github.com/Go08er/wall-in-one/blob/main/docs/migrating.md)
+  before enabling this companion.
 - Noctalia 5 with plugin API 17 or newer.
 
+Companion **v0.1.2** is paired with application **v0.1.3**. That app's
+`flake.lock` selects the committed companion containing these startup and
+battery-display changes. Install the app first, complete its normal restart,
+then enable the matching companion; see the app's
+[update guide](https://github.com/Go08er/wall-in-one/blob/v0.1.3/docs/updating.md).
+
+Application v0.1.2 provides the base startup/health commands but lacks battery
+support and the newer configuration-recovery fixes. Battery control requires
+a running Rust service that accepts runtime configuration schema 5; schema 4
+remains supported without the battery option. Status schema 2 alone does not
+prove battery support.
+
 When `systemctl` is available, the plugin uses it to prefer the app's packaged
-user unit. It is optional: a failed or unavailable unit falls back to a
-detached `wall-in-one-service --wait-for-config`.
+user unit. It is optional when no user unit is installed. A missing unit or an
+explicit executable override uses the same migration/validation preflight
+before starting a detached runtime. Startup errors appear in the menu; use
+**Open Wall-in-One** to complete configuration if no library is selected.
 
 Install the app first. It is a Nix flake:
 
@@ -123,10 +144,19 @@ while Stop releases it and leaves the paired still visible until Play resumes
 motion. The schedule section shows the calendar target and rule currently
 selected, including while a manual override is active.
 
+When the app's **Stop animations on battery** option is enabled, the menu and
+widget tooltip show the resulting restriction separately from playback and
+renderer errors. It does not change your chosen playlist, manual playback
+state, or schedule. If power status becomes unavailable while the restriction
+is held, the companion says so instead of claiming that AC power has returned.
+
 Displays show both their configured assignment and, when an override is in
 force, the playlist actually playing. Assignment is read-only here; **Edit
-display assignments** opens the app's Displays page. **Edit schedules** runs
+display assignments** opens display assignments in the app's **Schedules**
+tab. **Edit schedules** runs
 `wall-in-one ctl open schedules`, landing directly on the full schedule editor.
+To inspect a pairing's still image, motion and colours, open its item in the
+app's **Library** tab.
 
 ### Colour sync
 
@@ -140,15 +170,25 @@ noctalia msg templates-apply
 ```
 
 That writes a `[theme.templates.user.wall-in-one]` block into Noctalia's
-`settings.toml` and points it at the app's installed template. Noctalia then
-re-renders the palette on every change and runs the block's `post_hook`, which
-tells the running app to reload its colours. Palette sync is push-based: no
-polling and no drift.
+`settings.toml` and points it at the app's installed template. Palette updates
+are event-driven: after rendering, Noctalia runs the block's `post_hook` to
+reload the app's colours; the app also watches the rendered file.
 
-To check or undo it:
+Registration and output checks cannot prove that a palette change within the
+same light/dark mode rendered successfully. If colours stop matching, inspect
+the template status and resolved palette, then reapply templates:
 
 ```
 wall-in-one --theme-status
+wall-in-one --print-palette
+noctalia msg templates-apply
+```
+
+See the app's [colour-sync states](https://github.com/Go08er/wall-in-one#colour-sync)
+for the live template, generated approximation and fallback distinction.
+To remove the template registration:
+
+```
 wall-in-one --uninstall-theme-template
 ```
 

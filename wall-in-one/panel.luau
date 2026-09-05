@@ -61,6 +61,15 @@ local function playbackLabel()
         else "panel.playback.playing")
 end
 
+local function animationRestriction()
+    if type(state) ~= "table" or state.animationsInhibited ~= true then
+        return ""
+    end
+    return noctalia.tr(if state.animationInhibitionReason == "battery"
+        then "panel.power.on_battery"
+        else "panel.power.unavailable")
+end
+
 local function send(verb, argument)
     local previous = noctalia.state.get(COMMAND_KEY)
     local previousSequence = if type(previous) == "table" then tonumber(previous.sequence) or 0 else 0
@@ -261,6 +270,10 @@ function render()
     }
 
     local scheduleInfo = schedule()
+    local restriction = animationRestriction()
+    if restriction ~= "" then
+        table.insert(body, 6, ui.label({ text = restriction, color = "on_surface_variant", maxLines = 3 }))
+    end
     local scheduledPlaylist = tostring(scheduleInfo.playlist or "")
     table.insert(body, ui.label({
         text = if scheduleInfo.following == true
@@ -361,9 +374,12 @@ function render()
         }))
     end
 
+    local controlError = if type(state) == "table" then tostring(state.error or "") else ""
     local runtimeError = if type(state) == "table" then tostring(state.runtimeError or "") else ""
     local menuError = if type(menu) == "table" then tostring(menu.error or "") else ""
-    if runtimeError ~= "" then
+    if controlError ~= "" then
+        table.insert(body, ui.label({ text = controlError, color = "error", maxLines = 3 }))
+    elseif runtimeError ~= "" then
         table.insert(body, ui.label({ text = runtimeError, color = "error", maxLines = 3 }))
     elseif menuError ~= "" then
         table.insert(body, ui.label({ text = menuError, color = "error", maxLines = 3 }))

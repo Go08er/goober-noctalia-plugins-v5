@@ -11,7 +11,7 @@
       "row": "{display} — {playlist}",
       "title": "Displays"
     },
-    "not_running": "Starting the Wall-in-One service…",
+    "not_running": "Wall-in-One is not running",
     "nothing_applied": "No wallpaper applied",
     "open_app": "Open Wall-in-One",
     "playback": {
@@ -27,6 +27,10 @@
       "stop_hint": "Pause freezes motion in memory. Stop releases the renderer and leaves its still visible.",
       "stopped": "Motion stopped",
       "title": "Playback"
+    },
+    "power": {
+      "on_battery": "Animations stopped on battery. Playback and schedule choices are unchanged.",
+      "unavailable": "Animations remain stopped while power status is unavailable."
     },
     "modes": {
       "app_default": "Following the app default",
@@ -92,6 +96,10 @@
     "failed": "The wall-in-one control command failed.",
     "invalid_status": "Wall-in-One returned invalid runtime status: {error}",
     "launch_failed": "Wall-in-One did not become ready after it was started.",
+    "startup_timed_out": "Wall-in-One startup preparation timed out. Open the app to check its configuration before retrying.",
+    "unit_start_timed_out": "The Wall-in-One start request timed out. Its user service may still be starting; check wall-in-one.service before retrying.",
+    "unit_query_timed_out": "Could not check the Wall-in-One user service in time. Check wall-in-one.service before retrying.",
+    "unit_unavailable": "Wall-in-One's user service could not be started (load state: {state}). Check wall-in-one.service or set an explicit executable path.",
     "missing_binary": "wall-in-one was not found. Install it, or set the executable path in the plugin settings.",
     "missing_runtime": "wall-in-one-service was not found. Update the Wall-in-One app package.",
     "timed_out": "Wall-in-One did not answer its control socket in time."

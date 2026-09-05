@@ -75,7 +75,7 @@ class ThinClientContract(unittest.TestCase):
         manifest = tomllib.loads(manifest_source)
         self.assertEqual(manifest["id"], "goober/wall-in-one")
         self.assertEqual(manifest["name"], "Wall-in-One")
-        self.assertEqual(manifest["version"], "0.1.1")
+        self.assertEqual(manifest["version"], "0.1.2")
         self.assertEqual(manifest["plugin_api"], 17)
         self.assertEqual(manifest["dependencies"], ["wall-in-one"])
 
@@ -182,11 +182,12 @@ class ThinClientContract(unittest.TestCase):
         self.assertIn('shellQuote(runtime) .. " --wait-for-config"', direct)
         self.assertIn('noctalia.tr("state.missing_runtime")', direct)
         self.assertNotIn('shellQuote(command) .. " --service"', direct)
-        self.assertIn("if not noctalia.runAsync(invocation) then", direct)
+        self.assertIn('--service-startup-prepare', direct)
+        self.assertIn('--check-config', direct)
         self.assertIn('local SYSTEMD_START = "systemctl --user start wall-in-one.service"', source)
         self.assertIn('configuredOverride() == "" and noctalia.commandExists("systemctl")', begin)
         self.assertIn(
-            "local started = noctalia.runAsync(SYSTEMD_START, function(result)", begin
+            "startupStep(SYSTEMD_START, STARTUP_PREPARE_TIMEOUT_MS, function()", begin
         )
         self.assertIn("launchDirect(command)", begin)
 
@@ -209,7 +210,7 @@ class ThinClientContract(unittest.TestCase):
         constants = {
             name: int(value)
             for name, value in re.findall(
-                r"local (CALL_TIMEOUT_MS|STARTUP_CALL_TIMEOUT_MS|SYSTEMD_CALL_TIMEOUT_MS|STARTUP_POLL_MS|"
+                r"local (CALL_TIMEOUT_MS|STARTUP_CALL_TIMEOUT_MS|SYSTEMD_QUERY_TIMEOUT_MS|STARTUP_POLL_MS|"
                 r"STARTUP_TIMEOUT_SECONDS|QUEUE_LIMIT) = (\d+)",
                 source,
             )
@@ -219,9 +220,9 @@ class ThinClientContract(unittest.TestCase):
             {
                 "CALL_TIMEOUT_MS": 55000,
                 "STARTUP_CALL_TIMEOUT_MS": 1500,
-                "SYSTEMD_CALL_TIMEOUT_MS": 3000,
+                "SYSTEMD_QUERY_TIMEOUT_MS": 3000,
                 "STARTUP_POLL_MS": 250,
-                "STARTUP_TIMEOUT_SECONDS": 10,
+                "STARTUP_TIMEOUT_SECONDS": 60,
                 "QUEUE_LIMIT": 8,
             },
         )
@@ -438,12 +439,20 @@ class ThinClientContract(unittest.TestCase):
             assert(#calls == 1 and calls[1].command == quotedBinary .. " ctl status")
             assert(calls[1].timeout == 55000)
             complete(1, { timedOut = false, exitCode = 3, stdout = "", stderr = "" })
+            assert(#calls == 2 and calls[2].command == quotedBinary .. " --service-startup-prepare")
+            complete(2, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
+            assert(#calls == 3 and calls[3].command == quotedRuntime .. " --check-config")
+            complete(3, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
+            -- The remaining assertions concern the runtime client; discard
+            -- the two verified preparation calls from its call history.
+            table.remove(calls, 2)
+            table.remove(calls, 2)
             assert(#calls == 3, "absent service did not launch and start readiness polling")
             assert(calls[2].command == quotedRuntime .. " --wait-for-config", calls[2].command)
             assert(calls[2].callback == nil and calls[2].timeout == nil)
             assert(calls[3].command == quotedBinary .. " ctl status", calls[3].command)
             assert(calls[3].timeout == 1500 and type(calls[3].callback) == "function")
-            assert(startupDeadline == 110 and intervals[#intervals] == 250)
+            assert(startupDeadline == 160 and intervals[#intervals] == 250)
 
             complete(3, {
                 timedOut = false,
@@ -488,6 +497,17 @@ class ThinClientContract(unittest.TestCase):
             fixtureStatus.taboo_entries = {}
             publishStatus("RUNTIME_STATUS")
 
+            fixtureStatus.power_source = "battery"
+            fixtureStatus.power_available = true
+            fixtureStatus.stop_animations_on_battery = true
+            fixtureStatus.animations_inhibited = true
+            fixtureStatus.animation_inhibition_reason = "battery"
+            publishStatus("RUNTIME_STATUS")
+            assert(states[STATE_KEY].powerSource == "battery" and states[STATE_KEY].powerAvailable)
+            assert(states[STATE_KEY].stopAnimationsOnBattery and states[STATE_KEY].animationsInhibited)
+            assert(states[STATE_KEY].animationInhibitionReason == "battery")
+            assert(states[STATE_KEY].playbackState == "playing", "power state replaced manual playback")
+
             -- Arguments and a configured path containing spaces and quotes are
             -- independently shell-quoted; the graphical app is detached.
             onIpc("playlist-use", { argument = "Night's set" })
@@ -504,6 +524,10 @@ class ThinClientContract(unittest.TestCase):
             calls = {}
             fixtureStatus.status_version = 99
             beginLaunch({ verb = "next", argument = nil })
+            complete(1, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
+            complete(2, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
+            table.remove(calls, 1)
+            table.remove(calls, 1)
             assert(#calls == 2 and calls[2].command == quotedBinary .. " ctl status")
             complete(2, { timedOut = false, exitCode = 0, stdout = "RUNTIME_STATUS", stderr = "" })
             assert(#calls == 2, "incompatible status replayed a captured action")
@@ -521,8 +545,7 @@ class ThinClientContract(unittest.TestCase):
             onIpc("open-app", { argument = "schedules" })
             assert(#calls == 1 and calls[1].command == quotedBinary .. " ctl open 'schedules'")
 
-            -- With no explicit override, systemd is tried once. A missing or
-            -- broken unit falls back to the quiet standalone Rust runtime.
+            -- Only an explicitly absent unit permits the direct fallback.
             calls = {}
             table.clear(queue)
             busy = false
@@ -530,12 +553,71 @@ class ThinClientContract(unittest.TestCase):
             configuredBinary = ""
             systemctlAvailable = true
             onIpc("launch", nil)
-            assert(#calls == 1 and calls[1].command == "systemctl --user start wall-in-one.service")
+            assert(#calls == 1 and calls[1].command == "systemctl --user show wall-in-one.service --property=LoadState --value")
             assert(calls[1].timeout == 3000 and type(calls[1].callback) == "function")
-            complete(1, { timedOut = false, exitCode = 5, stdout = "", stderr = "unit missing" })
-            assert(#calls == 3, "systemd failure did not use the direct fallback")
-            assert(calls[2].command == "'wall-in-one-service' --wait-for-config" and calls[2].callback == nil)
-            assert(calls[3].command == "'wall-in-one' ctl status" and calls[3].timeout == 1500)
+            complete(1, { timedOut = false, exitCode = 0, stdout = "not-found\n", stderr = "" })
+            assert(calls[2].command == "'wall-in-one' --service-startup-prepare")
+            complete(2, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
+            assert(calls[3].command == "'wall-in-one-service' --check-config")
+            complete(3, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
+            assert(#calls == 5)
+            assert(calls[4].command == "'wall-in-one-service' --wait-for-config" and calls[4].callback == nil)
+            assert(calls[5].command == "'wall-in-one' ctl status" and calls[5].timeout == 1500)
+
+            -- Loaded-unit failures (including a still-running systemd start)
+            -- preserve the boundary instead of spawning a detached runtime.
+            for _, failure in ipairs({
+                { timedOut = false, exitCode = 1, stdout = "", stderr = "migration blocked" },
+                { timedOut = true, exitCode = 124, stdout = "", stderr = "" },
+            }) do
+                calls = {}
+                table.clear(queue)
+                busy = false
+                clearLaunch()
+                onIpc("launch", nil)
+                complete(1, { timedOut = false, exitCode = 0, stdout = "loaded\n", stderr = "" })
+                assert(calls[2].command == "systemctl --user start wall-in-one.service")
+                assert(calls[2].timeout == 55000)
+                complete(2, failure)
+                assert(#calls == 2, "failed systemd preflight spawned a detached runtime")
+                assert(states[STATE_KEY].running == false and states[STATE_KEY].error ~= "")
+                assert(#states[MENU_KEY].playlists == 0, "failed startup retained stale inventory")
+            end
+
+            -- A masked unit or failed load-state query is not an absent unit.
+            for _, result in ipairs({
+                { timedOut = false, exitCode = 0, stdout = "masked\n", stderr = "" },
+                { timedOut = false, exitCode = 1, stdout = "", stderr = "no user bus" },
+            }) do
+                calls = {}
+                clearLaunch()
+                onIpc("launch", nil)
+                complete(1, result)
+                assert(#calls == 1 and states[STATE_KEY].error ~= "")
+            end
+
+            -- Direct migrations fail closed too, and Open app remains usable.
+            calls = {}
+            configuredBinary = "/tmp/wall in ' one/wall-in-one"
+            clearLaunch()
+            onIpc("launch", nil)
+            assert(calls[1].command == quotedBinary .. " --service-startup-prepare")
+            complete(1, { timedOut = false, exitCode = 1, stdout = "", stderr = "choose a library root" })
+            assert(#calls == 1 and states[STATE_KEY].error == "choose a library root")
+            onIpc("open-app", nil)
+            assert(#calls == 2 and calls[2].command == quotedBinary and calls[2].callback == nil)
+
+            calls = {}
+            clearLaunch()
+            onIpc("launch", nil)
+            onIpc("open-app", nil)
+            assert(#calls == 2 and calls[2].command == quotedBinary,
+                "opening configuration waited behind startup preparation")
+            complete(1, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
+            assert(calls[3].command == quotedRuntime .. " --check-config")
+            complete(3, { timedOut = false, exitCode = 78, stdout = "", stderr = "invalid runtime config" })
+            assert(#calls == 3 and states[STATE_KEY].error == "invalid runtime config",
+                "invalid runtime config launched a detached service")
         """
 
         with tempfile.TemporaryDirectory(
@@ -560,6 +642,86 @@ class ThinClientContract(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stdout)
+
+    def test_rendered_control_errors_and_battery_restrictions(self) -> None:
+        runtime = discover_tool("luau")
+        if runtime is None:
+            self.skipTest("standalone luau runtime is not discoverable")
+        prefix = r"""
+            local states = {
+                wall_in_one_state = { running = false, error = "choose a library root" },
+                wall_in_one_menu = { playlists = {}, displays = {}, schedules = {}, schedule = {} },
+            }
+            local watches, tree, tooltipText = {}, nil, ""
+            local noctalia = {
+                tr = function(key) return key end,
+                getConfig = function(key)
+                    if key == "color" then return "primary" end
+                    if key == "stopped_color" then return "on_surface_variant" end
+                    return nil
+                end,
+                state = {
+                    get = function(key) return states[key] end,
+                    set = function(key, value) states[key] = value end,
+                    watch = function(key, callback) watches[key] = callback end,
+                },
+                setUpdateInterval = function(_value) end,
+            }
+            local ui = setmetatable({}, { __index = function(_table, _key)
+                return function(properties, children) return { props = properties, children = children } end
+            end })
+            local panel = { render = function(value) tree = value end }
+            local barWidget = setmetatable({
+                setTooltip = function(value) tooltipText = value end,
+            }, { __index = function() return function() end end })
+            local function hasText(node, expected)
+                if type(node) ~= "table" then return false end
+                if type(node.props) == "table" and node.props.text == expected then return true end
+                for _, child in ipairs(node.children or {}) do
+                    if hasText(child, expected) then return true end
+                end
+                return false
+            end
+        """
+        panel_checks = r"""
+            assert(hasText(tree, "choose a library root"), "panel hid the actionable control failure")
+            local current = {
+                running = true, playlist = "Day", playbackState = "paused", source = "manual",
+                animationsInhibited = true, animationInhibitionReason = "battery",
+            }
+            states.wall_in_one_state = current
+            watches.wall_in_one_state(current)
+            watches.wall_in_one_menu(states.wall_in_one_menu)
+            assert(hasText(tree, "panel.power.on_battery"))
+            assert(current.playbackState == "paused", "power presentation changed manual playback")
+            current.animationInhibitionReason = "power-unavailable"
+            watches.wall_in_one_state(current)
+            watches.wall_in_one_menu(states.wall_in_one_menu)
+            assert(hasText(tree, "panel.power.unavailable"))
+            current.animationsInhibited = false
+            watches.wall_in_one_state(current)
+            watches.wall_in_one_menu(states.wall_in_one_menu)
+            assert(not hasText(tree, "panel.power.unavailable"))
+        """
+        widget_checks = r"""
+            assert(string.find(tooltipText, "choose a library root", 1, true))
+            local current = {
+                running = true, showing = "Day", playbackState = "paused", source = "manual",
+                animationsInhibited = true, animationInhibitionReason = "battery",
+            }
+            watches.wall_in_one_state(current)
+            assert(string.find(tooltipText, "panel.power.on_battery", 1, true))
+            assert(string.find(tooltipText, "widget.paused", 1, true))
+            current.animationInhibitionReason = "power-unavailable"
+            watches.wall_in_one_state(current)
+            assert(string.find(tooltipText, "panel.power.unavailable", 1, true))
+        """
+        with tempfile.TemporaryDirectory(prefix="wall-in-one-render-") as temporary:
+            for entry, checks in (("panel.luau", panel_checks), ("widget.luau", widget_checks)):
+                harness = Path(temporary) / entry
+                harness.write_text(textwrap.dedent(prefix) + read(entry) + textwrap.dedent(checks))
+                result = subprocess.run([str(runtime), str(harness)], capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

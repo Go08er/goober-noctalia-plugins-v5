@@ -18,10 +18,12 @@ local EXIT_NOT_RUNNING = 3
 -- Noctalia clamps callback timeouts at 60s and the app's ctl client uses 45s.
 local CALL_TIMEOUT_MS = 55000
 local STARTUP_CALL_TIMEOUT_MS = 1500
-local SYSTEMD_CALL_TIMEOUT_MS = 3000
+local SYSTEMD_QUERY_TIMEOUT_MS = 3000
+local STARTUP_PREPARE_TIMEOUT_MS = 55000
 local STARTUP_POLL_MS = 250
-local STARTUP_TIMEOUT_SECONDS = 10
+local STARTUP_TIMEOUT_SECONDS = 60
 local QUEUE_LIMIT = 8
+local SYSTEMD_LOAD_STATE = "systemctl --user show wall-in-one.service --property=LoadState --value"
 local SYSTEMD_START = "systemctl --user start wall-in-one.service"
 local VERBS = {
     launch = true,
@@ -97,6 +99,11 @@ local function publish(state)
         cycleDefault = state.cycleDefault == true,
         cycleSource = tostring(state.cycleSource or ""),
         motionActive = state.motionActive == true,
+        powerSource = tostring(state.powerSource or "unknown"),
+        powerAvailable = state.powerAvailable == true,
+        stopAnimationsOnBattery = state.stopAnimationsOnBattery == true,
+        animationsInhibited = state.animationsInhibited == true,
+        animationInhibitionReason = tostring(state.animationInhibitionReason or ""),
         runtimeError = tostring(state.runtimeError or ""),
         error = tostring(state.error or ""),
     })
@@ -116,10 +123,6 @@ local function publishMenu(snapshot, errorMessage)
     })
 end
 
-local function clearMenu()
-    publishMenu(nil, "")
-end
-
 -- Not-running is the expected resting state, not a fault, so it is published
 -- with an empty error and never logged.
 local function publishStopped(message)
@@ -131,6 +134,9 @@ local function publishStopped(message)
         lastLogged = ""
     end
     publish({ error = detail })
+    -- Inventory is usable only alongside a successful status snapshot. Clear
+    -- it for every stopped/error path, including preflight and timeout errors.
+    publishMenu(nil, detail)
 end
 
 -- Rust returns one fully self-consistent JSON snapshot. Publishing its
@@ -143,7 +149,6 @@ local function publishStatus(line)
             error = tostring(decodeError or "unknown JSON error"),
         })
         publishStopped(detail)
-        publishMenu(nil, detail)
         return false
     end
     if snapshot.status_version ~= STATUS_VERSION then
@@ -151,7 +156,6 @@ local function publishStatus(line)
             error = "unsupported status version " .. tostring(snapshot.status_version),
         })
         publishStopped(detail)
-        publishMenu(nil, detail)
         return false
     end
 
@@ -174,6 +178,11 @@ local function publishStatus(line)
         cycleDefault = snapshot.cycle_default == true,
         cycleSource = tostring(snapshot.cycle_source or ""),
         motionActive = snapshot.motion_active == true,
+        powerSource = tostring(snapshot.power_source or "unknown"),
+        powerAvailable = snapshot.power_available == true,
+        stopAnimationsOnBattery = snapshot.stop_animations_on_battery == true,
+        animationsInhibited = snapshot.animations_inhibited == true,
+        animationInhibitionReason = tostring(snapshot.animation_inhibition_reason or ""),
         runtimeError = tostring(snapshot.last_error or ""),
         error = "",
     })
@@ -196,6 +205,12 @@ end
 enqueue = function(verb, argument, allowLaunch)
     if VERBS[verb] ~= true then
         noctalia.log("wall-in-one: unknown control verb '" .. tostring(verb) .. "'")
+        return
+    end
+    -- Opening the configuration window must work even while startup is
+    -- awaiting migration/root selection or a slow user-unit preflight.
+    if verb == "open-app" then
+        invoke({ verb = verb, argument = argument, allowLaunch = false })
         return
     end
     if verb == "status" or verb == "health-sync" then
@@ -257,18 +272,45 @@ local function runtimeBinary(command)
     return nil
 end
 
+local function startupStep(command, timeout, nextStep, timeoutKey)
+    busy = true
+    local accepted = noctalia.runAsync(command, function(result)
+        busy = false
+        if result.timedOut then
+            stopLaunch(noctalia.tr(timeoutKey or "state.startup_timed_out"))
+        elseif result.exitCode ~= 0 then
+            local detail = noctalia.string.trim(tostring(result.stderr or ""))
+            stopLaunch(if detail ~= "" then detail else noctalia.tr("state.launch_failed"))
+        else
+            nextStep(result)
+        end
+        pump()
+    end, timeout)
+    if not accepted then
+        busy = false
+        stopLaunch(noctalia.tr("state.failed"))
+    end
+end
+
 launchDirect = function(command)
     local runtime = runtimeBinary(command)
     if runtime == nil then
         stopLaunch(noctalia.tr("state.missing_runtime"))
         return
     end
-    local invocation = shellQuote(runtime) .. " --wait-for-config"
-    if not noctalia.runAsync(invocation) then
-        stopLaunch(noctalia.tr("state.failed"))
-        return
-    end
-    enqueue("status", nil, false)
+    -- Match the packaged unit's migration and validation boundary before
+    -- launching a detached runtime. --wait-for-config alone cannot migrate an
+    -- existing runtime document and must never bypass a rejected preflight.
+    startupStep(shellQuote(command) .. " --service-startup-prepare", STARTUP_PREPARE_TIMEOUT_MS, function()
+        startupStep(shellQuote(runtime) .. " --check-config", SYSTEMD_QUERY_TIMEOUT_MS, function()
+            if not noctalia.runAsync(shellQuote(runtime) .. " --wait-for-config") then
+                stopLaunch(noctalia.tr("state.failed"))
+                return
+            end
+            startupDeadline = os.time() + STARTUP_TIMEOUT_SECONDS
+            enqueue("status", nil, false)
+        end)
+    end)
 end
 
 local function beginLaunch(replay)
@@ -292,24 +334,24 @@ local function beginLaunch(replay)
     applyInterval()
     publish({ launching = true })
 
-    -- A packaged user unit owns the lifetime when available. An explicit
-    -- binary override deliberately bypasses it, and a missing/broken unit
-    -- falls back to the same detached service launch used outside systemd.
+    -- Only an absent unit permits a direct fallback. A loaded/masked/broken
+    -- unit or an unanswered query may represent an intentional migration or
+    -- administrative boundary; never start a competing detached process.
     if configuredOverride() == "" and noctalia.commandExists("systemctl") then
-        busy = true
-        local started = noctalia.runAsync(SYSTEMD_START, function(result)
-            busy = false
-            if not result.timedOut and result.exitCode == 0 then
-                enqueue("status", nil, false)
-            else
+        startupStep(SYSTEMD_LOAD_STATE, SYSTEMD_QUERY_TIMEOUT_MS, function(result)
+            local loadState = noctalia.string.trim(tostring(result.stdout or ""))
+            if loadState == "not-found" then
                 launchDirect(command)
+            elseif loadState == "loaded" then
+                startupStep(SYSTEMD_START, STARTUP_PREPARE_TIMEOUT_MS, function()
+                    startupDeadline = os.time() + STARTUP_TIMEOUT_SECONDS
+                    enqueue("status", nil, false)
+                end, "state.unit_start_timed_out")
+            else
+                stopLaunch(noctalia.tr("state.unit_unavailable", { state = loadState }))
             end
-            pump()
-        end, SYSTEMD_CALL_TIMEOUT_MS)
-        if started then
-            return
-        end
-        busy = false
+        end, "state.unit_query_timed_out")
+        return
     end
     launchDirect(command)
 end
@@ -333,7 +375,6 @@ local function finish(job, result)
         elseif job.allowLaunch then
             beginLaunch({ verb = job.verb, argument = job.argument })
         else
-            clearMenu()
             publishStopped("")
         end
     elseif result.exitCode ~= 0 then
@@ -343,7 +384,6 @@ local function finish(job, result)
             stopLaunch(detail)
         else
             publishStopped(detail)
-            publishMenu(nil, detail)
         end
     elseif job.verb == "status" then
         local replay = pendingAfterLaunch
@@ -442,7 +482,6 @@ end)
 
 applyInterval()
 publishStopped("")
-clearMenu()
 noctalia.state.set(READY_KEY, true)
 -- First ask the existing socket. Only a genuinely absent service is started;
 -- the packaged systemd unit is preferred, with a detached Rust runtime

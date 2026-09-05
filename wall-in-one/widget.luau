@@ -73,6 +73,11 @@ local function tooltip()
         noctalia.tr("widget.gestures"),
     }
     local runtimeError = tostring(state.runtimeError or "")
+    if state.animationsInhibited == true then
+        table.insert(lines, 5, noctalia.tr(if state.animationInhibitionReason == "battery"
+            then "panel.power.on_battery"
+            else "panel.power.unavailable"))
+    end
     if runtimeError ~= "" then
         table.insert(lines, 5, runtimeError)
     end
@@ -114,5 +119,9 @@ end
 
 function onHover(entered)
     hovered = entered == true
+    render()
+end
+
+function onConfigChanged()
     render()
 end
