@@ -51,6 +51,5 @@ jobs:
       - name: Validate source
         run: |
           python3 tools/validate.py --require-shellcheck
-          python3 nocvox/tests/check.py
           python3 hydra-update-examiner/tests/test_request_budget.py
           python3 wall-in-one/tests/test_thin_client.py

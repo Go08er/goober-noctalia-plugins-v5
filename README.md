@@ -15,7 +15,6 @@ catalogs; add it as a custom Git source using one of the methods below.
 | Plugin | Version | Status |
 | --- | --- | --- |
 | `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
-| `goober/nocvox` | `0.3.0` | v5.0.0/API 17 focused control companion |
 | `goober/wall-in-one` | `0.1.2` | **Pre-alpha, in testing.** v5.0.0/API 17 launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
 
 ## Repository layout
@@ -31,14 +30,6 @@ hydra-update-examiner/
   widget.luau
   translations/en.json
   scripts/hydra-channel-progress
-nocvox/
-  plugin.toml
-  README.md
-  thumbnail.webp
-  service.luau
-  panel.luau
-  widget.luau
-  translations/en.json
 wall-in-one/
   plugin.toml
   README.md
@@ -55,9 +46,9 @@ tests/vm/
 
 Noctalia v5 discovers Git sources through `catalog.toml`. Each plugin lives in
 a root directory matching the plugin part of its `author/plugin` id. Hydra
-targets API 15. The two larger service-backed plugins target API 17, so enabling
-them on the pinned `v5.0.0-beta.7` source (project/runtime version `5.0.0`)
-starts their singleton services immediately and exposes lifecycle reasons. That
+targets API 15. Wall-in-One targets API 17, so enabling it on the pinned
+`v5.0.0-beta.7` source (project/runtime version `5.0.0`) starts its singleton
+service immediately and exposes lifecycle reasons. That
 host accepts cumulative plugin API levels 3 through 20.
 
 ## Install from GitHub
@@ -72,7 +63,6 @@ Plugin IDs:
 
 ```text
 goober/hydra-update-examiner
-goober/nocvox
 goober/wall-in-one
 ```
 
@@ -93,14 +83,12 @@ README so the CLI and configuration examples agree.
 ```bash
 noctalia msg plugins source add goober-v5 git https://github.com/Go08er/goober-noctalia-plugins-v5
 noctalia msg plugins enable goober/hydra-update-examiner
-noctalia msg plugins enable goober/nocvox
 noctalia msg plugins enable goober/wall-in-one
 noctalia msg plugins list
 ```
 
-The available bar entries are `goober/hydra-update-examiner:hydra`,
-`goober/nocvox:nocvox`, and
-`goober/wall-in-one:wall-in-one`. Its attached panel entry is
+The available bar entries are `goober/hydra-update-examiner:hydra` and
+`goober/wall-in-one:wall-in-one`. Wall-in-One's attached panel entry is
 `goober/wall-in-one:controls`. The source is cloned and managed by Noctalia; a
 separate manual checkout is not required for the plugins. Wall-in-One is a
 client for the standalone [Wall-in-One](https://github.com/Go08er/wall-in-one)
@@ -115,7 +103,6 @@ Add the source and plugin ID to the v5 configuration:
 [plugins]
 enabled = [
   "goober/hydra-update-examiner",
-  "goober/nocvox",
   "goober/wall-in-one",
 ]
 auto_update = false
@@ -129,9 +116,6 @@ enabled = true
 [widget.hydra-readiness]
 type = "goober/hydra-update-examiner:hydra"
 display_mode = "on_hover"
-
-[widget.nocvox]
-type = "goober/nocvox:nocvox"
 
 [widget.wall_in_one]
 type = "goober/wall-in-one:wall-in-one"
@@ -160,7 +144,6 @@ custom source:
 
 ```bash
 noctalia msg plugins disable goober/hydra-update-examiner
-noctalia msg plugins disable goober/nocvox
 noctalia msg plugins disable goober/wall-in-one
 noctalia msg plugins source remove goober-v5
 ```
@@ -178,7 +161,6 @@ path:
 ```bash
 noctalia msg plugins source add goober-v5-dev path /absolute/path/to/goober-noctalia-plugins-v5
 noctalia msg plugins enable goober/hydra-update-examiner
-noctalia msg plugins enable goober/nocvox
 noctalia msg plugins enable goober/wall-in-one
 ```
 
@@ -187,18 +169,6 @@ Luau file edits hot-reload. Manifest edits are picked up on the next Noctalia
 configuration reload. If the Git and path sources are both present, source
 ordering determines which copy supplies a duplicate plugin ID; remove or
 disable the Git source while developing if you want to avoid that ambiguity.
-
-### NocVox boundary
-
-NocVox listens to one extended `voxtype status --follow` stream and
-forwards only supported recording start, stop, cancel, and on-demand diagnostic
-commands. It never installs, starts, stops, updates, configures, or supervises
-the VoxType daemon. The default bar actions are left-click toggle, right-click
-details, and Noctalia's normal middle-click widget settings. Start, stop, and
-cancel use VoxType's configured defaults; NocVox has no per-recording override
-or notification subsystem. The plugin does not read the clipboard or persist transcripts; see
-[`nocvox/README.md`](nocvox/README.md) for the full ownership and privacy
-boundary.
 
 ### Wall-in-One boundary
 
@@ -254,8 +224,7 @@ Run the repository checks with:
 
 ```bash
 python3 tools/validate.py
-noctalia plugins lint hydra-update-examiner nocvox wall-in-one
-python3 nocvox/tests/check.py
+noctalia plugins lint hydra-update-examiner wall-in-one
 python3 wall-in-one/tests/test_thin_client.py
 ```
 
@@ -269,15 +238,13 @@ Run the native v5 integration test in a disposable NixOS VM with:
 
 ```bash
 nix build -L path:.#vm-test
-nix build -L path:.#vm-test-nocvox
 ```
 
-The VM harnesses pin Noctalia tag `v5.0.0-beta.7`, whose project/runtime version
+The VM tests pin Noctalia tag `v5.0.0-beta.7`, whose project/runtime version
 is `5.0.0`. They use in-guest sources, headless Sway, software rendering, and
 deterministic command fixtures without touching the host Noctalia session or
 configuration. The original `vm-test` retains Hydra's render and glyph-picker
-coverage; `vm-test-nocvox` exercises the companion service, its failure
-boundaries, and its process-ownership rules. See `tests/vm/README.md` for
+coverage. See `tests/vm/README.md` for
 details. Wall-in-One has no VM derivation in this companion repository since
 the 0.8 harness was retired with the implementation it tested; the application
 repository's release VM instead loads and exercises the exact pinned plugin.
@@ -293,7 +260,7 @@ not vendored here while these beta plugin implementations are changing quickly.
 ## Publication status
 
 This repository is a directly importable custom Git source for native v5
-testing. Hydra Update Examiner and NocVox are ready for direct testing here.
+testing. Hydra Update Examiner is ready for direct testing here.
 Wall-in-One companion `0.1.2` is paired with application `0.1.3`, adding safer
 startup and battery-status display. It is loaded and exercised in the application's disposable
 Noctalia desktop VM, but has no physical-desktop or long-use validation here;

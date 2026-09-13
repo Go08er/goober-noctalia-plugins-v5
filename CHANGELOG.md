@@ -9,7 +9,7 @@ All notable staging changes will be recorded here.
   repository policy rather than presenting them as an upstream requirement.
 - Remove the artificial plugin-API ceiling so future positive API levels are
   accepted while capability-specific minimums remain enforced.
-- Restructure the NocVox and Wall-in-One READMEs around the published Plugin,
+- Restructure the Wall-in-One README around the published Plugin,
   Usage, Requirements, and Settings sections, and document why Wall-in-One's
   isolated Luau entries cannot be split into ordinary imported modules yet.
 - Point the Hydra parity fixture at the reachable rewritten commit `9be750a`.
@@ -95,15 +95,6 @@ All notable staging changes will be recorded here.
   together in each bar placement's widget editor.
 - Remove the duplicated shared/local appearance controls and inheritance
   switches introduced during the initial v5 compatibility port.
-
-## NocVox 0.3.0 - One widget configuration surface
-
-- Move tooltip fields, state colors, labels, width, and glyphs into the placed
-  widget's settings; the singleton listener has no global policy to configure.
-- Replace the custom gesture dropdowns with native v5 Actions defaults: left
-  toggles recording, right opens details, and middle opens widget settings.
-- Remove the now-empty plugin-settings button from the details panel and point
-  users to the exact per-placement editor instead.
 
 ## Unreleased — Wall-in-One 0.8.0
 
@@ -472,18 +463,6 @@ All notable staging changes will be recorded here.
   and retain the complete color scheme, palette-leader, renderer, widget glyph,
   label, and gesture customization surface.
 
-## NocVox 0.2.0 - Focused control companion
-
-- Remove the per-recording output/model/profile/text-action override system.
-  Start, stop, and cancel now always use the independently managed VoxType
-  daemon's configured defaults.
-- Remove all NocVox desktop notifications and their settings. State, action
-  errors, diagnostic errors, and copy results remain visible in the widget or
-  panel.
-- Retain the singleton live-status follower, configurable gestures, native glyph
-  selectors, palette controls, state-aware controls, and privacy-safe read-only
-  diagnostics.
-
 ## Wall-in-One 0.3.0 - Provider policy and backing export
 
 - Prototype provider policy and backing export. The delegation model from this
@@ -503,18 +482,6 @@ All notable staging changes will be recorded here.
   wallpaper overrides instead of rewriting them.
 - Establish the initial safe video/preview fallback later replaced by owned
   rendered capture.
-
-## NocVox 0.1.0 - Companion MVP
-
-- Add an API 17 singleton listener for the extended VoxType status stream with
-  live idle, recording, streaming, transcribing, stopped, and unknown states.
-- Add a configurable bar widget with native glyph selectors, default
-  toggle/cancel/cancel gestures, an attached control/diagnostics panel, and
-  state-aware action gating.
-- Add disabled-by-default, validated one-shot output/model/profile/text-action
-  overrides without editing or supervising the existing VoxType installation.
-- Keep speech private: no transcript, audio, log, or clipboard content is read
-  or persisted; clipboard/paste/file remain explicit VoxType output modes.
 
 ## Hydra Update Examiner 0.3.0 - Native glyph selection
 

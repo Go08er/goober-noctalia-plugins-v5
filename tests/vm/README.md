@@ -9,7 +9,6 @@ Run one automated suite from the repository root:
 
 ```bash
 nix build -L path:.#vm-test
-nix build -L path:.#vm-test-nocvox
 ```
 
 Use the explicit `path:.` source while developing: Git-backed flake evaluation
@@ -19,13 +18,12 @@ inside the guest. Once every file is committed, `.#...` is equivalent.
 | Package | Coverage |
 | --- | --- |
 | `vm-test` | Hydra rendering, actions, hot reload, settings, and native searchable glyph picker |
-| `vm-test-nocvox` | NocVox singleton listener, state/control matrix, diagnostics, validation, privacy, and teardown |
 
 Each suite also exposes an interactive driver by adding `-driver` to its
 package name. For example:
 
 ```bash
-nix build -L path:.#vm-test-nocvox-driver
+nix build -L path:.#vm-test-driver
 ./result/bin/nixos-test-driver
 ```
 
@@ -53,17 +51,6 @@ production `onHover(true)` callback through a temporary guest-only hot reload.
 Physical pointer dispatch, choosing and applying a different glyph, live GitHub
 network cloning, and the remaining Hydra response states remain exploratory
 coverage.
-
-## NocVox
-
-The NocVox suite imports and enables the real plugin, creates two placements,
-and verifies there is exactly one long-lived status follower. It covers normal,
-malformed, and future status values; state-aware toggle/stop/cancel; command
-failure recovery; diagnostics and a reload while diagnostics are pending; safe
-fixed recording commands with no per-recording flags; attached-panel rendering;
-missing glyph detection; and disable cleanup without stopping the externally
-owned daemon sentinel. Static coverage separately rejects every NocVox desktop
-notification call.
 
 All suites treat Luau runtime errors, undeclared settings, failed hot reloads,
 and missing glyph warnings as failures. Run the relevant target after any

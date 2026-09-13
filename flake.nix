@@ -26,23 +26,15 @@
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
       };
-      nocvoxVmTest = import ./tests/vm/nocvox.nix {
-        inherit pkgs;
-        pluginRoot = ./.;
-        noctaliaPackage = noctalia.packages.${system}.default;
-      };
     in
     {
       checks.${system} = {
         noctalia-vm = hydraVmTest;
-        nocvox-vm = nocvoxVmTest;
       };
 
       packages.${system} = {
         vm-test = hydraVmTest;
         vm-test-driver = hydraVmTest.driverInteractive;
-        vm-test-nocvox = nocvoxVmTest;
-        vm-test-nocvox-driver = nocvoxVmTest.driverInteractive;
       };
     };
 }
