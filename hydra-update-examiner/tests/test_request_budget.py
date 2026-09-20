@@ -681,6 +681,52 @@ class RequestBudgetTests(unittest.TestCase):
         self.assertEqual(stale["url"], known["url"])
         self.assertIn("last known", str(stale["tooltip"]).lower())
 
+    def test_malformed_successful_gate_responses_preserve_last_good_state(self) -> None:
+        known, _ = self.fixture.run()
+        cache = self.fixture.cache_home / "hydra-update-examiner" / "state.json"
+        original = cache.read_bytes()
+        for body in (
+            "<html>temporarily unavailable</html>",
+            "",
+            "[]",
+            "{}",
+            '{"id":9191,"finished":0}\n{"id":9192,"finished":0}',
+            '{"id":9191,"finished":"yes"}',
+            '{"id":0,"finished":0}',
+            '{"id":1e30,"finished":0}',
+            '{"id":9007199254740992,"finished":0}',
+            '{"id":9191,"finished":true,"buildstatus":"success"}',
+            '{"id":9191,"finished":0,"starttime":[]}',
+            '{"id":9191,"finished":0,"starttime":1e30}',
+        ):
+            with self.subTest(body=body):
+                (self.fixture.fixture / "gate.json").write_text(body, encoding="utf-8")
+                payload, _ = self.fixture.run(extra_args=("--force-refresh",))
+                self.assertEqual(payload["state"], "stale")
+                self.assertEqual(payload["text"], known["text"])
+                self.assertIn("Could not parse", str(payload["error"]))
+                self.assertEqual(cache.read_bytes(), original)
+
+                cache.unlink()
+                cold, _ = self.fixture.run()
+                self.assertEqual(cold["state"], "error")
+                self.assertEqual(cold["text"], "ERR")
+                cache.write_bytes(original)
+
+    def test_gate_integer_scientific_notation_is_normalized_not_fabricated(self) -> None:
+        (self.fixture.fixture / "gate.json").write_text(
+            '{"id":9.191e3,"finished":0,"buildstatus":null,"starttime":1e0}',
+            encoding="utf-8",
+        )
+        payload, _ = self.fixture.run()
+        self.assertIs(payload["stale"], False)
+        cache = json.loads(self.fixture.cache_file.read_text(encoding="utf-8"))
+        self.assertEqual(cache["entry"]["gate"]["id"], 9191)
+        self.assertEqual(cache["entry"]["gate"]["starttime"], 1)
+        self.assertIn("https://hydra.nixos.org/build/9191/constituents", [
+            request[2] for request in self.fixture.requests()
+        ])
+
     def test_terminal_gate_is_not_polled_again_for_same_eval(self) -> None:
         self.fixture.set_gate(finished=True)
         self.fixture.run()

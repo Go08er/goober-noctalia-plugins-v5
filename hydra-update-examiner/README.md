@@ -3,12 +3,6 @@
 Native Noctalia v5 port of the Hydra Update Examiner bar widget. It estimates
 how close a NixOS or Nixpkgs channel is to publishing its next update.
 
-![Hydra Update Examiner staging thumbnail](thumbnail.webp)
-
-> This is a v5 beta staging build. The thumbnail comes from the v4 widget and
-> should be replaced after an interactive native v5 capture using the intended
-> production theme and layout.
-
 ## Plugin
 
 | Field | Value |
@@ -72,7 +66,7 @@ For a declarative configuration, the relevant shape is:
 ```toml
 [plugins]
 enabled = ["goober/hydra-update-examiner"]
-auto_update = true
+auto_update = "none"
 
 [[plugins.source]]
 name = "goober-v5"
@@ -92,6 +86,11 @@ refresh_interval_minutes = 60
 Add `hydra-readiness` to the desired bar section using your existing bar
 configuration. Retain any other `[[plugins.source]]` entries you use when
 managing the configuration declaratively.
+
+`plugins.auto_update` is a global setting, not an HUE-only preference. Set it
+to `"all"` only if you explicitly want automatic updates for enabled Git sources,
+including other plugins. App-dependent plugins such as Wall-in-One still need
+compatible app and companion versions.
 
 Refresh the Git source with the Settings source refresh control or:
 
@@ -235,11 +234,11 @@ the public NixOS/Nixpkgs channels mapped by the backend.
 
 ## Requirements
 
-The pinned test source is Noctalia tag `v5.0.0-beta.7`, whose project/runtime
-version is `5.0.0`. The manifest targets plugin API level 15: API 14 provides
+The pinned test source is stable Noctalia tag `v5.1.0`.
+The manifest still targets plugin API level 15: API 14 provides
 overridable widget gesture defaults, and API 15 provides the scoped
-plugin-settings action used by the attached panel. This host supports
-cumulative plugin API levels 3 through 20. The port also needs these commands
+plugin-settings action used by the attached panel. Updating the test host does
+not raise that minimum requirement. The port also needs these commands
 on `PATH`:
 
 - `bash`

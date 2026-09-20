@@ -2,12 +2,11 @@
   description = "Noctalia v5 plugin source and isolated VM tests";
 
   inputs = {
-    # Match the Nixpkgs snapshot used by the pinned Noctalia 5.0.0 host.
-    nixpkgs.url =
-      "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1040357.e2587caef70c/nixexprs.tar.xz";
+    # Track the supported package set; flake.lock records the tested snapshot.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     noctalia = {
-      url = "github:noctalia-dev/noctalia/c366a35ffc30b011d03fcd122bbe7d22f932fc57";
+      url = "github:noctalia-dev/noctalia/v5.1.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -26,15 +25,23 @@
         pluginRoot = ./.;
         noctaliaPackage = noctalia.packages.${system}.default;
       };
+      themeVmTest = import ./tests/vm/theme.nix {
+        inherit pkgs;
+        pluginRoot = ./.;
+        noctaliaPackage = noctalia.packages.${system}.default;
+      };
     in
     {
       checks.${system} = {
         noctalia-vm = hydraVmTest;
+        plugin-theme-vm = themeVmTest;
       };
 
       packages.${system} = {
         vm-test = hydraVmTest;
         vm-test-driver = hydraVmTest.driverInteractive;
+        vm-test-theme = themeVmTest;
+        vm-test-theme-driver = themeVmTest.driverInteractive;
       };
     };
 }

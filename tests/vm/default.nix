@@ -121,7 +121,7 @@ let
 
     [plugins]
     enabled = []
-    auto_update = false
+    auto_update = "none"
     source = []
 
     [plugin_settings."${pluginId}"]
@@ -276,7 +276,7 @@ pkgs.testers.runNixOSTest (
 
       def wait_log(text: str):
           machine.wait_until_succeeds(
-              f"{journal} | grep -F -- {shlex.quote(text)}"
+              f"{journal} | grep -F -- {shlex.quote(text)}", timeout=60
           )
 
       start_all()
@@ -361,10 +361,6 @@ pkgs.testers.runNixOSTest (
       assert enable_result.startswith("ok"), enable_result
 
       wait_log("adding plugin source '${sourceName}' (${sourceUrl})")
-      wait_log(
-          "git clone --filter=blob:none --no-checkout ${sourceUrl} "
-          "${clonedRepoRoot}"
-      )
       wait_log("enabling plugin '${pluginId}' (resolved + exported")
       wait_log("loaded plugin '${pluginId}' (3 entries)")
       wait_log('creating #0 "hydra-test"')
@@ -376,6 +372,12 @@ pkgs.testers.runNixOSTest (
           "test -d ${clonedRepoRoot}/.git && "
           "test -f ${materializedPluginRoot}/plugin.toml"
       )
+      # Check the resulting source identity, not the host's exact git argv
+      # debug message (5.1 adds an explicit --origin argument).
+      assert machine.succeed(
+          "runuser -u ${testUser} -- ${lib.getExe pkgs.git} "
+          "-C ${clonedRepoRoot} config --get remote.origin.url"
+      ).strip() == "${sourceUrl}"
       # A git source is catalog-driven: the cache has no checkout, so discovery
       # must read catalog.toml from the repository root via git-show before the
       # plugin subdirectory can be exported to the materialized runtime tree.
@@ -436,9 +438,11 @@ pkgs.testers.runNixOSTest (
       )
       # Golden crops pin two independent widget presentations in the launched
       # state: circle-check + primary, and rocket + secondary.
-      assert machine.succeed(f"sha256sum {hover_hidden}").split()[0] == (
+      machine.copy_from_machine(hover_hidden)
+      hidden_hash = machine.succeed(f"sha256sum {hover_hidden}").split()[0]
+      assert hidden_hash == (
           "fc2a34b67fb9fd4183dfb2ef0d9559d8d7be9d9d106ba975407342dfff065bf1"
-      )
+      ), hidden_hash
       alternate_placement = "/tmp/noctalia-hydra-alternate-placement.png"
       machine.succeed(
           "runuser -u ${testUser} -- env -i "
@@ -447,9 +451,13 @@ pkgs.testers.runNixOSTest (
           f"{alternate_placement}"
       )
       machine.succeed(f"test $(stat -c %s {alternate_placement}) -gt 500")
-      assert machine.succeed(f"sha256sum {alternate_placement}").split()[0] == (
-          "5265010082eb59d96c46a39f7791beb0766a84a49e52fffe2392a3060e590c03"
-      )
+      machine.copy_from_machine(alternate_placement)
+      alternate_hash = machine.succeed(f"sha256sum {alternate_placement}").split()[0]
+      # Visually reviewed on the pinned 5.1.0 host: secondary rocket in the
+      # left placement, with the host's current rounded bar edge.
+      assert alternate_hash == (
+          "bc5d39a6b2f784dd64e9c26746540e6826d92ab961b40d0b8a57d5f00a84ee01"
+      ), alternate_hash
       machine.succeed(
           "printf '%s\\n' 'onHover(true)' "
           "'noctalia.log(\"HUE VM widget stale text: \" .. presentationText(\"stale\", \"Launched\"))' "
@@ -581,7 +589,9 @@ pkgs.testers.runNixOSTest (
       for _ in range(10):
           wtype("-k Tab")
       wtype("-k Return")
-      wait_log("logical=568x570")
+      # Noctalia 5.1 renders this dialog inside Settings, not in the older
+      # 568x570 popup surface. Verify rendered search behavior below instead
+      # of waiting for a surface-size debug message that no longer exists.
       machine.sleep(1)
       glyph_picker_screenshot = "/tmp/noctalia-hydra-glyph-picker-vm.png"
       machine.succeed(
@@ -593,6 +603,42 @@ pkgs.testers.runNixOSTest (
       machine.succeed(f"test $(stat -c %s {glyph_picker_screenshot}) -gt 1000")
       machine.fail(f"cmp -s {widget_settings_screenshot} {glyph_picker_screenshot}")
       machine.copy_from_machine(glyph_picker_screenshot)
+
+      # The pinned 1280x720 fixture puts the first result at (419, 245).
+      # A matching query must draw a glyph there; an impossible query must
+      # clear it. This catches a missing picker or broken search, not merely
+      # a changed screenshot caused by focus/notifications. The initial
+      # unfiltered grid is retained above for separate visual review.
+      wtype("rocket-off")
+      machine.sleep(1)
+      search_result = "/tmp/noctalia-hydra-glyph-search-vm.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -g '395,220 50x50' "
+          f"{search_result}"
+      )
+      machine.copy_from_machine(search_result)
+      result_colors = int(machine.succeed(
+          "${lib.getExe pkgs.imagemagick} "
+          f"{search_result} -format %k info:"
+      ))
+      assert result_colors > 20, f"glyph search did not render a result: {result_colors} colors"
+      wtype("-M ctrl -k a -m ctrl no-such-hue-glyph-test-xyz")
+      machine.sleep(1)
+      empty_result = "/tmp/noctalia-hydra-glyph-no-match-vm.png"
+      machine.succeed(
+          "runuser -u ${testUser} -- env -i "
+          f"{ipc_environment} "
+          "${lib.getExe pkgs.grim} -g '395,220 50x50' "
+          f"{empty_result}"
+      )
+      machine.copy_from_machine(empty_result)
+      empty_colors = int(machine.succeed(
+          "${lib.getExe pkgs.imagemagick} "
+          f"{empty_result} -format %k info:"
+      ))
+      assert empty_colors <= 2, f"glyph search did not clear its result: {empty_colors} colors"
 
       logs = machine.succeed(journal)
       for forbidden in (

@@ -19,7 +19,7 @@ widget and panel render paths and require stale/error text to agree with their
 error chrome while live stalled percentages remain visible. A cold published
 short-circuit cannot show fresh gate figures without making the requests it is
 required to skip, so that scenario compares state rather than gate detail.
-CI installs the checksum-pinned Luau 0.732 runtime and requires these checks;
+CI installs the checksum-pinned Luau 0.738 runtime and requires these checks;
 local runs skip only the two presentation cases when Luau is unavailable.
 
 An opt-in live comparison is available when network access is appropriate:

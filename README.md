@@ -5,8 +5,8 @@ runtime. Noctalia can import it directly from
 <https://github.com/Go08er/goober-noctalia-plugins-v5>. This tree is
 intentionally separate from the Quickshell-based v4.7 repository.
 
-This repository pins Noctalia tag `v5.0.0-beta.7`, whose project/runtime
-version is `5.0.0`. These plugin builds remain a beta test source rather than a
+This repository pins stable Noctalia tag `v5.1.0` for integration tests.
+These plugin builds remain a beta test source rather than a
 stable feed. It is not included in Noctalia's built-in official or community
 catalogs; add it as a custom Git source using one of the methods below.
 
@@ -14,8 +14,8 @@ catalogs; add it as a custom Git source using one of the methods below.
 
 | Plugin | Version | Status |
 | --- | --- | --- |
-| `goober/hydra-update-examiner` | `0.4.0` | v5.0.0/API 15, streamlined v5 settings |
-| `goober/wall-in-one` | `0.1.2` | **Pre-alpha, in testing.** v5.0.0/API 17 launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
+| `goober/hydra-update-examiner` | `0.4.0` | API 15 minimum, streamlined v5 settings |
+| `goober/wall-in-one` | `0.1.2` | **Pre-alpha, in testing.** API 17 minimum; launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
 
 ## Repository layout
 
@@ -46,10 +46,10 @@ tests/vm/
 
 Noctalia v5 discovers Git sources through `catalog.toml`. Each plugin lives in
 a root directory matching the plugin part of its `author/plugin` id. Hydra
-targets API 15. Wall-in-One targets API 17, so enabling it on the pinned
-`v5.0.0-beta.7` source (project/runtime version `5.0.0`) starts its singleton
-service immediately and exposes lifecycle reasons. That
-host accepts cumulative plugin API levels 3 through 20.
+targets API 15. Wall-in-One targets API 17, which starts its singleton service
+when enabled and exposes lifecycle reasons. These are minimum API levels, not
+the test host's version: updating the host does not require dropping support
+for older compatible hosts.
 
 ## Install from GitHub
 
@@ -105,7 +105,7 @@ enabled = [
   "goober/hydra-update-examiner",
   "goober/wall-in-one",
 ]
-auto_update = false
+auto_update = "none"
 
 [[plugins.source]]
 name = "goober-v5"
@@ -137,10 +137,11 @@ request a background update from the CLI:
 noctalia msg plugins update goober-v5
 ```
 
-Keep `plugins.auto_update = false` while testing a known checkout. After you
-choose to track the repository tip, setting it to `true` lets Noctalia refresh
-enabled Git sources automatically. To uninstall the plugin and remove this
-custom source:
+Keep `plugins.auto_update = "none"` while testing a known checkout. After you
+choose to track the repository tip, setting it to `"all"` lets Noctalia refresh
+enabled Git sources automatically. These values match the tested Noctalia 5.1
+host; older betas used `false` and `true`, respectively. To uninstall the plugin
+and remove this custom source:
 
 ```bash
 noctalia msg plugins disable goober/hydra-update-examiner
@@ -240,14 +241,14 @@ Run the native v5 integration test in a disposable NixOS VM with:
 nix build -L path:.#vm-test
 ```
 
-The VM tests pin Noctalia tag `v5.0.0-beta.7`, whose project/runtime version
-is `5.0.0`. They use in-guest sources, headless Sway, software rendering, and
+The VM tests pin stable Noctalia tag `v5.1.0`. They use in-guest sources,
+headless Sway, software rendering, and
 deterministic command fixtures without touching the host Noctalia session or
 configuration. The original `vm-test` retains Hydra's render and glyph-picker
-coverage. See `tests/vm/README.md` for
-details. Wall-in-One has no VM derivation in this companion repository since
-the 0.8 harness was retired with the implementation it tested; the application
-repository's release VM instead loads and exercises the exact pinned plugin.
+coverage. The shared `vm-test-theme` checks live theme changes in both plugins'
+widgets and open panels. See `tests/vm/README.md` for details. This companion
+repository has no standalone Wall-in-One app/runtime VM; the application
+repository's release VM covers the app and runtime with its exact pinned plugin.
 
 ## Editor setup
 

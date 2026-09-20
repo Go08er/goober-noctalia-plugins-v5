@@ -900,12 +900,41 @@ refresh_gate() {
     refresh_error="Could not refresh the $gate_label gate for eval #$id."
     return 1
   fi
+  # A successful HTTP response is not necessarily a usable gate observation
+  # (for example, a proxy can return an HTML error page with status 200).
+  # Reserve synthetic Queued/id=0 for the explicit 404 branch above.
+  # Slurp first: jq normally accepts a stream of JSON documents. A gate must
+  # be one object, and every integer must survive jq/shell conversion exactly.
+  # Normalize scientific notation before extracting fields below.
+  if ! json="$(jq -cse '
+    def unsigned_integer:
+      type == "number" and . >= 0 and . <= 9007199254740991 and . == floor;
+    select(length == 1) | .[0] | select(
+    type == "object"
+      and (.id | unsigned_integer and . > 0)
+      and (.finished == 0 or .finished == 1 or .finished == false or .finished == true)
+      and (((.finished == 0 or .finished == false) and .buildstatus == null)
+        or (.buildstatus | unsigned_integer))
+      and ((has("starttime") | not) or .starttime == null
+        or (.starttime | unsigned_integer))
+      and ((has("nixname") | not) or .nixname == null or (.nixname | type == "string"))
+    )
+    | .id |= floor
+    | .starttime = ((.starttime // 0) | floor)
+    | if .buildstatus != null then .buildstatus |= floor else . end
+  ' 2>/dev/null <<< "$json")"; then
+    refresh_error="Could not parse the $gate_label gate for eval #$id."
+    return 1
+  fi
   build_id="$(jq -r '.id // empty' <<< "$json" 2>/dev/null || true)"
   build_finished="$(jq -r '.finished // 0' <<< "$json" 2>/dev/null || true)"
   build_status="$(jq -r '.buildstatus // empty' <<< "$json" 2>/dev/null || true)"
   starttime="$(jq -r '.starttime // 0' <<< "$json" 2>/dev/null || true)"
   nixname="$(jq -r '.nixname // empty' <<< "$json" 2>/dev/null || true)"
-  [[ "$build_id" =~ ^[0-9]+$ ]] || build_id=0
+  if ! [[ "$build_id" =~ ^[1-9][0-9]*$ ]]; then
+    refresh_error="Could not parse the $gate_label gate for eval #$id."
+    return 1
+  fi
   # Hydra's OpenAPI contract types `finished` as a boolean, but the live gate
   # endpoint returns the numeric form.  Accept both rather than trusting either.
   case "$build_finished" in

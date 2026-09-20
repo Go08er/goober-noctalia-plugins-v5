@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The Hydra request-budget suite compares against the pre-refactor
           # helper read from an earlier revision, so the default shallow
@@ -26,14 +26,14 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install pinned Luau runtime
         env:
-          LUAU_VERSION: "0.732"
-          LUAU_UBUNTU_SHA256: "05d0e67bedbe012cbb1faf8be4cc93099fa0968a621ee0c1f27ad9088d999555"
+          LUAU_VERSION: "0.738"
+          LUAU_UBUNTU_SHA256: "e967efb6c2a74e691637a82b0fd54de9ae43a2ec9f7be895eee51c1efb84363a"
         run: |
           curl --fail --location --silent --show-error \
             "https://github.com/luau-lang/luau/releases/download/${LUAU_VERSION}/luau-ubuntu.zip" \
