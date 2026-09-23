@@ -122,6 +122,9 @@ local function ruleWindow(rule)
 end
 
 local function runtimeSummary()
+    if type(state) == "table" and state.stale == true then
+        return noctalia.tr("state.status_unavailable")
+    end
     if starting() then
         return noctalia.tr("panel.starting")
     end
@@ -269,6 +272,9 @@ function render()
         ui.label({ text = noctalia.tr("panel.schedule.title"), fontSize = 12, fontWeight = "bold" }),
     }
 
+    if type(state) == "table" and state.stale == true and running() then
+        table.insert(body, 4, ui.label({ text = noctalia.tr("state.last_known"), color = "on_surface_variant", maxLines = 2 }))
+    end
     local scheduleInfo = schedule()
     local restriction = animationRestriction()
     if restriction ~= "" then
@@ -465,7 +471,7 @@ end
 function onOpen(_context)
     state = noctalia.state.get(STATE_KEY)
     menu = noctalia.state.get(MENU_KEY)
-    send(if running() then "status" else "launch", nil)
+    send(if running() or (type(state) == "table" and state.stale == true) then "status" else "launch", nil)
     render()
 end
 

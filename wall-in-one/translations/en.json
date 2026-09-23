@@ -93,6 +93,8 @@
     }
   },
   "state": {
+    "status_unavailable": "Status unavailable. Wall-in-One may be starting, busy, or unresponsive.",
+    "last_known": "Last known state",
     "failed": "The wall-in-one control command failed.",
     "invalid_status": "Wall-in-One returned invalid runtime status: {error}",
     "launch_failed": "Wall-in-One did not become ready after it was started.",
@@ -105,6 +107,7 @@
     "timed_out": "Wall-in-One did not answer its control socket in time."
   },
   "widget": {
+    "status_unavailable": "Status unavailable",
     "gestures": "Click to choose a playlist or open the app.",
     "manual": "Manual playlist override",
     "motion_stopped": "Motion stopped; paired still remains",

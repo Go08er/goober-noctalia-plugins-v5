@@ -395,7 +395,7 @@ pkgs.testers.runNixOSTest (
       )
 
       plugin_list = noctalia_msg("plugins list")
-      assert "${pluginId} [${sourceName}] 0.4.0 enabled" in plugin_list
+      assert "${pluginId} [${sourceName}] 0.4.1 enabled" in plugin_list
       assert "incompatible" not in plugin_list
 
       assert noctalia_msg(

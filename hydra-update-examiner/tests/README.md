@@ -8,8 +8,10 @@ python3 hydra-update-examiner/tests/test_request_budget.py
 ```
 
 It uses local HTTP fixtures and never contacts Hydra. The comparison baseline
-is read directly from Git revision `8fc866d`, so the asserted presentation
-parity is tied to the implementation that preceded the cache refactor.
+is read directly from Git revision `9be750a`, so the asserted presentation
+parity is tied to the implementation that preceded the cache refactor. Readiness,
+detail, gate and blocker facts are compared; the obsolete click-hint footer is
+excluded and separately forbidden in current output.
 
 The suite asserts the request budget per scenario, that two concurrent cold
 callers share one fetch rather than duplicating it, and that the presentation
@@ -21,6 +23,12 @@ short-circuit cannot show fresh gate figures without making the requests it is
 required to skip, so that scenario compares state rather than gate detail.
 CI installs the checksum-pinned Luau 0.738 runtime and requires these checks;
 local runs skip only the two presentation cases when Luau is unavailable.
+
+Cache regressions reject malformed constituent arrays, preserve coherent stale
+snapshots, and cover final-gate retries, manual repair, and schema-2 invalidation
+while offline. An immediate warm-cache poll must use no HTTP requests and at
+most ten jq processes; elapsed time is not a pass/fail threshold. The fake curl
+also checks HTTPS restrictions and oversized-response handling.
 
 An opt-in live comparison is available when network access is appropriate:
 

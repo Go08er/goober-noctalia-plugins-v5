@@ -2,6 +2,34 @@
 
 All notable staging changes will be recorded here.
 
+## 2026-09-23 — HUE 0.4.1 and Wall-in-One companion 0.1.3
+
+### Hydra Update Examiner 0.4.1
+
+- Validate constituent responses before using their counts. Retry missing
+  terminal details within a bounded budget; manual refresh can retry afterward.
+- Discard provisional counts when a build becomes terminal. Cache schema 3
+  rebuilds older cached observations once without changing plugin settings.
+  The first refresh needs network access to populate the new cache.
+- Reduce repeated `jq` processes when reading cached snapshots, preserving
+  status and readiness behavior. Cached strings are never evaluated as code.
+- Restrict requests and redirects to HTTPS, limit connection time, and cap
+  responses at 16 MiB. Require curl 8.4 or newer for the streaming size limit.
+- Remove an inaccurate right-click instruction and add offline regressions for
+  malformed responses, retries, cache safety, and request/process budgets.
+
+### Wall-in-One companion 0.1.3
+
+- Pair with app 0.1.4; retain compatibility with app 0.1.3 status timeouts.
+- Keep startup pending through temporary status delays within the existing
+  startup deadline. Do not replay timed-out playback changes.
+- Preserve the last good menu and clearly mark it stale while status is
+  unavailable, instead of claiming the runtime has stopped.
+- Back off repeated health-persistence failures without reporting a runtime
+  failure; retry when the report or runtime identity changes.
+- Extend offline Luau regression coverage. Startup, migration safeguards,
+  executable overrides, and saved plugin settings remain unchanged.
+
 ## Repository validation
 
 - Mirror the official v5 README, required-file, translation-segment, and tag

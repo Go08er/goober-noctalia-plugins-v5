@@ -75,7 +75,7 @@ class ThinClientContract(unittest.TestCase):
         manifest = tomllib.loads(manifest_source)
         self.assertEqual(manifest["id"], "goober/wall-in-one")
         self.assertEqual(manifest["name"], "Wall-in-One")
-        self.assertEqual(manifest["version"], "0.1.2")
+        self.assertEqual(manifest["version"], "0.1.3")
         self.assertEqual(manifest["plugin_api"], 17)
         self.assertEqual(manifest["dependencies"], ["wall-in-one"])
 
@@ -219,7 +219,7 @@ class ThinClientContract(unittest.TestCase):
             constants,
             {
                 "CALL_TIMEOUT_MS": 55000,
-                "STARTUP_CALL_TIMEOUT_MS": 1500,
+                "STARTUP_CALL_TIMEOUT_MS": 6000,
                 "SYSTEMD_QUERY_TIMEOUT_MS": 3000,
                 "STARTUP_POLL_MS": 250,
                 "STARTUP_TIMEOUT_SECONDS": 60,
@@ -311,16 +311,14 @@ class ThinClientContract(unittest.TestCase):
                 completed.returncode, 0, f"{entry.name}:\n{completed.stdout}"
             )
 
-    def test_service_process_shapes_and_bounds_in_mock_host(self) -> None:
-        runtime = discover_tool("luau")
-        if runtime is None:
-            self.skipTest("standalone luau runtime is not discoverable")
-
-        prefix = r"""
+    @staticmethod
+    def service_prefix() -> str:
+        return r"""
             local calls = {}
             local intervals = {}
             local states = {}
             local watchers = {}
+            local logs = {}
             local now = 100
             local configuredBinary = "/tmp/wall in ' one/wall-in-one"
             local configuredRuntime = "/tmp/wall in ' one/wall-in-one-service"
@@ -415,7 +413,7 @@ class ThinClientContract(unittest.TestCase):
                     return true
                 end,
                 tr = function(key) return key end,
-                log = function(_message) end,
+                log = function(message) table.insert(logs, message) end,
                 state = {
                     get = function(key) return states[key] end,
                     set = function(key, value)
@@ -426,6 +424,11 @@ class ThinClientContract(unittest.TestCase):
                 },
             }
         """
+    def test_service_process_shapes_and_bounds_in_mock_host(self) -> None:
+        runtime = discover_tool("luau")
+        if runtime is None:
+            self.skipTest("standalone luau runtime is not discoverable")
+        prefix = self.service_prefix()
         checks = r"""
             local quotedBinary = "'/tmp/wall in '\"'\"' one/wall-in-one'"
             local quotedRuntime = "'/tmp/wall in '\"'\"' one/wall-in-one-service'"
@@ -451,7 +454,7 @@ class ThinClientContract(unittest.TestCase):
             assert(calls[2].command == quotedRuntime .. " --wait-for-config", calls[2].command)
             assert(calls[2].callback == nil and calls[2].timeout == nil)
             assert(calls[3].command == quotedBinary .. " ctl status", calls[3].command)
-            assert(calls[3].timeout == 1500 and type(calls[3].callback) == "function")
+            assert(calls[3].timeout == 6000 and type(calls[3].callback) == "function")
             assert(startupDeadline == 160 and intervals[#intervals] == 250)
 
             complete(3, {
@@ -562,12 +565,13 @@ class ThinClientContract(unittest.TestCase):
             complete(3, { timedOut = false, exitCode = 0, stdout = "", stderr = "" })
             assert(#calls == 5)
             assert(calls[4].command == "'wall-in-one-service' --wait-for-config" and calls[4].callback == nil)
-            assert(calls[5].command == "'wall-in-one' ctl status" and calls[5].timeout == 1500)
+            assert(calls[5].command == "'wall-in-one' ctl status" and calls[5].timeout == 6000)
 
             -- Loaded-unit failures (including a still-running systemd start)
             -- preserve the boundary instead of spawning a detached runtime.
             for _, failure in ipairs({
                 { timedOut = false, exitCode = 1, stdout = "", stderr = "migration blocked" },
+                { timedOut = false, exitCode = 75, stdout = "", stderr = "migration busy" },
                 { timedOut = true, exitCode = 124, stdout = "", stderr = "" },
             }) do
                 calls = {}
@@ -643,6 +647,195 @@ class ThinClientContract(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 0, completed.stdout)
 
+    def run_service_case(self, checks: str) -> None:
+        runtime = discover_tool("luau")
+        if runtime is None:
+            self.skipTest("standalone luau runtime is not discoverable")
+        complete = r"""
+            local function complete(result)
+                assert(type(calls[#calls].callback) == "function")
+                calls[#calls].callback(result)
+            end
+            local healthy = { timedOut=false, exitCode=0, stdout="RUNTIME_STATUS" }
+        """
+        with tempfile.TemporaryDirectory(prefix="wio-behavior-") as temporary:
+            script = Path(temporary) / "case.luau"
+            script.write_text(textwrap.dedent(self.service_prefix()) + read("service.luau")
+                + textwrap.dedent(complete) + textwrap.dedent(checks))
+            result = subprocess.run([str(runtime), str(script)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_startup_status_timeouts_preserve_readiness_and_replay_in_both_launch_paths(self) -> None:
+        for systemd in (False, True):
+            for timeout in (
+                '{timedOut=true, exitCode=-1}',
+                '{timedOut=false, exitCode=75}',
+                '{timedOut=false, exitCode=1, stderr="error: timed out after 5s"}',
+                '{timedOut=false, exitCode=3}',
+            ):
+                with self.subTest(systemd=systemd, timeout=timeout):
+                    self.run_service_case(r"""
+                        complete(healthy)
+                        SYSTEMD_SETUP
+                        onIpc("next", nil)
+                        complete({timedOut=false, exitCode=3})
+                        if systemctlAvailable then
+                            assert(calls[#calls].command:find("LoadState", 1, true))
+                            complete({timedOut=false, exitCode=0, stdout="loaded"})
+                            assert(calls[#calls].command == "systemctl --user start wall-in-one.service")
+                            complete({timedOut=false, exitCode=0})
+                        else
+                            assert(calls[#calls].command:find("--service-startup-prepare", 1, true))
+                            complete({timedOut=false, exitCode=0})
+                            complete({timedOut=false, exitCode=0})
+                        end
+                        assert(calls[#calls].command:find("ctl status", 1, true))
+                        assert(calls[#calls].timeout >= 6000)
+                        now = 102
+                        complete(TIMEOUT_RESULT)
+                        assert(states[STATE_KEY].launching, "first timeout cancelled startup")
+                        assert(states[STATE_KEY].error == "")
+                        update()
+                        complete(healthy)
+                        assert(states[STATE_KEY].running and not states[STATE_KEY].launching)
+                        assert(calls[#calls].command:find("ctl next", 1, true), "lost pending Next")
+                        complete({timedOut=false, exitCode=0})
+                        complete(healthy)
+                        local nextCount = 0
+                        for _, call in ipairs(calls) do
+                            if call.command:find("ctl next", 1, true) then nextCount += 1 end
+                        end
+                        assert(nextCount == 2, "Next must be retried only after confirmed absence")
+                        for _, message in ipairs(logs) do
+                            assert(not message:find("launch_failed", 1, true))
+                        end
+                    """.replace("SYSTEMD_SETUP", 'configuredBinary=""; systemctlAvailable=true' if systemd else "")
+                        .replace("TIMEOUT_RESULT", timeout))
+
+    def test_startup_deadline_and_preflight_retry_still_fail_closed(self) -> None:
+        self.run_service_case(r"""
+            complete({timedOut=false, exitCode=3})
+            local count = #calls
+            complete({timedOut=false, exitCode=75, stderr="migration must retry"})
+            assert(#calls == count and not states[STATE_KEY].launching)
+            assert(states[STATE_KEY].error == "migration must retry")
+            onIpc("launch", nil)
+            complete({timedOut=false, exitCode=0})
+            complete({timedOut=false, exitCode=0})
+            now = 161
+            complete({timedOut=false, exitCode=75})
+            assert(not states[STATE_KEY].launching)
+            assert(states[STATE_KEY].error == "state.launch_failed")
+        """)
+
+    def test_busy_status_keeps_last_good_menu_but_real_errors_do_not(self) -> None:
+        for result in (
+            '{timedOut=true, exitCode=-1}',
+            '{timedOut=false, exitCode=75}',
+            '{timedOut=false, exitCode=1, stderr="error: timed out after 5s"}',
+        ):
+            with self.subTest(result=result):
+                self.run_service_case(r"""
+                    complete(healthy)
+                    update()
+                    complete(TIMEOUT_RESULT)
+                    assert(states[STATE_KEY].running and states[STATE_KEY].stale)
+                    assert(#states[MENU_KEY].playlists == 2)
+                    update()
+                    complete(healthy)
+                    assert(states[STATE_KEY].running and not states[STATE_KEY].stale)
+                    update()
+                    complete({timedOut=false, exitCode=1, stderr="invalid runtime status"})
+                    assert(not states[STATE_KEY].running and #states[MENU_KEY].playlists == 0)
+                    update()
+                    complete(healthy)
+                    update()
+                    complete({timedOut=false, exitCode=3})
+                    assert(not states[STATE_KEY].running and not states[STATE_KEY].stale)
+                    assert(#states[MENU_KEY].playlists == 0)
+                """.replace("TIMEOUT_RESULT", result))
+
+    def test_a_timed_out_action_is_never_replayed_or_mistaken_for_status(self) -> None:
+        self.run_service_case(r"""
+            complete(healthy)
+            onIpc("next", nil)
+            complete({timedOut=false, exitCode=1, stderr="error: timed out after 5s"})
+            assert(#calls == 2 and not states[STATE_KEY].stale)
+            update()
+            complete(healthy)
+            assert(#calls == 3, "unknown-outcome action was replayed")
+        """)
+
+    def test_health_persistence_errors_back_off_without_clearing_runtime_state(self) -> None:
+        for failure in (
+            '{timedOut=false, exitCode=1, stderr="no matching authoring"}',
+            '{timedOut=false, exitCode=75, stderr="migration must retry"}',
+            '{timedOut=true, exitCode=-1}',
+        ):
+            with self.subTest(failure=failure):
+                self.run_service_case(r"""
+                    fixtureStatus.taboo_entries = {{durable=false, playlist_id="day", entry_id="one", observed_config_epoch=1}}
+                    complete(healthy)
+                    assert(calls[#calls].command:find("--sync-runtime-health", 1, true))
+                    complete(FAILURE)
+                    assert(states[STATE_KEY].running and not states[STATE_KEY].stale)
+                    assert(#states[MENU_KEY].playlists == 2)
+                    local count = #calls
+                    for _ = 1, 3 do
+                        now += 15
+                        update()
+                        complete(healthy)
+                        count += 1
+                        assert(#calls == count, "unchanged health failure retried too soon")
+                    end
+                    assert(#logs == 1, "same health warning was logged more than once")
+                    now += 301
+                    update()
+                    complete(healthy)
+                    assert(calls[#calls].command:find("--sync-runtime-health", 1, true))
+                    complete(FAILURE)
+                    assert(#logs == 1)
+                    fixtureStatus.taboo_entries[1].observed_config_epoch = 2
+                    update()
+                    complete(healthy)
+                    assert(calls[#calls].command:find("--sync-runtime-health", 1, true), "new generation was suppressed")
+                    fixtureStatus.taboo_entries = {{durable=true}}
+                    complete({timedOut=false, exitCode=0})
+                    complete(healthy)
+                    assert(states[STATE_KEY].running and #states[MENU_KEY].playlists == 2)
+                """.replace("FAILURE", failure))
+
+    def test_health_spawn_failure_and_order_independent_retry_key(self) -> None:
+        self.run_service_case(r"""
+            local originalRun = noctalia.runAsync
+            noctalia.runAsync = function(command, callback, timeout)
+                if command:find("--sync-runtime-health", 1, true) then return false end
+                return originalRun(command, callback, timeout)
+            end
+            local a = {durable=false, playlist_id="day", entry_id="one", observed_config_epoch=1}
+            local b = {durable=false, playlist_id="day", entry_id="two", observed_config_epoch=1}
+            fixtureStatus.taboo_entries = {a, b}
+            fixtureStatus.config_generation = "generation-one"
+            fixtureStatus.runtime_instance = "instance-one"
+            complete(healthy)
+            assert(states[STATE_KEY].running and #states[MENU_KEY].playlists == 2)
+            assert(#logs == 1 and not busy)
+            noctalia.runAsync = originalRun
+            fixtureStatus.taboo_entries = {b, a}
+            now += 15
+            update()
+            complete(healthy)
+            assert(#calls == 2, "report ordering restarted health backoff")
+            for _, key in ipairs({"config_generation", "runtime_instance"}) do
+                fixtureStatus[key] = "changed"
+                update()
+                complete(healthy)
+                assert(calls[#calls].command:find("--sync-runtime-health", 1, true))
+                complete({exitCode=75, stderr="retry later"})
+                assert(states[STATE_KEY].running)
+            end
+        """)
+
     def test_rendered_control_errors_and_battery_restrictions(self) -> None:
         runtime = discover_tool("luau")
         if runtime is None:
@@ -702,6 +895,15 @@ class ThinClientContract(unittest.TestCase):
             watches.wall_in_one_state(current)
             watches.wall_in_one_menu(states.wall_in_one_menu)
             assert(not hasText(tree, "panel.power.unavailable"))
+            current.stale = true
+            watches.wall_in_one_state(current)
+            watches.wall_in_one_menu(states.wall_in_one_menu)
+            assert(hasText(tree, "state.status_unavailable"))
+            assert(hasText(tree, "state.last_known"))
+            current.running = false
+            states.wall_in_one_state = current
+            onOpen(nil)
+            assert(states.wall_in_one_command.verb == "status", "unknown status must not start another runtime")
         """
         widget_checks = r"""
             assert(string.find(tooltipText, "choose a library root", 1, true))
@@ -715,6 +917,10 @@ class ThinClientContract(unittest.TestCase):
             current.animationInhibitionReason = "power-unavailable"
             watches.wall_in_one_state(current)
             assert(string.find(tooltipText, "panel.power.unavailable", 1, true))
+            current.stale = true
+            watches.wall_in_one_state(current)
+            assert(string.find(tooltipText, "state.status_unavailable", 1, true))
+            assert(not string.find(tooltipText, "widget.playing", 1, true))
         """
         with tempfile.TemporaryDirectory(prefix="wall-in-one-render-") as temporary:
             for entry, checks in (("panel.luau", panel_checks), ("widget.luau", widget_checks)):

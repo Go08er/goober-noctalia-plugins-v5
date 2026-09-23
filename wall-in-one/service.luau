@@ -17,7 +17,9 @@ local EXIT_NOT_RUNNING = 3
 -- handovers finish. Three-display operations can legitimately exceed 8s;
 -- Noctalia clamps callback timeouts at 60s and the app's ctl client uses 45s.
 local CALL_TIMEOUT_MS = 55000
-local STARTUP_CALL_TIMEOUT_MS = 1500
+local STARTUP_CALL_TIMEOUT_MS = 6000
+local EXIT_STATUS_UNAVAILABLE = 75
+local HEALTH_RETRY_SECONDS = 300
 local SYSTEMD_QUERY_TIMEOUT_MS = 3000
 local STARTUP_PREPARE_TIMEOUT_MS = 55000
 local STARTUP_POLL_MS = 250
@@ -51,6 +53,10 @@ local lastLogged = ""
 local launching = false
 local startupDeadline = 0
 local pendingAfterLaunch = nil
+local lastPublished = nil
+local healthKey = ""
+local healthAttemptAt = 0
+local healthWarning = ""
 local invoke, pump, applyInterval, launchDirect, enqueue
 
 -- A widget can load before this service does. Clear the handshake so early
@@ -80,11 +86,12 @@ end
 
 local function publish(state)
     sequence += 1
-    noctalia.state.set(STATE_KEY, {
+    local published = {
         protocol = PROTOCOL,
         sequence = sequence,
         running = state.running == true,
         launching = state.launching == true,
+        stale = state.stale == true,
         showing = tostring(state.showing or ""),
         playlist = tostring(state.playlist or ""),
         source = tostring(state.source or ""),
@@ -106,7 +113,9 @@ local function publish(state)
         animationInhibitionReason = tostring(state.animationInhibitionReason or ""),
         runtimeError = tostring(state.runtimeError or ""),
         error = tostring(state.error or ""),
-    })
+    }
+    lastPublished = published
+    noctalia.state.set(STATE_KEY, published)
 end
 
 local function publishMenu(snapshot, errorMessage)
@@ -134,9 +143,53 @@ local function publishStopped(message)
         lastLogged = ""
     end
     publish({ error = detail })
-    -- Inventory is usable only alongside a successful status snapshot. Clear
-    -- it for every stopped/error path, including preflight and timeout errors.
+    -- Clear inventory for actual absence and errors. Read-only status timeouts
+    -- instead use publishUnavailable to retain an explicitly stale snapshot.
     publishMenu(nil, detail)
+end
+
+local function publishUnavailable()
+    local state = table.clone(lastPublished or {})
+    state.stale = true
+    state.error = ""
+    publish(state)
+    -- Keep the last good inventory, but identify it as stale in both views.
+end
+
+local function syncHealthIfNeeded(snapshot)
+    local reports = {}
+    if type(snapshot.taboo_entries) == "table" then
+        for _, report in ipairs(snapshot.taboo_entries) do
+            if type(report) == "table" and report.durable ~= true then
+                local fields = {}
+                for _, value in ipairs({ report.playlist_id or "", report.entry_id or "", report.observed_config_epoch or "" }) do
+                    local text = tostring(value)
+                    table.insert(fields, tostring(#text) .. ":" .. text)
+                end
+                table.insert(reports, table.concat(fields))
+            end
+        end
+    end
+    table.sort(reports)
+    local key = if #reports == 0 then "" else tostring(snapshot.runtime_instance or "")
+        .. ":" .. tostring(snapshot.config_generation or "") .. ":" .. table.concat(reports, "|")
+    if key ~= healthKey then
+        healthKey, healthAttemptAt, healthWarning = key, 0, ""
+    end
+    if key ~= "" and (healthAttemptAt == 0 or os.time() - healthAttemptAt >= HEALTH_RETRY_SECONDS) then
+        healthAttemptAt = os.time()
+        enqueue("health-sync", nil, false)
+    end
+end
+
+local function healthFailure(result)
+    local detail = if result.timedOut then noctalia.tr("state.timed_out")
+        else noctalia.string.trim(tostring(result.stderr or ""))
+    if detail == "" then detail = noctalia.tr("state.failed") end
+    if detail ~= healthWarning then
+        healthWarning = detail
+        noctalia.log("wall-in-one: health persistence: " .. detail)
+    end
 end
 
 -- Rust returns one fully self-consistent JSON snapshot. Publishing its
@@ -191,14 +244,7 @@ local function publishStatus(line)
     -- The packaged systemd timer owns this hand-off normally. Direct runtime
     -- fallback installations have no timer, so consume only visible
     -- session-only findings here. Durable entries must not trigger a loop.
-    if type(snapshot.taboo_entries) == "table" then
-        for _, report in ipairs(snapshot.taboo_entries) do
-            if type(report) == "table" and report.durable ~= true then
-                enqueue("health-sync", nil, false)
-                break
-            end
-        end
-    end
+    syncHealthIfNeeded(snapshot)
     return true
 end
 
@@ -357,7 +403,32 @@ local function beginLaunch(replay)
 end
 
 local function finish(job, result)
-    if result.timedOut then
+    -- Exit 75 also represents migration retry. Only a status request may
+    -- interpret it as unavailability; startupStep must continue to fail closed.
+    if job.verb == "health-sync" then
+        if result.timedOut or result.exitCode ~= 0 then
+            healthFailure(result)
+        else
+            healthWarning = ""
+            enqueue("status", nil, false)
+        end
+        return
+    end
+    -- Compatibility with app 0.1.3: its status deadline used generic exit 1.
+    -- Remove only when the minimum supported app has typed status exit 75.
+    local legacyStatusTimeout = result.exitCode == 1
+        and string.sub(tostring(result.stderr or ""), 1, #"error: timed out after ") == "error: timed out after "
+    if job.verb == "status" and (result.timedOut or result.exitCode == EXIT_STATUS_UNAVAILABLE or legacyStatusTimeout) then
+        if launching then
+            if os.time() >= startupDeadline then
+                stopLaunch(noctalia.tr("state.launch_failed"))
+            else
+                publish({ launching = true })
+            end
+        else
+            publishUnavailable()
+        end
+    elseif result.timedOut then
         if launching then
             stopLaunch(noctalia.tr("state.launch_failed"))
         else
@@ -442,7 +513,11 @@ invoke = function(job)
     end, if launching and job.verb == "status" then STARTUP_CALL_TIMEOUT_MS else CALL_TIMEOUT_MS)
     if not started then
         busy = false
-        publishStopped(noctalia.tr("state.failed"))
+        if job.verb == "health-sync" then
+            healthFailure({ stderr = noctalia.tr("state.failed") })
+        else
+            publishStopped(noctalia.tr("state.failed"))
+        end
     end
 end
 

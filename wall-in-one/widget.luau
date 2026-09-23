@@ -39,6 +39,9 @@ local function shorten(value)
 end
 
 local function presentation()
+    if type(state) == "table" and state.stale == true then
+        return glyphCfg("glyph", "library-photo"), "on_surface_variant"
+    end
     if not running() then
         return glyphCfg("stopped_glyph", "photo-off"), widgetCfg("stopped_color")
     end
@@ -46,6 +49,10 @@ local function presentation()
 end
 
 local function tooltip()
+    if type(state) == "table" and state.stale == true then
+        return noctalia.tr("widget.title") .. "\n" .. noctalia.tr("state.status_unavailable")
+            .. (if running() then "\n" .. noctalia.tr("state.last_known") .. ": " .. tostring(state.showing or "") else "")
+    end
     if not running() then
         if starting() then
             return noctalia.tr("widget.title") .. "\n" .. noctalia.tr("widget.starting")
@@ -87,7 +94,9 @@ end
 local function render()
     local glyph, color = presentation()
 
-    local text = if running()
+    local text = if type(state) == "table" and state.stale == true
+        then noctalia.tr("widget.status_unavailable")
+        elseif running()
         then shorten(tostring(state.showing or ""))
         elseif starting()
         then noctalia.tr("widget.starting")

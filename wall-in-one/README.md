@@ -53,13 +53,17 @@ runtime `playlists`, `schedule`, or `displays` listing verbs and does not need
 the GTK app to be running. Display assignments are read-only in the bar because
 they are configuration, not runtime state.
 
-The plugin starts the service when its singleton entry loads. If the packaged
+The plugin starts the service when its singleton entry loads. Without an
+explicit executable override, if the packaged
 systemd user unit is available, `systemctl --user start wall-in-one.service`
 owns its lifetime. When the unit is absent, the plugin runs
 `wall-in-one --service-startup-prepare` and `wall-in-one-service --check-config`
 before starting `wall-in-one-service --wait-for-config` directly. A failed,
 masked, or still-starting unit is reported; it does not trigger a competing
-detached process. The older Python
+detached process. An explicit executable override deliberately uses its sibling
+runtime directly, even if a unit is installed; it does not start a potentially
+different installed package. That detached runtime is not supervised by systemd.
+The older Python
 `wall-in-one --service` compatibility process cannot provide the atomic
 inventory and is no longer launched by this plugin. The window is only
 configuration: launching plain `wall-in-one` later attaches to the existing
@@ -70,13 +74,20 @@ against a dead socket costs one failed `connect(2)`. Captured calls remain
 serialized and carry a 55-second callback timeout. This covers the app's
 45-second synchronous runtime-action bound (including a three-display helper
 handover) while staying below Noctalia's 60-second callback clamp. Startup
-readiness polling runs at 250 ms for at most 60 seconds and never becomes the
-resting poll rate.
+readiness polling runs at 250 ms for at most 60 seconds, with serialized
+six-second status callbacks, and never becomes the resting poll rate. A status
+timeout during startup keeps waiting within that deadline; a migration or
+validation failure still stops startup. Outside startup, an unavailable status
+is shown explicitly with last-known information until a new reply arrives.
+Timed-out wallpaper changes are not automatically repeated.
 
 Status snapshots must use the app's status schema version 2. A visible
 session-only crash/quarantine report triggers one serialized
 `--sync-runtime-health` hand-off. This is redundant but safe with the packaged
-systemd timer, and provides durable quarantine for the direct-runtime fallback.
+systemd timer, and attempts durable quarantine for the direct-runtime fallback.
+Failed saves are logged without clearing runtime state. Unchanged reports retry
+after five minutes; a changed report set or runtime/configuration generation can
+retry sooner.
 
 ## Requirements
 
@@ -92,11 +103,15 @@ systemd timer, and provides durable quarantine for the direct-runtime fallback.
   before enabling this companion.
 - Noctalia 5 with plugin API 17 or newer.
 
-Companion **v0.1.2** is paired with application **v0.1.3**. That app's
-`flake.lock` selects the committed companion containing these startup and
-battery-display changes. Install the app first, complete its normal restart,
+Companion **v0.1.3** is paired with application **v0.1.4**. That app's
+`flake.lock` selects the committed companion containing startup, battery-display,
+and temporary-status handling fixes. Install the app first, complete its normal restart,
 then enable the matching companion; see the app's
-[update guide](https://github.com/Go08er/wall-in-one/blob/v0.1.3/docs/updating.md).
+[update guide](https://github.com/Go08er/wall-in-one/blob/main/docs/updating.md).
+
+Application v0.1.3 remains compatible: the companion recognizes its older status
+timeout message. Updating both is recommended for the explicit temporary-status
+exit code and the tested pairing.
 
 Application v0.1.2 provides the base startup/health commands but lacks battery
 support and the newer configuration-recovery fixes. Battery control requires

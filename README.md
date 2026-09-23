@@ -14,8 +14,8 @@ catalogs; add it as a custom Git source using one of the methods below.
 
 | Plugin | Version | Status |
 | --- | --- | --- |
-| `goober/hydra-update-examiner` | `0.4.0` | API 15 minimum, streamlined v5 settings |
-| `goober/wall-in-one` | `0.1.2` | **Pre-alpha, in testing.** API 17 minimum; launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
+| `goober/hydra-update-examiner` | `0.4.1` | API 15 minimum, streamlined v5 settings |
+| `goober/wall-in-one` | `0.1.3` | **Pre-alpha, in testing.** API 17 minimum; launcher and thin client for the [Wall-in-One](https://github.com/Go08er/wall-in-one) app, which is also pre-alpha |
 
 ## Repository layout
 
@@ -173,7 +173,7 @@ disable the Git source while developing if you want to avoid that ambiguity.
 
 ### Wall-in-One boundary
 
-Wall-in-One `0.1.2` is a thin client. Every wallpaper capability — library
+Wall-in-One `0.1.3` is a thin client. Every wallpaper capability — library
 scanning, still/video pairing, playlists, providers, palette generation, and
 the video renderer — belongs to the standalone
 [Wall-in-One](https://github.com/Go08er/wall-in-one) GTK4 application. The
@@ -262,8 +262,9 @@ not vendored here while these beta plugin implementations are changing quickly.
 
 This repository is a directly importable custom Git source for native v5
 testing. Hydra Update Examiner is ready for direct testing here.
-Wall-in-One companion `0.1.2` is paired with application `0.1.3`, adding safer
-startup and battery-status display. It is loaded and exercised in the application's disposable
+Wall-in-One companion `0.1.3` is paired with application `0.1.4`, preserving
+startup and battery support while tolerating temporary status delays. It is
+loaded and exercised in the application's disposable
 Noctalia desktop VM, but has no physical-desktop or long-use validation here;
 treat it as a beta test target rather than unattended daily-driver software.
 None of the plugins has been submitted to, accepted into, or registered with

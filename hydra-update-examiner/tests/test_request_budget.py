@@ -62,8 +62,17 @@ output=""
 headers=""
 write_out=""
 url=""
+max_bytes=0
+proto=""
+proto_redir=""
 while (($# > 0)); do
   case "$1" in
+    --proto)
+      proto="$2"; shift 2 ;;
+    --proto-redir)
+      proto_redir="$2"; shift 2 ;;
+    --max-filesize)
+      max_bytes="$2"; shift 2 ;;
     -H|--header)
       accept="${2:-}"
       shift 2
@@ -107,6 +116,9 @@ while (($# > 0)); do
   esac
 done
 
+if [[ "${HYDRA_FAKE_REQUIRE_BOUNDS:-0}" == 1 ]]; then
+  [[ "$proto" == '=https' && "$proto_redir" == '=https' && "$max_bytes" -gt 0 ]] || exit 99
+fi
 printf '%s\t%s\t%s\n' "$method" "$accept" "$url" >> "$HYDRA_FAKE_REQUEST_LOG"
 if [[ -n "${HYDRA_FAKE_DELAY:-}" ]]; then
   sleep "$HYDRA_FAKE_DELAY"
@@ -165,6 +177,9 @@ case "$url" in
 esac
 if [[ "$status" == "404" ]]; then
   body_file=""
+fi
+if [[ -n "$body_file" && "$max_bytes" -gt 0 ]] && (( $(wc -c < "$body_file") > max_bytes )); then
+  exit 63
 fi
 
 header_text="HTTP/1.1 $status Fixture\r\nContent-Type: text/plain\r\n"
@@ -434,6 +449,12 @@ class RequestBudgetTests(unittest.TestCase):
             )
         }
         projected["state"] = payload.get("presentationState", payload.get("state"))
+        # Keep all readiness, detail, gate and blocker facts. Only the obsolete
+        # gesture footer is outside this comparison; it is not status data.
+        projected["tooltip"] = "\n".join(
+            line for line in str(payload.get("tooltip", "")).splitlines()
+            if line and line != "Left click refreshes. Right click opens Hydra."
+        )
         return projected
 
     @staticmethod
@@ -459,7 +480,7 @@ class RequestBudgetTests(unittest.TestCase):
         self.assertTrue(self.fixture.cache_file.is_file())
         self.assertLessEqual(self.fixture.cache_file.stat().st_size, 65_536)
         cache = json.loads(self.fixture.cache_file.read_text(encoding="utf-8"))
-        self.assertEqual(cache["schema"], 2)
+        self.assertEqual(cache["schema"], 3)
         self.assertEqual(set(cache), {"schema", "channelKey", "entry"})
         identity_request = self.fixture.requests()[1]
         self.assertEqual(identity_request[0], "GET")
@@ -762,7 +783,140 @@ class RequestBudgetTests(unittest.TestCase):
         urls = [row[2] for row in self.fixture.requests()]
         self.assertEqual(again["state"], "paused")
         self.assertNotIn(f"https://hydra.nixos.org/eval/{EVAL_ID}/job/tested", urls)
-        self.assertNotIn("https://hydra.nixos.org/build/9191/constituents", urls)
+        self.assertIn("https://hydra.nixos.org/build/9191/constituents", urls)
+        cache = json.loads(self.fixture.cache_file.read_text())
+        self.assertEqual(cache["entry"]["gate"]["total"], 10)
+
+    def test_tooltip_does_not_claim_the_wrong_click_binding(self) -> None:
+        payload, _ = self.fixture.run()
+        self.assertNotIn("Right click opens Hydra", payload["tooltip"])
+
+    def test_all_requests_are_https_bounded_and_oversized_body_preserves_cache(self) -> None:
+        env = self.fixture.environment(HYDRA_FAKE_REQUIRE_BOUNDS="1")
+        known, _ = self.fixture.run(env=env)
+        self.assertEqual(known["state"], "running")
+        self.assertEqual(len(self.fixture.requests()), 5)
+        original = self.fixture.cache_file.read_bytes()
+        (self.fixture.fixture / "constituents.json").write_text(
+            "x" * (self.ttl("MAX_RESPONSE_BYTES") + 1)
+        )
+        payload, _ = self.fixture.run(extra_args=("--force-refresh",), env=env)
+        self.assertEqual(payload["state"], "stale")
+        self.assertIn("Could not refresh blocker constituents", payload["error"])
+        self.assertEqual(self.fixture.cache_file.read_bytes(), original)
+
+    def test_terminal_transition_fetches_final_counts_instead_of_freezing_active_counts(self) -> None:
+        self.fixture.run()
+        self.fixture.set_gate(finished=True)
+        (self.fixture.fixture / "constituents.json").write_text(
+            '[{"finished":true,"buildstatus":0}]'
+        )
+        self.fixture.clear_requests()
+        payload, _ = self.fixture.run(extra_args=("--force-refresh",))
+        self.assertEqual(payload["state"], "paused")
+        gate = json.loads(self.fixture.cache_file.read_text())["entry"]["gate"]
+        self.assertEqual((gate["total"], gate["pending"]), (1, 0))
+        self.assertTrue(any(url.endswith("/constituents") for _, _, url in self.fixture.requests()))
+
+    def test_warm_cache_jq_process_budget(self) -> None:
+        self.fixture.run()
+        real_jq = shutil.which("jq")
+        self.assertIsNotNone(real_jq)
+        counter = self.fixture.bin / "jq-count"
+        wrapper = self.fixture.bin / "jq"
+        wrapper.write_text(
+            f'#!/usr/bin/env bash\nprintf "call\\n" >> "{counter}"\n'
+            f'exec "{real_jq}" "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        self.fixture.clear_requests()
+        payload, _ = self.fixture.run()
+        self.assertIs(payload["stale"], False)
+        self.assertLessEqual(len(counter.read_text().splitlines()), 10)
+        self.assertEqual(self.fixture.requests(), [])
+
+    def test_field_batching_cannot_turn_embedded_nuls_into_status_fields(self) -> None:
+        self.fixture.run()
+        cache = json.loads(self.fixture.cache_file.read_text())
+        cache["entry"]["gate"]["nixname"] = "name\0.candidate.published\0true"
+        self.fixture.cache_file.write_text(json.dumps(cache))
+        for _ in range(2):
+            payload, _ = self.fixture.run()
+            self.assertEqual(payload["state"], "running")
+            self.assertNotEqual(payload["text"], "Launched")
+            self.assertIn("Gate blockers: 0 failed, 4 pending / 10", payload["tooltip"])
+        cache = json.loads(self.fixture.cache_file.read_text())
+        self.assertFalse(cache["entry"]["candidate"]["published"])
+
+    def test_malformed_constituents_preserve_coherent_snapshot(self) -> None:
+        known, _ = self.fixture.run()
+        original = self.fixture.cache_file.read_bytes()
+        for body in ("", "<html>unavailable</html>", "{}", '{"x":{}}',
+                     "[]\n[]", "[null]", "[1]", "[{}]",
+                     '[{"finished":"yes","buildstatus":0}]',
+                     '[{"finished":true}]',
+                     '[{"finished":1,"buildstatus":-1}]',
+                     '[{"finished":1,"buildstatus":0.5}]',
+                     '[{"finished":1,"buildstatus":1e30}]',
+                     '[{"finished":false,"buildstatus":"ok"}]'):
+            with self.subTest(body=body):
+                (self.fixture.fixture / "constituents.json").write_text(body)
+                payload, _ = self.fixture.run(extra_args=("--force-refresh",))
+                self.assertEqual(payload["state"], "stale")
+                self.assertEqual(payload["text"], known["text"])
+                self.assertIn("constituents", payload["error"])
+                self.assertEqual(self.fixture.cache_file.read_bytes(), original)
+                self.fixture.cache_file.unlink()
+                cold, _ = self.fixture.run()
+                self.assertEqual(cold["state"], "error")
+                self.fixture.cache_file.write_bytes(original)
+
+    def test_terminal_missing_constituents_back_off_cap_and_allow_manual_repair(self) -> None:
+        self.fixture.set_gate(finished=True)
+        data = self.fixture.fixture / "constituents.json"
+        valid = data.read_text()
+        data.write_text('{}')
+        interval = self.ttl("HOT_CONSTITUENTS_TTL_SECONDS")
+        cap = self.ttl("TERMINAL_CONSTITUENTS_MAX_ATTEMPTS")
+        for attempt in range(cap + 1):
+            self.fixture.set_now(START_TIME + attempt * interval)
+            self.fixture.clear_requests()
+            payload, _ = self.fixture.run()
+            self.assertEqual(payload["state"], "paused")
+            cache = json.loads(self.fixture.cache_file.read_text())["entry"]["gate"]
+            self.assertEqual(cache.get("constituentsCheckedAt", 0), 0)
+            self.assertNotIn("total", cache)
+            self.assertEqual(cache["constituentsAttempts"], min(attempt + 1, cap))
+            requested = any(url.endswith("/constituents") for _, _, url in self.fixture.requests())
+            self.assertEqual(requested, attempt < cap)
+            self.fixture.clear_requests()
+            self.fixture.run()
+            self.assertFalse(any(url.endswith("/constituents") for _, _, url in self.fixture.requests()))
+        data.write_text(valid)
+        payload, _ = self.fixture.run(extra_args=("--force-refresh",))
+        self.assertEqual(payload["state"], "paused")
+        cache = json.loads(self.fixture.cache_file.read_text())["entry"]["gate"]
+        self.assertEqual(cache["total"], 10)
+        self.assertGreater(cache["constituentsCheckedAt"], 0)
+        self.fixture.clear_requests()
+        self.fixture.run(extra_args=("--force-refresh",))
+        self.assertFalse(any(url.endswith("/constituents") for _, _, url in self.fixture.requests()))
+
+    def test_previous_cache_schema_is_refetched_without_reusing_poisoned_counts(self) -> None:
+        self.fixture.set_gate(finished=True)
+        self.fixture.run()
+        old = json.loads(self.fixture.cache_file.read_text())
+        old["schema"] = 2
+        old["entry"]["gate"]["total"] = 1
+        self.fixture.cache_file.write_text(json.dumps(old))
+        offline, _ = self.fixture.run(env=self.fixture.environment(HYDRA_FAKE_FAIL_PATTERN="https://"))
+        self.assertEqual(offline["state"], "error")
+        self.assertEqual(json.loads(self.fixture.cache_file.read_text()), old)
+        repaired, _ = self.fixture.run()
+        self.assertEqual(repaired["state"], "paused")
+        new = json.loads(self.fixture.cache_file.read_text())
+        self.assertEqual(new["schema"], 3)
+        self.assertEqual(new["entry"]["gate"]["total"], 10)
 
     def test_boolean_finished_values_follow_hydra_openapi_shape(self) -> None:
         gate = {
@@ -822,7 +976,7 @@ class RequestBudgetTests(unittest.TestCase):
                 replacement = json.loads(
                     self.fixture.cache_file.read_text(encoding="utf-8")
                 )
-                self.assertEqual(replacement["schema"], 2)
+                self.assertEqual(replacement["schema"], 3)
                 self.assertLessEqual(self.fixture.cache_file.stat().st_size, 65_536)
                 self.assertEqual(
                     list(self.fixture.cache_file.parent.glob("state.json.tmp.*")), []

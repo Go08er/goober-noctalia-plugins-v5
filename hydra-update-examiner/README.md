@@ -242,7 +242,8 @@ not raise that minimum requirement. The port also needs these commands
 on `PATH`:
 
 - `bash`
-- `curl`
+- `curl` 8.4 or newer (needed to enforce the
+  [response limit while streaming](https://curl.se/docs/manpage.html#--max-filesize))
 - `jq`
 - `perl`
 - `grep`
@@ -257,7 +258,7 @@ on `PATH`:
 - `mv`
 - `rm`
 - `timeout`
-- `xdg-open` for the right-click action
+- `xdg-open` for the panel's Open Hydra action
 
 On typical Linux systems, `head`, `tr`, `date`, `cat`, `mkdir`, `mv`,
 and `rm` are supplied by GNU coreutils. The `flock` command is supplied by
@@ -298,11 +299,18 @@ deadline. Temporary Hydra outages keep the last known result visible with a
 stale age when a cached result exists, or produce an error before the first
 successful observation.
 
+Requests and redirects are restricted to HTTPS, with a five-second connection
+timeout and a 16 MiB response ceiling. Oversized or malformed responses use the
+same failure handling as an unavailable endpoint.
+
 The fixed-slot cache is
 `$XDG_CACHE_HOME/hydra-update-examiner/state.json`, falling back to
-`~/.cache/hydra-update-examiner/state.json`. Schema 2 has a 64 KiB ceiling on
+`~/.cache/hydra-update-examiner/state.json`. Schema 3 has a 64 KiB ceiling on
 both reads and writes and stores only the current configured channel. It is safe
 to delete this file while troubleshooting; the helper recreates it atomically.
+Older cache schemas are discarded once to remove potentially incorrect final
+blocker counts. If the first fetch after upgrading is offline, HUE shows an
+error until a new snapshot is available; plugin settings are not reset.
 
 Discovery is cached for the configured channel. Normal TTLs are six hours for
 the channel revision, one hour for candidate identity, one minute for eval
@@ -315,6 +323,12 @@ every five minutes. Conditional validators are not assumed for Hydra's dynamic
 responses. Stable aliases normally keep their resolved release indefinitely;
 if the expected May/November release does not exist yet, the cached fallback is
 marked provisional and discovery retries once per day until it appears.
+
+A finished gate keeps valid final blocker counts without polling them again.
+If those optional counts cannot be fetched or validated, known gate status
+remains visible with unknown counts. Automatic attempts are spaced at least
+fifteen minutes apart and capped at three per gate; manual refresh can retry
+missing counts after that cap.
 
 ## Development note
 

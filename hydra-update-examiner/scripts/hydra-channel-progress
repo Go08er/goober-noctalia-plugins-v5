@@ -4,8 +4,9 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-readonly CACHE_SCHEMA=2
+readonly CACHE_SCHEMA=3
 readonly MAX_CACHE_BYTES=65536
+readonly MAX_RESPONSE_BYTES=16777216
 # These lifetimes reflect the endpoints' actual volatility: channel revisions
 # roll only around publication, candidate ids change less often than evaluation
 # counts, and gate/constituent data sits between those two rates.
@@ -18,6 +19,7 @@ readonly GATE_TTL_SECONDS=7200
 readonly HOT_GATE_TTL_SECONDS=300
 readonly CONSTITUENTS_TTL_SECONDS=21600
 readonly HOT_CONSTITUENTS_TTL_SECONDS=900
+readonly TERMINAL_CONSTITUENTS_MAX_ATTEMPTS=3
 readonly PROVISIONAL_DISCOVERY_TTL_SECONDS=86400
 
 base_url="https://hydra.nixos.org"
@@ -56,6 +58,8 @@ refresh_error=""
 cache_tmp=""
 force_refresh=0
 gate_changed=0
+declare -A entry_fields=()
+entry_fields_source=""
 
 usage() {
   cat <<'EOF'
@@ -223,7 +227,8 @@ fetch_url() {
   local accept="$2"
   local url="$3"
   local body
-  local -a args=(-fsSL)
+  local -a args=(-fsSL --proto '=https' --proto-redir '=https'
+    --connect-timeout 5 --max-filesize "$MAX_RESPONSE_BYTES")
 
   if [[ -n "$accept" ]]; then
     args+=(-H "Accept: $accept")
@@ -243,7 +248,8 @@ fetch_optional_url() {
   local accept="$2"
   local url="$3"
   local response status body
-  local -a args=(-sSL -w $'\n%{http_code}')
+  local -a args=(-sSL -w $'\n%{http_code}' --proto '=https' --proto-redir '=https'
+    --connect-timeout 5 --max-filesize "$MAX_RESPONSE_BYTES")
 
   if [[ -n "$accept" ]]; then
     args+=(-H "Accept: $accept")
@@ -523,11 +529,12 @@ resolve_stable_alias_by_date() {
 }
 
 resolve_channel() {
+  load_entry_fields
   local cached_configured cached_resolved cached_provisional cached_checked
   local expected_channel="" discovery_provisional=false small_suffix=""
-  cached_configured="$(jq -r '.discovery.configured // empty' <<< "$entry_json" 2>/dev/null || true)"
-  cached_resolved="$(jq -r '.discovery.resolvedChannel // empty' <<< "$entry_json" 2>/dev/null || true)"
-  cached_provisional="$(jq -r '.discovery.provisional // false' <<< "$entry_json" 2>/dev/null || true)"
+  cached_configured="$(entry_string '.discovery.configured')"
+  cached_resolved="$(entry_string '.discovery.resolvedChannel')"
+  cached_provisional="$(entry_string '.discovery.provisional')"
   cached_checked="$(entry_number '.discovery.checkedAt')"
   if [[ "$cached_configured" == "$configured_channel" && -n "$cached_resolved" ]]; then
     # At the start of a May/November release slot the new channel may not yet
@@ -536,12 +543,12 @@ resolve_channel() {
     if [[ "$cached_provisional" != "true" ]] \
       || ! age_is_due "$cached_checked" "$PROVISIONAL_DISCOVERY_TTL_SECONDS"; then
       channel="$cached_resolved"
-      project="$(jq -r '.discovery.project' <<< "$entry_json")"
-      jobset="$(jq -r '.discovery.jobset' <<< "$entry_json")"
-      gate_job="$(jq -r '.discovery.gateJob' <<< "$entry_json")"
-      gate_label="$(jq -r '.discovery.gateLabel' <<< "$entry_json")"
-      channel_rev_url="$(jq -r '.discovery.channelRevUrl' <<< "$entry_json")"
-      evals_url="$(jq -r '.discovery.evalsUrl' <<< "$entry_json")"
+      project="$(entry_string '.discovery.project')"
+      jobset="$(entry_string '.discovery.jobset')"
+      gate_job="$(entry_string '.discovery.gateJob')"
+      gate_label="$(entry_string '.discovery.gateLabel')"
+      channel_rev_url="$(entry_string '.discovery.channelRevUrl')"
+      evals_url="$(entry_string '.discovery.evalsUrl')"
       return 0
     fi
   fi
@@ -565,12 +572,12 @@ resolve_channel() {
       # A provisional fallback remains usable during a discovery outage. Keep
       # its old checkedAt so the next invocation retries instead of pinning it.
       channel="$cached_resolved"
-      project="$(jq -r '.discovery.project' <<< "$entry_json")"
-      jobset="$(jq -r '.discovery.jobset' <<< "$entry_json")"
-      gate_job="$(jq -r '.discovery.gateJob' <<< "$entry_json")"
-      gate_label="$(jq -r '.discovery.gateLabel' <<< "$entry_json")"
-      channel_rev_url="$(jq -r '.discovery.channelRevUrl' <<< "$entry_json")"
-      evals_url="$(jq -r '.discovery.evalsUrl' <<< "$entry_json")"
+      project="$(entry_string '.discovery.project')"
+      jobset="$(entry_string '.discovery.jobset')"
+      gate_job="$(entry_string '.discovery.gateJob')"
+      gate_label="$(entry_string '.discovery.gateLabel')"
+      channel_rev_url="$(entry_string '.discovery.channelRevUrl')"
+      evals_url="$(entry_string '.discovery.evalsUrl')"
       return 0
     fi
     fail_json "Could not resolve the current stable NixOS channel from channels.nixos.org."
@@ -638,11 +645,30 @@ resolve_channel() {
     }')"
 }
 
+# Decode one snapshot in the parent shell, not one jq process per field. NUL
+# delimiters preserve empty strings, whitespace and shell metacharacters. Bash
+# cannot store NULs, so remove embedded ones before framing, not after reading.
+# Data is never evaluated as shell code. Call at each reader-stage boundary so an
+# updated or restored snapshot cannot leave stale field values behind.
+load_entry_fields() {
+  [[ "$entry_fields_source" == "$entry_json" ]] && return 0
+  local key value
+  entry_fields=()
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    entry_fields["$key"]="$value"
+  done < <(jq -j '
+    paths(type == "number" or type == "string" or type == "boolean") as $p
+    | ("." + ($p | map(tostring) | join(".")) | gsub("\u0000"; "")), "\u0000",
+      (getpath($p) | tostring | gsub("\u0000"; "")), "\u0000"
+  ' <<< "$entry_json" 2>/dev/null)
+  entry_fields_source="$entry_json"
+}
+
 entry_number() {
   local query="$1"
   local fallback="${2:-0}"
   local value
-  value="$(jq -r "$query // empty" <<< "$entry_json" 2>/dev/null || true)"
+  value="${entry_fields[$query]-}"
   if [[ "$value" =~ ^[0-9]+$ ]]; then
     printf '%s' "$value"
   else
@@ -652,7 +678,7 @@ entry_number() {
 
 entry_string() {
   local query="$1"
-  jq -r "$query // empty" <<< "$entry_json" 2>/dev/null || true
+  printf '%s' "${entry_fields[$query]-}"
 }
 
 gate_data_is_hot() {
@@ -710,6 +736,7 @@ revisions_match() {
 }
 
 refresh_channel_revision() {
+  load_entry_fields
   local checked revision ttl="$CHANNEL_TTL_SECONDS"
   checked="$(entry_number '.channel.checkedAt')"
   revision="$(entry_string '.channel.revision')"
@@ -739,6 +766,7 @@ refresh_channel_revision() {
 }
 
 refresh_candidate_identity() {
+  load_entry_fields
   local checked old_id identity_html new_id revision ttl="$IDENTITY_TTL_SECONDS"
   checked="$(entry_number '.candidate.checkedAt')"
   old_id="$(entry_number '.candidate.id')"
@@ -791,6 +819,7 @@ refresh_candidate_identity() {
 }
 
 refresh_eval_progress() {
+  load_entry_fields
   local id checked published terminal html summary revision
   local q ss sf ns nf ab nj parsed_total
   id="$(entry_number '.candidate.id')"
@@ -853,6 +882,7 @@ refresh_eval_progress() {
 }
 
 mark_published_candidate() {
+  load_entry_fields
   local channel_revision candidate_revision
   channel_revision="$(entry_string '.channel.revision')"
   candidate_revision="$(entry_string '.candidate.revision')"
@@ -864,6 +894,7 @@ mark_published_candidate() {
 }
 
 refresh_gate() {
+  load_entry_fields
   local published terminal checked id json build_id build_finished build_status starttime status nixname gate_rev
   local old_id old_finished old_status fetch_status=0 ttl="$GATE_TTL_SECONDS"
   published="$(entry_string '.candidate.published')"
@@ -961,7 +992,8 @@ refresh_gate() {
     --arg status "$status" \
     --arg nixname "$nixname" \
     --arg gateRevision "$gate_rev" '
-      .gate = ((.gate // {}) + {
+      .gate = ((if .gate.id != $id or .gate.finished != $finished or .gate.status != $status
+        then {} else (.gate // {}) end) + {
         checkedAt: $checkedAt, id: $id, finished: $finished,
         buildStatus: $buildStatus, starttime: $starttime, status: $status,
         nixname: $nixname, gateRevision: $gateRevision,
@@ -973,7 +1005,9 @@ refresh_gate() {
 }
 
 refresh_constituents() {
+  load_entry_fields
   local published terminal gate_id checked json counts failed_count total_count pending_count
+  local attempted attempts
   local ttl="$CONSTITUENTS_TTL_SECONDS"
   published="$(entry_string '.candidate.published')"
   terminal="$(entry_string '.gate.terminal')"
@@ -981,10 +1015,24 @@ refresh_constituents() {
   gate_id="$(entry_number '.gate.id')"
   (( gate_id > 0 )) || return 0
   checked="$(entry_number '.gate.constituentsCheckedAt')"
-  # A terminal gate may enrich its final snapshot once, but it is never polled
-  # again. Failure of that optional enrichment must not discard terminal state.
+  # Finalize only valid data. Missing optional terminal enrichment gets a few
+  # spaced retries; a user refresh may repair it after that budget is exhausted.
   if [[ "$terminal" == "true" && "$checked" -gt 0 ]]; then
     return 0
+  fi
+  if [[ "$terminal" == "true" ]]; then
+    attempted="$(entry_number '.gate.constituentsAttemptedAt')"
+    attempts="$(entry_number '.gate.constituentsAttempts')"
+    if (( force_refresh == 0 )); then
+      (( attempts >= TERMINAL_CONSTITUENTS_MAX_ATTEMPTS )) && return 0
+      age_is_due "$attempted" "$HOT_CONSTITUENTS_TTL_SECONDS" || return 0
+    fi
+    (( attempts < TERMINAL_CONSTITUENTS_MAX_ATTEMPTS )) && attempts=$((attempts + 1))
+    entry_json="$(jq -c --argjson attemptedAt "$now" --argjson attempts "$attempts" '
+      .gate.constituentsAttemptedAt = $attemptedAt
+      | .gate.constituentsAttempts = $attempts
+    ' <<< "$entry_json")"
+    refresh_performed=1
   fi
   if gate_data_is_hot; then
     ttl="$HOT_CONSTITUENTS_TTL_SECONDS"
@@ -995,16 +1043,21 @@ refresh_constituents() {
   fi
   if ! json="$(fetch_url 20 "application/json" "$base_url/build/$gate_id/constituents")"; then
     if [[ "$terminal" == "true" ]]; then
-      entry_json="$(jq -c --argjson checkedAt "$now" '
-        .gate.constituentsCheckedAt = $checkedAt
-      ' <<< "$entry_json")"
-      refresh_performed=1
       return 0
     fi
     refresh_error="Could not refresh blocker constituents for gate build $gate_id."
     return 1
   fi
-  counts="$(jq -r '
+  counts="$(jq -rse '
+    def unsigned_integer:
+      type == "number" and . >= 0 and . <= 9007199254740991 and . == floor;
+    select(length == 1) | .[0] | select(type == "array")
+    | select(all(.[];
+        type == "object"
+        and (.finished == 0 or .finished == 1 or .finished == false or .finished == true)
+        and (((.finished == 0 or .finished == false) and .buildstatus == null)
+          or (.buildstatus | unsigned_integer))))
+    |
     [
       (map(select(((.finished == 1) or (.finished == true)) and (.buildstatus // 0) != 0)) | length),
       length,
@@ -1014,10 +1067,6 @@ refresh_constituents() {
   IFS=$'\t' read -r failed_count total_count pending_count <<< "$counts"
   if ! [[ "$failed_count" =~ ^[0-9]+$ && "$total_count" =~ ^[0-9]+$ && "$pending_count" =~ ^[0-9]+$ ]]; then
     if [[ "$terminal" == "true" ]]; then
-      entry_json="$(jq -c --argjson checkedAt "$now" '
-        .gate.constituentsCheckedAt = $checkedAt
-      ' <<< "$entry_json")"
-      refresh_performed=1
       return 0
     fi
     refresh_error="Could not parse blocker constituents for gate build $gate_id."
@@ -1033,11 +1082,13 @@ refresh_constituents() {
       | .gate.total = $total
       | .gate.pending = $pending
       | .gate.terminal = (.gate.finished == 1)
+      | del(.gate.constituentsAttempts, .gate.constituentsAttemptedAt)
     ' <<< "$entry_json")"
   refresh_performed=1
 }
 
 render_status() {
+  load_entry_fields
   local stale_mode="${1:-0}"
   local failure_message="${2:-}"
   local queued still_succeed still_fail now_succeed now_fail aborted new_jobs
@@ -1157,9 +1208,7 @@ Pending jobs: $pending / $total
 Failed/aborted: $failed
 
 Eval revision: $eval_short_rev
-Channel revision: $channel_short_rev ($channel_revision_status)
-
-Left click refreshes. Right click opens Hydra."
+Channel revision: $channel_short_rev ($channel_revision_status)"
   last_good_tooltip="$tooltip"
   presentation_state="running"
   if (( launched == 1 )); then presentation_state="launched"
@@ -1293,6 +1342,7 @@ read_cache || true
 original_entry_json="$entry_json"
 
 if ! acquire_single_flight; then
+  load_entry_fields
   if cache_has_progress; then
     if age_is_due "$(entry_number '.progress.checkedAt')" "$PROGRESS_TTL_SECONDS"; then
       render_status 1 "Another refresh is already in progress."
@@ -1340,6 +1390,7 @@ fi
 if ! cache_has_progress; then
   handle_refresh_failure "No coherent Hydra progress snapshot was produced."
 fi
+load_entry_fields
 if (( refresh_performed == 1 )) || [[ "$(entry_number '.observedAt')" == "0" ]]; then
   entry_json="$(jq -c --argjson observedAt "$now" '.observedAt = $observedAt' <<< "$entry_json")"
 fi
